@@ -1,13 +1,16 @@
-# FF7 Rebirth Mesh Patcher
+# FFVII Rebirth Mesh Patcher
 
-Repairs Final Fantasy VII Rebirth mods broken by game patch **V1.005**, without
-downgrading the game.
+Repairs **Dresscode** and its costume mods after Final Fantasy VII Rebirth patch
+**V1.005**, without downgrading the game.
 
-V1.005 changed how character models are stored. Any mod containing a custom
-character model breaks — in Dresscode, hovering the costume crashes the game to
-desktop. This rewrites those models into the new format, in place.
+V1.005 changed how character models are stored, which broke Dresscode and every
+costume mod built for it. With Dresscode installed the game fatal-crashes on
+startup — you never reach the menu. If Dresscode is working but a costume is
+not, hovering that costume crashes instead.
 
-Works on **Dresscode itself** and on **costume mods**. Same command for both.
+This rewrites the affected models into the format the current game expects.
+Works on **Dresscode itself** and on **costume mods** — same command for both.
+It is not a general-purpose mod fixer.
 
 ---
 
