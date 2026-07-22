@@ -128,7 +128,8 @@ def other_game_roots():
     Non-Steam places that commonly contain an Oodle DLL.
 
     Epic Games titles ship one about as often as Steam ones, and any installed
-    Unreal Engine keeps a copy under Engine/Binaries/ThirdParty/Oodle.
+    Unreal Engine keeps a copy somewhere under Engine/Binaries (the exact spot
+    varies by version -- see _oodle_in_engine).
     """
     roots = []
     for env in ("PROGRAMFILES", "PROGRAMFILES(X86)", "PROGRAMW6432"):
@@ -147,19 +148,80 @@ def other_game_roots():
     return roots
 
 
+def _oodle_loadable(path):
+    """
+    True only if `path` loads in THIS Python and exports OodleLZ_Decompress.
+
+    This is the arbiter for an ambiguous candidate. Recent Unreal Engine ships
+    an unversioned oo2core.dll with a 32-bit copy sitting right beside the 64-bit
+    one; loading the 32-bit file in 64-bit Python raises OSError, so a load-test
+    is what keeps it from ever being chosen. Versioned oo2core_*_win64.dll names
+    are trusted without this, since the name already pins the architecture.
+    """
+    try:
+        import ctypes
+        return hasattr(ctypes.CDLL(path), "OodleLZ_Decompress")
+    except OSError:
+        return False
+
+
+def _oodle_in_dir(folder):
+    """
+    A usable Oodle DLL sitting directly in `folder`, or None.
+
+    Prefers a versioned oo2core_*_win64.dll (games, older Unreal Engine); falls
+    back to an unversioned oo2core.dll (Unreal Engine 5.6+) only if it actually
+    loads here, which rules out a 32-bit file of the same name.
+    """
+    hits = sorted(glob.glob(os.path.join(folder, OODLE_GLOB)))
+    if hits:
+        return hits[-1]                 # highest version number sorts last
+    for p in sorted(glob.glob(os.path.join(folder, "oo2core.dll"))):
+        if _oodle_loadable(p):
+            return p
+    return None
+
+
+def _oodle_in_engine(engine_root):
+    """
+    A usable Oodle DLL inside one Unreal Engine install, or None.
+
+    The location and filename changed across engine versions, so this searches
+    rather than assuming a fixed path. Older engines keep a versioned
+    oo2core_*_win64.dll somewhere under Engine\\Binaries; 5.6+ ships an
+    unversioned oo2core.dll in the .NET tooling runtimes, alongside a 32-bit
+    sibling -- hence the win-x64 filter and the load-test. A full walk of
+    Engine\\Binaries is ~15k files, well under a second, so breadth is fine.
+    """
+    binaries = os.path.join(engine_root, "Engine", "Binaries")
+    if not os.path.isdir(binaries):
+        return None
+    legacy = sorted(glob.glob(os.path.join(binaries, "**", OODLE_GLOB),
+                              recursive=True))
+    if legacy:
+        return legacy[0]
+    for p in sorted(glob.glob(os.path.join(binaries, "**", "win-x64", "**", "oo2core.dll"),
+                              recursive=True)):
+        if _oodle_loadable(p):
+            return p
+    return None
+
+
 def find_oodle(extra_dirs=()):
     """
-    Find any oo2core_*_win64.dll already on this machine.
+    Find an Oodle core DLL already on this machine: oo2core_*_win64.dll as
+    shipped loose with many games, or the unversioned oo2core.dll inside an
+    Unreal Engine install.
 
     Looks beside this tool first (so a user can simply drop one in), then
-    through installed games. Games keep it either in their root or a level or
-    two down, so the scan is depth-limited rather than exhaustive -- a full disk
-    walk would be far too slow.
+    through installed games, then through any Unreal Engine install. Game folders
+    are scanned depth-limited rather than exhaustively -- a full disk walk would
+    be far too slow.
 
     HOW LIKELY THIS IS TO SUCCEED: not guaranteed. Only a minority of games ship
-    the DLL loose -- roughly one in twenty on a typical library. They tend to be
-    large titles, so many people will have one, but a user may well have none.
-    The caller must degrade gracefully and tell them what to do.
+    the DLL loose. They tend to be large titles, so many people will have one, 
+    but a user may well have none. The caller must degrade gracefully and tell 
+    them what to do.
     """
 
     def scan(folder, depth):
@@ -184,9 +246,9 @@ def find_oodle(extra_dirs=()):
 
     here = os.path.dirname(os.path.abspath(__file__))
     for d in (here, os.path.dirname(here)) + tuple(extra_dirs):
-        hits = sorted(glob.glob(os.path.join(d, OODLE_GLOB)))
-        if hits:
-            return hits[-1]
+        hit = _oodle_in_dir(d)
+        if hit:
+            return hit
 
     roots = [os.path.join(l, "steamapps", "common") for l in steam_libraries()]
     roots += other_game_roots()
@@ -203,11 +265,12 @@ def find_oodle(extra_dirs=()):
             if found:
                 return found
 
-    # Unreal Engine installs keep one in a fixed spot.
+    # Unreal Engine installs ship an Oodle core too (any version works). The
+    # exact path and filename vary by engine version, so enumerate every UE_*
+    # under the game roots and search each rather than hardcoding a location.
     for root in roots:
-        for name in ("UE_5.4", "UE_5.3", "UE_5.2", "UE_4.27", "UE_4.26"):
-            p = os.path.join(root, name, "Engine", "Binaries", "ThirdParty", "Oodle")
-            hit = scan(p, 3)
+        for engine in sorted(glob.glob(os.path.join(root, "UE_*")), reverse=True):
+            hit = _oodle_in_engine(engine)
             if hit:
                 return hit
     return None

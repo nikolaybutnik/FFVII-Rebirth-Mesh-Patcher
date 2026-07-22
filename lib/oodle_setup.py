@@ -36,7 +36,7 @@ GUIDANCE = """
   Search your game folders for:  oo2core
 
   If you have none of them, Unreal Engine ships one and is free from the Epic
-  Games Launcher (Engine\\Binaries\\ThirdParty\\Oodle\\...). That is a large
+  Games Launcher. Install it and this tool finds the DLL on its own -- a large
   download for one file, but it always works.
 """
 
@@ -86,20 +86,25 @@ def prompt_for_oodle(dest_dir, input_fn=input, print_fn=print):
             return None
 
         if os.path.isdir(path):
-            hits = sorted(glob.glob(os.path.join(path, OODLE_GLOB)))
-            if not hits:
+            # Accept a folder too: a game folder, or a whole Unreal Engine
+            # install. Reuse detection so the unversioned oo2core.dll (UE 5.6+)
+            # and the deep engine layout are handled the same way here.
+            import detect
+            found = (detect._oodle_in_dir(path)
+                     or detect._oodle_in_engine(path))
+            if not found:
                 deep = sorted(glob.glob(os.path.join(path, "*", OODLE_GLOB)))
-                hits = deep
-            if not hits:
-                print_fn(f"  No {OODLE_GLOB} in that folder. Try again.\n")
+                found = deep[-1] if deep else None
+            if not found:
+                print_fn("  No Oodle DLL (oo2core) in that folder. Try again.\n")
                 continue
-            path = hits[-1]
+            path = found
 
         if not os.path.isfile(path):
             print_fn("  That file does not exist. Try again.\n")
             continue
         if not looks_like_oodle(path):
-            print_fn("  That is not an oo2core_*_win64.dll. Try again.\n")
+            print_fn("  That is not an Oodle DLL (oo2core...). Try again.\n")
             continue
 
         dest = os.path.join(dest_dir, os.path.basename(path))

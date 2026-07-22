@@ -1,32 +1,33 @@
 # FFVII Rebirth Mesh Patcher
 
-Repairs **Dresscode** and its costume mods after Final Fantasy VII Rebirth patch
-**V1.005**, without downgrading the game.
+Repairs Final Fantasy VII Rebirth character mods broken by patch **V1.005**,
+without downgrading the game.
 
-V1.005 changed how character models are stored, which broke Dresscode and every
-costume mod built for it. With Dresscode installed the game fatal-crashes on
-startup — you never reach the menu. If Dresscode is working but a costume is
-not, hovering that costume crashes instead. A loose pak mod that replaces a
-character directly may or may not cause a crash, but its textures and shading come out
-wrong — the same format change, a different symptom.
+V1.005 changed how character models (skeletal meshes) are stored, breaking any
+mod built against the old layout. The symptom depends on the mod:
 
-This rewrites the affected models into the format the current game expects.
-Works on **Dresscode itself**, on **costume mods**, and on **loose pak mods**
-(standalone character replacements dropped in `~mods`) — same command for all.
-It fixes broken skeletal meshes; it is not a general-purpose mod fixer.
+- **Dresscode** — the game fatal-crashes on startup; you never reach the menu.
+- **A Dresscode costume** — Dresscode loads, but hovering that costume crashes.
+- **A standalone pak mod** that replaces a character directly — it may or may not
+  crash, but its textures and shading come out wrong.
+
+Same underlying cause, so the same fix: this rewrites the affected models into
+the format the current game expects. One command handles all of them — Dresscode,
+costume mods, and loose pak mods, anything containing a skeletal mesh. It is not
+a general-purpose mod fixer.
 
 ---
 
 ## Read this first
 
-**This tool contains no mods.** It patches files you already have. You need to
-find and install Dresscode and any costume mods yourself, from wherever their
-authors publish them.
+**This tool contains no mods.** It patches files you already have. You install
+the mods yourself — Dresscode, costumes, or standalone pak mods — from wherever
+their authors publish them.
 
-**It is not affiliated with Dresscode or its author.** It is an independent fix,
-written by reverse-engineering the game's own file format. Please do not raise
-problems with this tool anywhere except its own issue tracker — the mod authors
-did not write it and cannot help with it.
+**It is not affiliated with any mod it patches, or their authors.** It is an
+independent fix, written by reverse-engineering the game's own file format.
+Please do not raise problems with this tool anywhere except its own issue
+tracker — the mod authors did not write it and cannot help with it.
 
 **It may stop working when mods update.** This patcher rewrites mod files to
 match what the current game expects. If the Dresscode author (or any mod author)
@@ -87,8 +88,11 @@ ship it:
 - **Indiana Jones and the Great Circle** — `oo2core_*_win64.dll` (in the game root)
 
 If you have none of those, **Unreal Engine ships one** and is free from the Epic
-Games Launcher (`Engine\Binaries\ThirdParty\Oodle\...`). A large download for
-one file, but it always works.
+Games Launcher. Install it and the tool finds the DLL on its own. If it can't,
+search the engine folder for **`oo2core.dll`** (recent versions) or
+**`oo2core_*_win64.dll`** (older ones) and drop it next to `patch.py` — take the
+copy under a **`win-x64`** folder, never `win-x86`. A large download for one
+file, but it always works.
 
 If the tool can't find one, it will ask:
 
@@ -172,8 +176,10 @@ but the game's own `.pak`/`.utoc`/`.ucas` (in `Paks\` itself) are never touched.
 ## Troubleshooting
 
 **`Could not find an Oodle library`**
-Search your game folders for `oo2core_*_win64.dll` and copy it next to
-`patch.py`. See the Setup section for games known to ship one.
+Search your game folders for `oo2core_*_win64.dll` — or, inside an Unreal Engine
+install, the unversioned `oo2core.dll` (take the one under a `win-x64` folder,
+never `win-x86`) — and copy it next to `patch.py`. See the Setup section for
+games known to ship one.
 
 **`no skeletal meshes -- unaffected`**
 That mod has no character model, so V1.005 didn't break it. Nothing to do.
