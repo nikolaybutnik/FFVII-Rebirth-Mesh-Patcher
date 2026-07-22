@@ -44,10 +44,12 @@ if not GAME_DIR:
     if _found:
         GAME_DIR, _detected_game = _found, True
 
+_all_oodles = []
 if not OODLE_DLL:
-    _found = detect.find_oodle()
-    if _found:
-        OODLE_DLL, _detected_oodle = _found, True
+    _all_oodles = detect.find_all_oodle()
+    if _all_oodles:
+        OODLE_DLL = max(_all_oodles, key=detect._oodle_rank)
+        _detected_oodle = True
 
 GAME_DIR = GAME_DIR or ""
 OODLE_DLL = OODLE_DLL or ""
@@ -126,6 +128,13 @@ def describe():
         f"  Oodle  ({'detected' if _detected_oodle else 'configured'}):  "
         f"{OODLE_DLL or '<not found>'}",
     ]
+
+
+def other_oodles():
+    """Discovered Oodle DLLs other than the one in use -- for --list display."""
+    used = os.path.normcase(os.path.abspath(OODLE_DLL or ""))
+    return [p for p in _all_oodles
+            if os.path.normcase(os.path.abspath(p)) != used]
 
 
 if __name__ == "__main__":
