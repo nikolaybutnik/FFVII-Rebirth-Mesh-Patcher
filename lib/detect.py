@@ -225,53 +225,65 @@ def _oodle_in_engine(engine_root):
     return None
 
 
+def _oodle_rank(path):
+    """
+    Sort key for "newest". The oo2core version number; the unversioned oo2core.dll
+    from recent Unreal Engine is the current 2.9 generation, so it ranks with
+    oo2core_9.
+    """
+    m = re.search(r"oo2core_(\d+)_win64\.dll$", os.path.basename(path), re.I)
+    return int(m.group(1)) if m else 9
+
+
 def find_oodle(extra_dirs=()):
     """
-    Find an Oodle core DLL already on this machine: oo2core_*_win64.dll as
-    shipped loose with many games, or the unversioned oo2core.dll inside an
-    Unreal Engine install.
+    The newest usable Oodle DLL on this machine (oo2core_6+), or None.
 
-    Looks beside this tool first (so a user can simply drop one in), then
-    through installed games, then through any Unreal Engine install. Game folders
-    are scanned depth-limited rather than exhaustively -- a full disk walk would
-    be far too slow.
-
-    HOW LIKELY THIS IS TO SUCCEED: not guaranteed. Only a minority of games ship
-    the DLL loose. They tend to be large titles, so many people will have one, 
-    but a user may well have none. The caller must degrade gracefully and tell 
-    them what to do.
+    All v6+ DLLs decode identically, so newest is just a sensible default. This
+    can fail -- only a minority of games ship one -- so callers must degrade
+    gracefully. See _oodle_candidates for where it looks.
     """
+    candidates = find_all_oodle(extra_dirs)
+    return max(candidates, key=_oodle_rank) if candidates else None
 
-    def scan(folder, depth):
-        if depth < 0 or not os.path.isdir(folder):
-            return None
-        hits = sorted(h for h in glob.glob(os.path.join(folder, OODLE_GLOB))
-                      if _oodle_version_ok(h))
-        if hits:
-            return hits[-1]          # highest version number sorts last
-        if depth == 0:
-            return None
-        try:
-            entries = os.listdir(folder)
-        except OSError:
-            return None
-        for name in entries:
-            sub = os.path.join(folder, name)
-            if os.path.isdir(sub):
-                found = scan(sub, depth - 1)
-                if found:
-                    return found
+
+def _oodle_in_tree(folder, depth):
+    """Highest version-ok oo2core_*_win64.dll within `folder`, depth-limited."""
+    if depth < 0 or not os.path.isdir(folder):
         return None
+    hits = sorted(h for h in glob.glob(os.path.join(folder, OODLE_GLOB))
+                  if _oodle_version_ok(h))
+    if hits:
+        return hits[-1]
+    if depth == 0:
+        return None
+    try:
+        entries = os.listdir(folder)
+    except OSError:
+        return None
+    for name in entries:
+        sub = os.path.join(folder, name)
+        if os.path.isdir(sub):
+            found = _oodle_in_tree(sub, depth - 1)
+            if found:
+                return found
+    return None
 
+
+def _oodle_candidates(extra_dirs=()):
+    """
+    Yield every usable Oodle DLL, best first: beside the tool, then one per
+    installed game, then one per Unreal Engine install. Game folders are scanned
+    depth-limited -- a full disk walk would be far too slow.
+    """
     here = os.path.dirname(os.path.abspath(__file__))
     for d in (here, os.path.dirname(here)) + tuple(extra_dirs):
         hit = _oodle_in_dir(d)
         if hit:
-            return hit
+            yield hit
 
     roots = [os.path.join(l, "steamapps", "common") for l in steam_libraries()]
     roots += other_game_roots()
-
     for root in roots:
         if not os.path.isdir(root):
             continue
@@ -280,19 +292,26 @@ def find_oodle(extra_dirs=()):
         except OSError:
             continue
         for g in games:
-            found = scan(os.path.join(root, g), 2)
-            if found:
-                return found
+            hit = _oodle_in_tree(os.path.join(root, g), 2)
+            if hit:
+                yield hit
 
-    # Unreal Engine installs ship a recent Oodle core too (well above the
-    # oo2core_6 floor). The exact path and filename vary by engine version, so
-    # enumerate every UE_* under the game roots and search each.
     for root in roots:
         for engine in sorted(glob.glob(os.path.join(root, "UE_*")), reverse=True):
             hit = _oodle_in_engine(engine)
             if hit:
-                return hit
-    return None
+                yield hit
+
+
+def find_all_oodle(extra_dirs=()):
+    """Every usable Oodle DLL found, deduplicated -- for informational display."""
+    out, seen = [], set()
+    for path in _oodle_candidates(extra_dirs):
+        key = os.path.normcase(os.path.abspath(path))
+        if key not in seen:
+            seen.add(key)
+            out.append(path)
+    return out
 
 
 # Games known to ship a WORKING DLL loose, for the "could not find it" message.
