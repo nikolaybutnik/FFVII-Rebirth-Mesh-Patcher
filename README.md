@@ -68,7 +68,8 @@ It finds the game and everything else on its own:
 ```
 
 **The game** is found either by Steam's library list, or by noticing the tool is
-sitting inside the game folder — so dropping it in `End\Mods\` also works.
+sitting inside the game folder — so dropping it anywhere under the install works
+too, whether that's the base game folder or `End\Mods\`.
 
 **The Oodle library** decompresses mod archives. FF7 Rebirth builds Oodle into
 its executable, so there is no copy in the game folder to borrow. It is
