@@ -1,7 +1,7 @@
 """
 shader_decode.py -- the REAL decode, transcribed from the game's vertex shader.
 
-Recovered from a RenderDoc capture of FF7 Rebirth (SM6.6 DXIL vertex shader,
+Recovered from a RenderDoc capture of FFVII Rebirth (SM6.6 DXIL vertex shader,
 draw 3097). The tangent stream is bound as R10G10B10A2_UNORM, so the hardware
 splits the 32 bits into four values before the shader sees them:
 

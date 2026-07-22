@@ -98,7 +98,7 @@ def oodle_decompress(src, out_size):
     if n <= 0:
         # Oodle refused the data outright. The usual cause is a DLL too old to
         # decode this game's compression -- oo2core_5 and older do not work with
-        # FF7 Rebirth; use oo2core_6 or newer.
+        # FFVII Rebirth; use oo2core_6 or newer.
         raise RuntimeError(
             f"Oodle could not decode this data (returned {n}). The oo2core DLL is "
             "probably too old or incompatible -- use oo2core_6 or newer."

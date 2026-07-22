@@ -28,7 +28,7 @@ ClothingData followed by bDisabled.
 
 HOW WE KNOW
 -----------
-Parsing one of FF7 Rebirth's own character meshes with no duplicated-vertex
+Parsing one of FFVII Rebirth's own character meshes with no duplicated-vertex
 arrays makes all 12 of its sections chain perfectly: each section's baseIndex
 equals the running total of triangles*3.
 
@@ -83,7 +83,7 @@ CLASS_STRIP_DUPLICATED_VERTICES = 1
 # TangentZ), 8 bytes per vertex, or two FPackedRGBA16N (16 bytes) when a mesh
 # opts into bUseHighPrecisionTangentBasis.
 #
-# Every FF7 Rebirth 1.005 mesh uses 4 bytes per vertex instead, in a new
+# Every FFVII Rebirth 1.005 mesh uses 4 bytes per vertex instead, in a new
 # encoding, and never sets the high-precision flag -- verified across 60 game
 # character meshes at various LODs, vertex counts and UV-set counts.
 #
@@ -149,7 +149,7 @@ def convert_tangents_16_to_4(buf):
     FPackedRGBA16N values: TangentX and TangentZ, each four signed 16-bit
     components (x, y, z, w), where TangentZ's w carries handedness.
 
-    FF7 Rebirth 1.005 does not use that path -- all 60 game character meshes
+    FFVII Rebirth 1.005 does not use that path -- all 60 game character meshes
     checked report the flag as 0 with a 4-byte element -- and the vertex shader
     reads the stream as R10G10B10A2, so a 16-byte buffer is misinterpreted.
     The visible result is wrong shading (a distinctive over-shiny look) rather

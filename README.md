@@ -44,17 +44,24 @@ appeared. If that changes, the author's own release is the better option.
 
 ## Requirements
 
-- **Python 3.9 or newer** — <https://www.python.org/downloads/>
-  (tick *"Add Python to PATH"* during install)
-- **NumPy** — after installing Python, run: `pip install numpy`
+- **Python 3.9 or newer** — from <https://www.python.org/downloads/>. In the
+  installer, **tick "Add Python to PATH"**; skipping that box is the usual cause
+  of a later `'python' is not recognized`.
+- **NumPy** — a small library the patcher needs. After extracting the tool
+  (below), double-click **`run.bat`** — it just opens a terminal in the tool's
+  folder (nothing else; a few readable lines) — then type `pip install numpy`
+  and press Enter. If that reports `'pip' is not recognized`, use
+  `python -m pip install numpy` instead. You only do this once.
 
-That's it. There is normally nothing to configure.
+That's it. There is normally nothing else to configure.
 
 ---
 
 ## Setup
 
-Extract it anywhere and run:
+Everything runs from a terminal inside the extracted folder — the same one from
+Requirements: double-click **`run.bat`**, or type `cmd` in File Explorer's
+address bar while in the folder. Then run:
 
 ```
 python patch.py --list
@@ -71,7 +78,7 @@ It finds the game and everything else on its own:
 sitting inside the game folder — so dropping it anywhere under the install works
 too, whether that's the base game folder or `End\Mods\`.
 
-**The Oodle library** decompresses mod archives. FF7 Rebirth builds Oodle into
+**The Oodle library** decompresses mod archives. FFVII Rebirth builds Oodle into
 its executable, so there is no copy in the game folder to borrow. It is
 proprietary and cannot be bundled here — but it ships as a loose
 `oo2core_*_win64.dll` with a number of games. You need **oo2core_6 or newer**;
@@ -130,7 +137,7 @@ Example:
   Oodle  (detected):  C:\...\steamapps\common\SomeGame\oo2core_9_win64.dll
   Mods   :            C:\...\FINAL FANTASY VII REBIRTH\End\Mods
 
-  Dresscode  (the outfit menu itself)
+  Dresscode  (the base mod, by YIISx)
     [ok]  patched           2 meshes
 
   Mods with character meshes
