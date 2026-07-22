@@ -2,11 +2,13 @@
 patch.py -- FF7 Rebirth mesh patcher.
 
 Fixes mods that were built before game patch V1.005 and no longer load. Works on
-Dresscode itself and on costume mods -- anything containing a skeletal mesh.
+Dresscode itself, on costume mods, and on loose pak mods -- anything containing a
+skeletal mesh. Mods are found in End\\Mods (the FF7RML loader) and in
+End\\Content\\Paks\\~mods (loose paks the game loads directly); see find_mods.
 
     python patch.py --list             show every mod and whether it needs fixing
     python patch.py --all              patch everything that needs it
-    python patch.py ModFolderName      patch specific mods by folder name
+    python patch.py ModName            patch specific mods by folder or .utoc name
     python patch.py --restore --all    undo everything, from the backups
 
 Originals are copied to ./backups/<ModName>/ before anything is written. The
@@ -71,21 +73,77 @@ SKIP = {"FF7RML", "FF7RModMenu"}
 _SELF = os.path.basename(os.path.dirname(os.path.abspath(__file__)))
 
 
-def find_mods():
-    """Return {mod_name: utoc_path} for every installed mod."""
-    out = {}
-    if not os.path.isdir(config.MODS_DIR):
-        return out
-    for name in sorted(os.listdir(config.MODS_DIR)):
-        if name in SKIP or name == _SELF:
-            continue
-        d = os.path.join(config.MODS_DIR, name, "Content", "Paks", "WindowsNoEditor")
-        if not os.path.isdir(d):
-            continue
-        for f in os.listdir(d):
+def _find_pak_utocs(root, max_depth=5):
+    """Every .utoc under `root`, depth-limited. The game loads paks recursively
+    beneath ~mods, and some users nest each mod in its own subfolder."""
+    root = os.path.abspath(root)
+    out = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        if dirpath[len(root):].count(os.sep) >= max_depth:
+            dirnames[:] = []
+        for f in filenames:
             if f.endswith(".utoc"):
-                out[name] = os.path.join(d, f)
+                out.append(os.path.join(dirpath, f))
+    return sorted(out)
+
+
+def find_mods():
+    """Return {mod_name: utoc_path} for every installed mod.
+
+    Mods come from two places, and both are treated the same once found:
+
+      End\\Mods\\<name>\\Content\\Paks\\WindowsNoEditor\\   the FF7RML layout,
+                                                            one folder per mod
+      End\\Content\\Paks\\~mods\\                           Unreal's loose-pak
+                                                            folder, one .utoc
+                                                            per mod
+
+    A mod's name is its folder name in the first case and its .utoc filename in
+    the second. Names key the backup folders, so a clash would make one mod's
+    backup overwrite another's -- add() keeps them unique.
+    """
+    out = {}
+
+    def add(name, utoc):
+        key, n = name, 2
+        while key in out and out[key] != utoc:
+            key = f"{name} ({n})"
+            n += 1
+        out[key] = utoc
+
+    # --- Mod-loader mods -------------------------------------------------
+    if os.path.isdir(config.MODS_DIR):
+        for name in sorted(os.listdir(config.MODS_DIR)):
+            if name in SKIP or name == _SELF:
+                continue
+            d = os.path.join(config.MODS_DIR, name, "Content", "Paks", "WindowsNoEditor")
+            if not os.path.isdir(d):
+                continue
+            for f in sorted(os.listdir(d)):
+                if f.endswith(".utoc"):
+                    out[name] = os.path.join(d, f)
+
+    # --- Loose pak mods --------------------------------------------------
+    paks = getattr(config, "MODS_PAKS_DIR", "")
+    if paks and os.path.isdir(paks):
+        for utoc in _find_pak_utocs(paks):
+            add(os.path.splitext(os.path.basename(utoc))[0], utoc)
+
     return out
+
+
+def mod_source(utoc_path):
+    """Which folder a mod was found in: 'paks' for ~mods, 'mods' otherwise.
+    Derived from the path so it needs no separate bookkeeping."""
+    paks = getattr(config, "MODS_PAKS_DIR", "")
+    if paks:
+        try:
+            if os.path.commonpath([os.path.abspath(utoc_path),
+                                   os.path.abspath(paks)]) == os.path.abspath(paks):
+                return "paks"
+        except ValueError:      # different drives -> not under ~mods
+            pass
+    return "mods"
 
 
 def scan(utoc_path):
@@ -372,6 +430,8 @@ def show_list(mods, debug=False):
     for line in config.describe():
         print(line)
     print(f"  Mods   :            {config.MODS_DIR}")
+    if getattr(config, "MODS_PAKS_DIR", "") and os.path.isdir(config.MODS_PAKS_DIR):
+        print(f"  ~mods  :            {config.MODS_PAKS_DIR}")
     print()
 
     results = {name: mod_status(utoc) for name, utoc in mods.items()}
@@ -406,8 +466,9 @@ def show_list(mods, debug=False):
         for name in sorted(withmesh):
             state, n, _ = withmesh[name]
             label = "needs patching" if state == "needs_fix" else "patched"
+            tag = "  (~mods)" if mod_source(mods[name]) == "paks" else ""
             print(f"    {MARK[state]}  {name:<{width}} {label:<15} "
-                  f"{n} mesh{_plural(n)}")
+                  f"{n} mesh{_plural(n)}{tag}")
 
     if errored:
         print()
@@ -496,6 +557,7 @@ def main(argv):
     mods = find_mods()
     if not mods:
         print("No mods found under", config.MODS_DIR)
+        print("                or", config.MODS_PAKS_DIR)
         return 1
 
     want_all = "--all" in argv

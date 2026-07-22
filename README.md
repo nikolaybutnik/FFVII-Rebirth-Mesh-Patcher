@@ -6,11 +6,14 @@ Repairs **Dresscode** and its costume mods after Final Fantasy VII Rebirth patch
 V1.005 changed how character models are stored, which broke Dresscode and every
 costume mod built for it. With Dresscode installed the game fatal-crashes on
 startup — you never reach the menu. If Dresscode is working but a costume is
-not, hovering that costume crashes instead.
+not, hovering that costume crashes instead. A loose pak mod that replaces a
+character directly may or may not cause a crash, but its textures and shading come out
+wrong — the same format change, a different symptom.
 
 This rewrites the affected models into the format the current game expects.
-Works on **Dresscode itself** and on **costume mods** — same command for both.
-It is not a general-purpose mod fixer.
+Works on **Dresscode itself**, on **costume mods**, and on **loose pak mods**
+(standalone character replacements dropped in `~mods`) — same command for all.
+It fixes broken skeletal meshes; it is not a general-purpose mod fixer.
 
 ---
 
@@ -78,9 +81,10 @@ be large titles, so there's a fair chance you already have one. Games known to
 ship it:
 
 - **ELDEN RING** — `Game\oo2core_6_win64.dll`
-- **Grand Theft Auto V Enhanced**
-- **DEATH STRANDING DIRECTOR'S CUT**
-- **Indiana Jones and the Great Circle**
+- **DOOM Eternal** — `oo2core_8_win64.dll` (in the game root)
+- **Grand Theft Auto V Enhanced** — `oo2core_5_win64.dll` (in the game root)
+- **DEATH STRANDING DIRECTOR'S CUT** — `oo2core_7_win64.dll` (in the game root)
+- **Indiana Jones and the Great Circle** — `oo2core_*_win64.dll` (in the game root)
 
 If you have none of those, **Unreal Engine ships one** and is free from the Epic
 Games Launcher (`Engine\Binaries\ThirdParty\Oodle\...`). A large download for
@@ -106,8 +110,13 @@ Install your mods as normal first, then:
 ```
 python patch.py --list      show every mod and whether it needs fixing
 python patch.py --all       patch everything that needs it
-python patch.py ModName     patch one mod, by its folder name
+python patch.py ModName     patch one mod, by its folder or .utoc name
 ```
+
+It scans two places: `End\Mods\` (the FF7RML mod loader) and
+`End\Content\Paks\~mods\` (loose pak mods the game loads directly). Mods in the
+first are named by their folder; mods in the second by their `.utoc` filename,
+shown with a `(~mods)` tag.
 
 Example:
 
@@ -146,7 +155,9 @@ python patch.py --restore --all       put everything back
 python patch.py --restore ModName     put one mod back
 ```
 
-Your game files are never modified — only files inside `End\Mods\`.
+Only mod files are ever modified, never the game's own packages. Loose pak mods
+live under `End\Content\Paks\~mods\`, so those files sit inside the game folder —
+but the game's own `.pak`/`.utoc`/`.ucas` (in `Paks\` itself) are never touched.
 
 ### Other options
 

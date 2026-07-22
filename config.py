@@ -54,10 +54,16 @@ OODLE_DLL = OODLE_DLL or ""
 
 
 def _derive():
-    global GAME_PAKS, GLOBAL_UTOC, MODS_DIR
+    global GAME_PAKS, GLOBAL_UTOC, MODS_DIR, MODS_PAKS_DIR
     GAME_PAKS = os.path.join(GAME_DIR, "End", "Content", "Paks")
     GLOBAL_UTOC = os.path.join(GAME_PAKS, "global.utoc")
+    # Two places mods live. End\Mods is the FF7RML mod-loader layout, one folder
+    # per mod. ~mods is Unreal's own loose-pak folder, which the game loads
+    # natively -- each .pak/.utoc/.ucas triple dropped in is its own mod. The
+    # game's OWN packages sit directly in Paks (global.utoc, pakchunk*), never
+    # in ~mods, so scanning ~mods can never touch them.
     MODS_DIR = os.path.join(GAME_DIR, "End", "Mods")
+    MODS_PAKS_DIR = os.path.join(GAME_PAKS, "~mods")
 
 
 _derive()

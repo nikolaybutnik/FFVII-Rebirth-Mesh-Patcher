@@ -2,3 +2,5 @@ __pycache__/
 *.pyc
 backups/
 config_local.py
+releases/
+assets/

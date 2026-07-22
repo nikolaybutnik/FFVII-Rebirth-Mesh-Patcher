@@ -217,6 +217,7 @@ def find_oodle(extra_dirs=()):
 # Any game with an oo2core_*_win64.dll works; these are just common ones.
 KNOWN_OODLE_GAMES = [
     "ELDEN RING",
+    "DOOM Eternal",
     "Grand Theft Auto V Enhanced",
     "DEATH STRANDING DIRECTOR'S CUT",
     "Indiana Jones and the Great Circle",
