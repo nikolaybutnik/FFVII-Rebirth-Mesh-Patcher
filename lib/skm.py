@@ -33,8 +33,7 @@ import struct
 
 import globals_meta
 
-_names, _objs, _global_toc = globals_meta.load()
-SKELETAL_MESH = globals_meta.find_class(_objs, "SkeletalMesh")
+SKELETAL_MESH = globals_meta.SKELETAL_MESH
 
 
 class NoNames:
