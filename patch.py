@@ -2,8 +2,9 @@
 patch.py -- FFVII Rebirth mesh patcher.
 
 Fixes mods that were built before game patch V1.005 and no longer load. Works on
-Dresscode itself, on costume mods, and on loose pak mods -- anything containing a
-skeletal mesh. Mods are found in End\\Mods (the FF7RML loader) and in
+costume mods and loose pak mods -- anything containing a skeletal mesh. (Dresscode
+itself now has an official V1.005 update, so it is no longer patched here.) Mods
+are found in End\\Mods (the FF7RML loader) and in
 End\\Content\\Paks\\~mods (loose paks the game loads directly); see find_mods.
 
     python patch.py --list             show every mod and whether it needs fixing
@@ -489,15 +490,11 @@ def show_list(mods, debug=False):
         print("          Costume mods have no menu without it. Install Dresscode")
         print("          from its author first, then run this again.")
     else:
-        state, n, detail = results[DRESSCODE]
-        if state == "needs_fix":
-            print(f"    [!!]  needs patching    {n} mesh{_plural(n)}")
-        elif state == "patched":
-            print(f"    [ok]  patched           {n} mesh{_plural(n)}")
-        elif state == "none":
-            print("    [ok]  nothing to patch  (no character meshes)")
-        else:
-            print(f"    [??]  could not read    {detail}")
+        # Dresscode ships its own official V1.005 build, so this tool never
+        # patches it and makes no claim about its format.
+        print("    [ok]  installed -- not patched by this tool")
+        print("          If Dresscode itself crashes, get the author's official")
+        print("          V1.005 release.")
 
     # ---- everything else ------------------------------------------------
     others = {k: v for k, v in results.items() if k != DRESSCODE}
@@ -529,8 +526,10 @@ def show_list(mods, debug=False):
             print(f"    {chunk}")
 
     # ---- summary ---------------------------------------------------------
-    need = sorted(k for k, v in results.items() if v[0] == "needs_fix")
-    done = [k for k, v in results.items() if v[0] == "patched"]
+    # Dresscode is excluded -- it has an official update and is not patched here.
+    need = sorted(k for k, v in results.items()
+                  if v[0] == "needs_fix" and k != DRESSCODE)
+    done = [k for k, v in results.items() if v[0] == "patched" and k != DRESSCODE]
     print()
     if need:
         s = "s" if len(need) != 1 else ""
@@ -626,6 +625,10 @@ def main(argv):
     changed, unchanged, failed = [], [], []
     for name, utoc in targets.items():
         print(name)
+        if name == DRESSCODE and not do_restore:
+            print("    skipped -- Dresscode has an official V1.005 update; install")
+            print("    it from its author instead of patching it here.")
+            continue
         if do_restore:
             if restore(name, utoc):
                 changed.append(name)

@@ -6,15 +6,18 @@ without downgrading the game.
 V1.005 changed how character models (skeletal meshes) are stored, breaking any
 mod built against the old layout. The symptom depends on the mod:
 
-- **Dresscode** — the game fatal-crashes on startup; you never reach the menu.
 - **A Dresscode costume** — Dresscode loads, but hovering that costume crashes.
 - **A standalone pak mod** that replaces a character directly — it may or may not
   crash, but its textures and shading come out wrong.
 
 Same underlying cause, so the same fix: this rewrites the affected models into
-the format the current game expects. One command handles all of them — Dresscode,
-costume mods, and loose pak mods, anything containing a skeletal mesh. It is not
-a general-purpose mod fixer.
+the format the current game expects. One command handles them all — costume mods
+and loose pak mods, anything containing a skeletal mesh. It is not a
+general-purpose mod fixer.
+
+**Dresscode itself now has an official V1.005 update** from its author, so this
+tool no longer patches Dresscode — install that release directly if the menu
+crashes. This patcher is for the costume and character mods that still need it.
 
 ---
 
@@ -30,12 +33,12 @@ Please do not raise problems with this tool anywhere except its own issue
 tracker — the mod authors did not write it and cannot help with it.
 
 **It may stop working when mods update.** This patcher rewrites mod files to
-match what the current game expects. If the Dresscode author (or any mod author)
-releases a version already built for V1.005 or later, that version will not need
-patching — and if the file layout changes, this tool may need updating before it
-works again. It refuses rather than guessing when it meets something it does not
-recognise, so a mismatch should show up as "could not be read", not as a broken
-install.
+match what the current game expects. If a mod author releases a version already
+built for V1.005 or later (as Dresscode's author now has), that version will not
+need patching — and if the file layout changes, this tool may need updating
+before it works again. It refuses rather than guessing when it meets something it
+does not recognise, so a mismatch should show up as "could not be read", not as a
+broken install.
 
 **If an official fix exists, use that instead.** This exists because one had not
 appeared. If that changes, the author's own release is the better option.
@@ -144,7 +147,9 @@ Example:
   Mods   :            C:\...\FINAL FANTASY VII REBIRTH\End\Mods
 
   Dresscode  (the base mod, by YIISx)
-    [ok]  patched           2 meshes
+    [ok]  installed -- not patched by this tool
+          If Dresscode itself crashes, get the author's official
+          V1.005 release.
 
   Mods with character meshes
     [ok]  ExampleOutfit              patched         1 mesh
