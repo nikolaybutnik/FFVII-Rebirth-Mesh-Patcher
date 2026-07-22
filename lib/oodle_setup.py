@@ -23,15 +23,15 @@ OODLE_GLOB = "oo2core_*_win64.dll"
 
 GUIDANCE = """
   Mod archives are compressed with Oodle. It is proprietary, so it cannot be
-  included here -- but it ships loose with a number of games, and ANY version
-  works.
+  included here -- but it ships loose with a number of games. You need
+  oo2core_6 or newer (oo2core_5 and older can't decode this game).
 
-  If you own any of these, you already have it:
+  If you own any of these, you already have a working one:
 
       ELDEN RING                           Game\\oo2core_6_win64.dll
-      Grand Theft Auto V Enhanced
-      DEATH STRANDING DIRECTOR'S CUT
-      Indiana Jones and the Great Circle
+      DOOM Eternal                         oo2core_8_win64.dll
+      DEATH STRANDING DIRECTOR'S CUT       oo2core_7_win64.dll
+      Indiana Jones and the Great Circle   oo2core_9_win64.dll
 
   Search your game folders for:  oo2core
 
@@ -105,6 +105,11 @@ def prompt_for_oodle(dest_dir, input_fn=input, print_fn=print):
             continue
         if not looks_like_oodle(path):
             print_fn("  That is not an Oodle DLL (oo2core...). Try again.\n")
+            continue
+        import detect
+        if not detect._oodle_version_ok(path):
+            print_fn(f"  {os.path.basename(path)} is too old for this game. "
+                     "Use oo2core_6 or newer.\n")
             continue
 
         dest = os.path.join(dest_dir, os.path.basename(path))

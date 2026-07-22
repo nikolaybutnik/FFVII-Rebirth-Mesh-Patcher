@@ -73,19 +73,19 @@ sitting inside the game folder — so dropping it in `End\Mods\` also works.
 **The Oodle library** decompresses mod archives. FF7 Rebirth builds Oodle into
 its executable, so there is no copy in the game folder to borrow. It is
 proprietary and cannot be bundled here — but it ships as a loose
-`oo2core_*_win64.dll` with a number of games, and **any version works**. The
-tool looks beside itself first, then through your installed Steam, Epic and GOG
-games, and any Unreal Engine install.
+`oo2core_*_win64.dll` with a number of games. You need **oo2core_6 or newer**;
+oo2core_5 and older can't decode this game. The tool looks beside itself first,
+then through your installed Steam, Epic and GOG games, and any Unreal Engine
+install.
 
 Only a minority of games include it — roughly one in twenty — but they tend to
 be large titles, so there's a fair chance you already have one. Games known to
-ship it:
+ship a working copy:
 
 - **ELDEN RING** — `Game\oo2core_6_win64.dll`
 - **DOOM Eternal** — `oo2core_8_win64.dll` (in the game root)
-- **Grand Theft Auto V Enhanced** — `oo2core_5_win64.dll` (in the game root)
 - **DEATH STRANDING DIRECTOR'S CUT** — `oo2core_7_win64.dll` (in the game root)
-- **Indiana Jones and the Great Circle** — `oo2core_*_win64.dll` (in the game root)
+- **Indiana Jones and the Great Circle** — `oo2core_9_win64.dll` (in the game root)
 
 If you have none of those, **Unreal Engine ships one** and is free from the Epic
 Games Launcher. Install it and the tool finds the DLL on its own. If it can't,

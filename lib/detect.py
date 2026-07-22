@@ -23,6 +23,23 @@ import re
 GAME_FOLDER_NAME = "FINAL FANTASY VII REBIRTH"
 OODLE_GLOB = "oo2core_*_win64.dll"
 
+# FF7 Rebirth's Oodle streams need oo2core_6 or newer. oo2core_5 and older
+# return nothing (they can't decode this game), so they must never be selected --
+# picking one silently makes every mod look unreadable/unaffected.
+OODLE_MIN_VERSION = 6
+
+
+def _oodle_version_ok(path):
+    """
+    True if this DLL is new enough for FF7 Rebirth.
+
+    Versioned names (oo2core_<N>_win64.dll) must be N >= OODLE_MIN_VERSION. The
+    unversioned oo2core.dll (recent Unreal Engine) has no number and is always
+    well above the floor, so it passes.
+    """
+    m = re.search(r"oo2core_(\d+)_win64\.dll$", os.path.basename(path), re.I)
+    return int(m.group(1)) >= OODLE_MIN_VERSION if m else True
+
 
 # ---------------------------------------------------------------------------
 # Steam
@@ -173,7 +190,8 @@ def _oodle_in_dir(folder):
     back to an unversioned oo2core.dll (Unreal Engine 5.6+) only if it actually
     loads here, which rules out a 32-bit file of the same name.
     """
-    hits = sorted(glob.glob(os.path.join(folder, OODLE_GLOB)))
+    hits = sorted(h for h in glob.glob(os.path.join(folder, OODLE_GLOB))
+                  if _oodle_version_ok(h))
     if hits:
         return hits[-1]                 # highest version number sorts last
     for p in sorted(glob.glob(os.path.join(folder, "oo2core.dll"))):
@@ -196,8 +214,8 @@ def _oodle_in_engine(engine_root):
     binaries = os.path.join(engine_root, "Engine", "Binaries")
     if not os.path.isdir(binaries):
         return None
-    legacy = sorted(glob.glob(os.path.join(binaries, "**", OODLE_GLOB),
-                              recursive=True))
+    legacy = sorted(h for h in glob.glob(os.path.join(binaries, "**", OODLE_GLOB),
+                                         recursive=True) if _oodle_version_ok(h))
     if legacy:
         return legacy[0]
     for p in sorted(glob.glob(os.path.join(binaries, "**", "win-x64", "**", "oo2core.dll"),
@@ -227,7 +245,8 @@ def find_oodle(extra_dirs=()):
     def scan(folder, depth):
         if depth < 0 or not os.path.isdir(folder):
             return None
-        hits = sorted(glob.glob(os.path.join(folder, OODLE_GLOB)))
+        hits = sorted(h for h in glob.glob(os.path.join(folder, OODLE_GLOB))
+                      if _oodle_version_ok(h))
         if hits:
             return hits[-1]          # highest version number sorts last
         if depth == 0:
@@ -265,9 +284,9 @@ def find_oodle(extra_dirs=()):
             if found:
                 return found
 
-    # Unreal Engine installs ship an Oodle core too (any version works). The
-    # exact path and filename vary by engine version, so enumerate every UE_*
-    # under the game roots and search each rather than hardcoding a location.
+    # Unreal Engine installs ship a recent Oodle core too (well above the
+    # oo2core_6 floor). The exact path and filename vary by engine version, so
+    # enumerate every UE_* under the game roots and search each.
     for root in roots:
         for engine in sorted(glob.glob(os.path.join(root, "UE_*")), reverse=True):
             hit = _oodle_in_engine(engine)
@@ -276,12 +295,11 @@ def find_oodle(extra_dirs=()):
     return None
 
 
-# Games known to ship the DLL loose, for the "could not find it" message.
-# Any game with an oo2core_*_win64.dll works; these are just common ones.
+# Games known to ship a WORKING DLL loose, for the "could not find it" message.
+# FF7 Rebirth needs oo2core_6 or newer; oo2core_5 and older can't decode it.
 KNOWN_OODLE_GAMES = [
     "ELDEN RING",
     "DOOM Eternal",
-    "Grand Theft Auto V Enhanced",
     "DEATH STRANDING DIRECTOR'S CUT",
     "Indiana Jones and the Great Circle",
 ]

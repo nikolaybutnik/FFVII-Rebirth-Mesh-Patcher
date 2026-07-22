@@ -95,6 +95,14 @@ def oodle_decompress(src, out_size):
     # these are the values Unreal itself passes.
     n = _oodle.OodleLZ_Decompress(src, len(src), out, out_size,
                                   1, 1, 0, None, 0, None, None, None, 0, 3)
+    if n <= 0:
+        # Oodle refused the data outright. The usual cause is a DLL too old to
+        # decode this game's compression -- oo2core_5 and older do not work with
+        # FF7 Rebirth; use oo2core_6 or newer.
+        raise RuntimeError(
+            f"Oodle could not decode this data (returned {n}). The oo2core DLL is "
+            "probably too old or incompatible -- use oo2core_6 or newer."
+        )
     if n != out_size:
         raise RuntimeError(
             f"Oodle returned {n} bytes but {out_size} were expected. "

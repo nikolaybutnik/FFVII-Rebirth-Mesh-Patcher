@@ -157,13 +157,22 @@ def scan(utoc_path):
         if not toc.paths[i].endswith(".uasset"):
             continue
         try:
-            pkg = zen.ZenPackage(toc.read(i))
+            data = toc.read(i)
+        except Exception as ex:
+            # A read (decompress) failure is NOT the same as "no mesh here". If
+            # the Oodle DLL is too old to decode this game, every chunk fails --
+            # swallowing that would make a mod that NEEDS patching look
+            # unaffected. Surface it as an error so mod_status reports [??].
+            found.append(dict(chunk=i, path=toc.paths[i], export="",
+                              size=0, error=f"could not read: {ex}"))
+            continue
+        try:
+            pkg = zen.ZenPackage(data)
         except Exception:
             continue
         if not any(e["cls"] == skm.SKELETAL_MESH for e in pkg.exports):
             continue
 
-        data = toc.read(i)
         offset = pkg.export_data_start()
         for e in pkg.exports:
             if e["cls"] == skm.SKELETAL_MESH:
