@@ -61,8 +61,12 @@ def load_name_batch(namedata, hashdata):
         is_utf16 = b0 >> 7
         length = ((b0 & 0x7F) << 8) | b1
         if is_utf16:
-            names.append(namedata[o:o + length * 2].decode("utf-16-le", "replace"))
+            # Wide names are big-endian and padded to a 2-byte boundary; missing
+            # the pad desyncs the rest of the table.
+            names.append(namedata[o:o + length * 2].decode("utf-16-be", "replace"))
             o += length * 2
+            if o & 1:
+                o += 1
         else:
             names.append(namedata[o:o + length].decode("utf-8", "replace"))
             o += length
