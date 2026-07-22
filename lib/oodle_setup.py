@@ -85,6 +85,16 @@ def prompt_for_oodle(dest_dir, input_fn=input, print_fn=print):
         except (EOFError, KeyboardInterrupt):
             print_fn("")
             return None
+        except Exception:
+            # input() can raise instead of returning text -- e.g. a legacy
+            # console code page choking on a non-ASCII path. Don't let that close
+            # the window; steer to the two routes that avoid dragging.
+            print_fn("")
+            print_fn("  Couldn't read that. Either copy and paste the path here")
+            print_fn("  instead of dragging, or drop the oo2core_*_win64.dll next")
+            print_fn("  to patch.py and run this again.")
+            print_fn("")
+            continue
 
         path = clean_path(raw)
         if not path:
