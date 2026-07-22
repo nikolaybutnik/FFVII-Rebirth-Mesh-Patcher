@@ -103,6 +103,7 @@ def check():
 
     if not OODLE_DLL:
         games = "\n".join(f"        - {g}" for g in detect.KNOWN_OODLE_GAMES)
+        reported = "\n".join(f"        - {g}" for g in detect.REPORTED_OODLE_GAMES)
         problems.append(
             "Could not find an Oodle library (oo2core_*_win64.dll).\n"
             "\n"
@@ -111,6 +112,9 @@ def check():
             "    You need oo2core_6 or newer (older ones can't decode this game).\n"
             "    If you own one of these, you already have it:\n"
             f"{games}\n"
+            "\n"
+            "    Also reported by users, but unconfirmed:\n"
+            f"{reported}\n"
             "\n"
             "    Find the file (search your game folders for 'oo2core'), copy it\n"
             "    next to patch.py, and run again. Nothing else to configure.")

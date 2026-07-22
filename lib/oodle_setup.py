@@ -33,6 +33,11 @@ GUIDANCE = """
       DEATH STRANDING DIRECTOR'S CUT       oo2core_7_win64.dll
       Indiana Jones and the Great Circle   oo2core_9_win64.dll
 
+  Also reported by users, but unconfirmed:
+
+      Warhammer 40,000: Darktide
+      ELDEN RING NIGHTREIGN
+
   Search your game folders for:  oo2core
 
   If you have none of them, Unreal Engine ships one and is free from the Epic

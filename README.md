@@ -95,6 +95,12 @@ ship a working copy:
 - **DEATH STRANDING DIRECTOR'S CUT** — `oo2core_7_win64.dll` (in the game root)
 - **Indiana Jones and the Great Circle** — `oo2core_9_win64.dll` (in the game root)
 
+Also reported by users to ship a working copy, but I don't own these so I can't
+confirm the exact filename or location — search the game folder for `oo2core`:
+
+- **Warhammer 40,000: Darktide**
+- **ELDEN RING NIGHTREIGN**
+
 If you have none of those, **Unreal Engine ships one** and is free from the Epic
 Games Launcher. Install it and the tool finds the DLL on its own. If it can't,
 search the engine folder for **`oo2core.dll`** (recent versions) or
