@@ -278,19 +278,20 @@ def patch_mod(name, utoc_path):
     src_dir = os.path.dirname(utoc_path)
 
     # --- Convert every package that needs it.
+    pkg_indices = [i for i in sorted(toc.paths)
+                   if toc.paths[i].endswith(".uasset")]
+    print(f"    scanning {len(pkg_indices)} packages")
     new_data = {}
     size_deltas = {}
-    for i in sorted(toc.paths):
-        if not toc.paths[i].endswith(".uasset"):
-            continue
+    for i in pkg_indices:
+        data = toc.read(i)
         try:
-            pkg = zen.ZenPackage(toc.read(i))
+            pkg = zen.ZenPackage(data)
         except Exception:
             continue
         if not any(e["cls"] == skm.SKELETAL_MESH for e in pkg.exports):
             continue
 
-        data = toc.read(i)
         patched, removed, reports = patch_package(data)
         if removed:
             new_data[i] = patched
@@ -310,10 +311,16 @@ def patch_mod(name, utoc_path):
     # --- Back up before writing anything.
     backup = os.path.abspath(os.path.join(BACKUP_DIR, name))
     os.makedirs(backup, exist_ok=True)
+    to_copy = []
     for ext in (".utoc", ".ucas", ".pak"):
         src = os.path.join(src_dir, base + ext)
         dst = os.path.join(backup, base + ext)
         if os.path.exists(src) and not os.path.exists(dst):
+            to_copy.append((src, dst))
+    if to_copy:
+        mb = sum(os.path.getsize(s) for s, _ in to_copy) / (1024 * 1024)
+        print(f"    backing up originals ({mb:,.0f} MB)")
+        for src, dst in to_copy:
             shutil.copy(src, dst)
 
     # --- Rebuild the container.
@@ -321,6 +328,7 @@ def patch_mod(name, utoc_path):
                         if toc.chunk_type(i) == 10)
     new_data[header_index] = rebuild_header(toc.read(header_index), size_deltas)
 
+    print(f"    rebuilding container ({toc.n} chunks)")
     ucas_in = open(os.path.join(src_dir, base + ".ucas"), "rb")
     chunks = []
     new_paths = []
@@ -332,6 +340,9 @@ def patch_mod(name, utoc_path):
                       for k in range(0, len(payload), toc.block_size)]
             size = len(payload)
         else:
+            # Untouched chunk: reuse its compressed blocks as-is. build_metas_from
+            # reuses the source checksum row, so its uncompressed bytes are never
+            # needed -- skipping this decompress is the main speedup.
             offset, length = toc.offlen[i]
             b = offset // toc.block_size
             remaining = length
@@ -342,8 +353,8 @@ def patch_mod(name, utoc_path):
                 blocks.append((ucas_in.read(csize), usize, method))
                 remaining -= usize
                 b += 1
-            size, payload = length, toc.read(i)
-        chunks.append(dict(id=toc.chunk_ids[i], blocks=blocks, size=size, data=payload))
+            size = length
+        chunks.append(dict(id=toc.chunk_ids[i], blocks=blocks, size=size))
         if i in toc.paths:
             new_paths.append((toc.paths[i], len(chunks) - 1))
 
@@ -352,7 +363,7 @@ def patch_mod(name, utoc_path):
         toc, chunks, toc.block_size)
     head = writer.build_toc_header(toc, len(chunks), len(block_table),
                                    len(directory), toc.block_size)
-    metas = writer.build_metas([c["data"] for c in chunks])
+    metas = writer.build_metas_from(toc, new_data)
 
     with open(os.path.join(src_dir, base + ".utoc"), "wb") as f:
         f.write(head + bytes(body) + directory + metas)

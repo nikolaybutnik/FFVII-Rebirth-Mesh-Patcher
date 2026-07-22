@@ -128,18 +128,22 @@ def build_toc_header(toc, n_chunks, n_blocks, dir_index_size, block_size=65536):
     return bytes(h)
 
 
-def build_metas(chunk_payloads):
+def build_metas_from(toc, modified):
     """
-    Build the chunk checksum table: 33 bytes per chunk.
+    Build the chunk checksum table, reusing the source container's rows.
 
-    The hash is SHA-1 of the chunk's UNCOMPRESSED data, zero-padded from 20 bytes
-    out to 32, then a flags byte (1 = compressed).
+    Each 33-byte row is SHA-1 of a chunk's uncompressed data + 12 zero bytes + a
+    flags byte. An untouched chunk's row equals the one already in the source
+    .utoc, so copy those and recompute only `modified` (index -> new payload).
+    This avoids decompressing the whole container just to re-hash it -- the
+    largest cost when patching texture-heavy mods.
 
-    Getting this wrong means the game rejects the container, so it must be
-    recomputed for every chunk whenever anything changes.
+    Valid because patch_mod's rebuild keeps chunk order and count identical to
+    the source, so row i describes the same chunk in both.
     """
     import hashlib
-    out = bytearray()
-    for payload in chunk_payloads:
-        out += hashlib.sha1(payload).digest() + b"\x00" * 12 + bytes([1])
+    out = bytearray(toc.d[toc.meta_off: toc.meta_off + toc.n * 33])
+    for i, payload in modified.items():
+        out[i * 33: (i + 1) * 33] = (
+            hashlib.sha1(payload).digest() + b"\x00" * 12 + bytes([1]))
     return bytes(out)
