@@ -449,15 +449,27 @@ def show_list(mods, debug=False):
     print()
     for line in config.describe():
         print(line)
+    for path in config.other_oodles():
+        print(f"         also found:  {path}")
     print(f"  Mods   :            {config.MODS_DIR}")
     if getattr(config, "MODS_PAKS_DIR", "") and os.path.isdir(config.MODS_PAKS_DIR):
         print(f"  ~mods  :            {config.MODS_PAKS_DIR}")
     print()
 
-    results = {name: mod_status(utoc) for name, utoc in mods.items()}
+    # Reading a mod decompresses its meshes -- slow with a big library, so show a
+    # counter. The isatty guard keeps piped/redirected output clean.
+    total = len(mods)
+    progress = sys.stdout.isatty()
+    results = {}
+    for idx, (name, utoc) in enumerate(mods.items(), 1):
+        if progress:
+            print(f"\r  reading {idx}/{total}  {name[:40]:<40}", end="", flush=True)
+        results[name] = mod_status(utoc)
+    if progress:
+        print("\r" + " " * 62 + "\r", end="", flush=True)
 
     # ---- Dresscode, on its own -----------------------------------------
-    print("  Dresscode  (the outfit menu itself)")
+    print("  Dresscode  (the base mod, by YIISx)")
     if DRESSCODE not in results:
         print("    [!!]  NOT INSTALLED")
         print("          Costume mods have no menu without it. Install Dresscode")
@@ -486,9 +498,9 @@ def show_list(mods, debug=False):
         for name in sorted(withmesh):
             state, n, _ = withmesh[name]
             label = "needs patching" if state == "needs_fix" else "patched"
-            tag = "  (~mods)" if mod_source(mods[name]) == "paks" else ""
+            src = "~mods" if mod_source(mods[name]) == "paks" else "Mods"
             print(f"    {MARK[state]}  {name:<{width}} {label:<15} "
-                  f"{n} mesh{_plural(n)}{tag}")
+                  f"{n} mesh{_plural(n)}  ({src})")
 
     if errored:
         print()
