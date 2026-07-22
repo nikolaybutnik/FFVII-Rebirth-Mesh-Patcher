@@ -6,7 +6,7 @@ Two things this tool needs, and neither should require editing a config file:
   THE GAME FOLDER. Found either by noticing we are sitting inside it, or by
   reading Steam's own library list.
 
-  AN OODLE DECOMPRESSION LIBRARY. Mod archives are Oodle-compressed. FF7
+  AN OODLE DECOMPRESSION LIBRARY. Mod archives are Oodle-compressed. FFVII
   Rebirth links Oodle statically, so there is no copy in the game folder -- but
   plenty of other games ship one as a loose DLL, and using a copy already on the
   user's disk is both legal and invisible. We are not allowed to redistribute
@@ -23,7 +23,7 @@ import re
 GAME_FOLDER_NAME = "FINAL FANTASY VII REBIRTH"
 OODLE_GLOB = "oo2core_*_win64.dll"
 
-# FF7 Rebirth's Oodle streams need oo2core_6 or newer. oo2core_5 and older
+# FFVII Rebirth's Oodle streams need oo2core_6 or newer. oo2core_5 and older
 # return nothing (they can't decode this game), so they must never be selected --
 # picking one silently makes every mod look unreadable/unaffected.
 OODLE_MIN_VERSION = 6
@@ -31,7 +31,7 @@ OODLE_MIN_VERSION = 6
 
 def _oodle_version_ok(path):
     """
-    True if this DLL is new enough for FF7 Rebirth.
+    True if this DLL is new enough for FFVII Rebirth.
 
     Versioned names (oo2core_<N>_win64.dll) must be N >= OODLE_MIN_VERSION. The
     unversioned oo2core.dll (recent Unreal Engine) has no number and is always
@@ -113,7 +113,7 @@ def _looks_like_game(path):
 
 def find_game(start=None):
     """
-    Locate the FF7 Rebirth install.
+    Locate the FFVII Rebirth install.
 
     First check whether we are sitting inside it -- if this tool was dropped in
     End\\Mods\\ or anywhere under the game folder, walking up finds it and no
@@ -315,7 +315,7 @@ def find_all_oodle(extra_dirs=()):
 
 
 # Games known to ship a WORKING DLL loose, for the "could not find it" message.
-# FF7 Rebirth needs oo2core_6 or newer; oo2core_5 and older can't decode it.
+# FFVII Rebirth needs oo2core_6 or newer; oo2core_5 and older can't decode it.
 KNOWN_OODLE_GAMES = [
     "ELDEN RING",
     "DOOM Eternal",

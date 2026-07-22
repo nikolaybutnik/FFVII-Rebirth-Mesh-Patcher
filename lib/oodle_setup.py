@@ -2,7 +2,7 @@
 oodle_setup.py -- ask the user for an Oodle DLL, once, and remember it.
 
 Mod archives are Oodle-compressed. The library is proprietary and cannot be
-bundled, and FF7 Rebirth links it statically so there is no copy in the game
+bundled, and FFVII Rebirth links it statically so there is no copy in the game
 folder to borrow. detect.find_oodle() looks through installed games first; this
 is what happens when that comes up empty.
 

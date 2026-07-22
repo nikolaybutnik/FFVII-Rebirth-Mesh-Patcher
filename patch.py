@@ -1,5 +1,5 @@
 """
-patch.py -- FF7 Rebirth mesh patcher.
+patch.py -- FFVII Rebirth mesh patcher.
 
 Fixes mods that were built before game patch V1.005 and no longer load. Works on
 Dresscode itself, on costume mods, and on loose pak mods -- anything containing a

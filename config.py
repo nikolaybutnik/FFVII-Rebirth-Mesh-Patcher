@@ -6,7 +6,7 @@ The tool finds what it needs by itself:
   THE GAME      by noticing it is running from inside the game folder, or by
                 reading Steam's library list.
   THE OODLE DLL by looking beside this tool, then through your installed Steam
-                games. Mod archives are Oodle-compressed, and FF7 Rebirth links
+                games. Mod archives are Oodle-compressed, and FFVII Rebirth links
                 Oodle statically so there is no copy in the game folder. Many
                 other games ship one as a loose file, and using a copy already
                 on your disk is both legal and invisible.
