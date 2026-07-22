@@ -51,10 +51,11 @@ appeared. If that changes, the author's own release is the better option.
   installer, **tick "Add Python to PATH"**; skipping that box is the usual cause
   of a later `'python' is not recognized`.
 - **NumPy** — a small library the patcher needs. After extracting the tool
-  (below), double-click **`run.bat`** — it just opens a terminal in the tool's
-  folder (nothing else; a few readable lines) — then type `pip install numpy`
-  and press Enter. If that reports `'pip' is not recognized`, use
-  `python -m pip install numpy` instead. You only do this once.
+  (below), open a terminal in its folder — type `cmd` in File Explorer's address
+  bar while in the folder, or right-click the folder and choose "Open in
+  Terminal" — then type `pip install numpy` and press Enter. If that reports
+  `'pip' is not recognized`, use `python -m pip install numpy` instead. You only
+  do this once.
 
 That's it. There is normally nothing else to configure.
 
@@ -63,8 +64,8 @@ That's it. There is normally nothing else to configure.
 ## Setup
 
 Everything runs from a terminal inside the extracted folder — the same one from
-Requirements: double-click **`run.bat`**, or type `cmd` in File Explorer's
-address bar while in the folder. Then run:
+Requirements: type `cmd` in File Explorer's address bar while in the folder (or
+right-click the folder and choose "Open in Terminal"). Then run:
 
 ```
 python patch.py --list
