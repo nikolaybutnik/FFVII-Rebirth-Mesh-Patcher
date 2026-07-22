@@ -153,6 +153,8 @@ def scan(utoc_path):
     """
     toc = iostore.Toc(utoc_path)
     found = []
+    read_ok = 0     # .uasset chunks that decompressed without error
+    parsed = 0      # ...of those, how many parsed as a Zen package
     for i in sorted(toc.paths):
         if not toc.paths[i].endswith(".uasset"):
             continue
@@ -166,10 +168,15 @@ def scan(utoc_path):
             found.append(dict(chunk=i, path=toc.paths[i], export="",
                               size=0, error=f"could not read: {ex}"))
             continue
+        read_ok += 1
         try:
             pkg = zen.ZenPackage(data)
         except Exception:
+            # Decoded but unparseable -- a wrong Oodle DLL returns garbage of the
+            # right length. One odd asset might not parse, so escalate only if
+            # NOTHING does (checked after the loop), not here.
             continue
+        parsed += 1
         if not any(e["cls"] == skm.SKELETAL_MESH for e in pkg.exports):
             continue
 
@@ -192,6 +199,13 @@ def scan(utoc_path):
                                       size=e["size"], error=str(ex)))
                 break
             offset += e["size"]
+
+    # Read fine but nothing parsed -> bad decode, not a mesh-free mod.
+    if read_ok and not parsed and not found:
+        found.append(dict(
+            chunk=-1, path="", export="", size=0,
+            error="packages did not decode -- the Oodle DLL is likely the "
+                  "wrong version for this game"))
     return toc, found
 
 
