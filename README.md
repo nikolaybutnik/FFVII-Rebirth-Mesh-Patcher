@@ -208,10 +208,11 @@ That mod has no character model, so V1.005 didn't break it. Nothing to do.
 This handles single-detail-level models, which covers every costume mod tested
 so far. It refuses rather than guessing. Please report the mod name.
 
-**Patched, but the model still looks wrong**
-Most likely not the mesh. Check whether the mod page lists a required mod — a
-missing material renders as flat grey or a patchwork, and no mesh fix can
-correct that. Install the requirements first.
+**Patched, but the model still looks wrong (grey checkerboard skin)**
+Most likely not the mesh. Many costume mods keep their skin textures in a
+separate companion mod; without it the costume loads but renders grey/checkered,
+and no mesh fix can correct that. `--list` flags known cases under **Missing
+required files** — otherwise check the mod page's Requirements section.
 
 **The game still crashes**
 Run `python patch.py --restore --all`, then report the problem including the

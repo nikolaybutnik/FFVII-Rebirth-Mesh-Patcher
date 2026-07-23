@@ -58,6 +58,7 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "lib"))
 
 import config
+import deps
 import dirindex
 import iostore
 import meshfix
@@ -471,6 +472,20 @@ def mod_status(utoc):
     return "patched", len(found), ""
 
 
+_avail = None
+
+
+def _missing_reqs(utoc):
+    """Known companion mods this mod needs but the user has not installed."""
+    global _avail
+    try:
+        if _avail is None:
+            _avail = deps.installed_ids()
+        return deps.missing_requirements(utoc, _avail)[0]
+    except Exception:
+        return []
+
+
 def _plural(n):
     return "es" if n != 1 else ""
 
@@ -561,6 +576,19 @@ def show_list(mods, debug=False):
         for chunk in _wrap(nomesh):
             print(f"    {chunk}")
 
+    # ---- missing companion mods -----------------------------------------
+    reqs = {name: r for name, utoc in mods.items()
+            if (r := _missing_reqs(utoc))}
+    if reqs:
+        print()
+        print("  Missing required files -- these mods reference another mod that")
+        print("  is NOT installed. They will load with grey-checker textures.")
+        for name in sorted(reqs):
+            for r in reqs[name]:
+                print(f"    [!!]  {name}  needs {r}")
+        print("          Patching cannot fix this -- install the missing mod")
+        print("          (see the Requirements on the mod's download page).")
+
     # ---- summary ---------------------------------------------------------
     # Dresscode is excluded -- it has an official update and is not patched here.
     need = sorted(k for k, v in results.items()
@@ -593,6 +621,15 @@ def show_list(mods, debug=False):
                     print(f"    {name}: {f['path']} :: {f['export']}")
                     print(f"        {f['n_lods']} LOD, {f['n_sections']} sections, "
                           f"{f['size']:,} bytes, {fmt}")
+        print()
+        print("  --- debug: unresolved package imports ---")
+        avail = deps.installed_ids()
+        for name, utoc in mods.items():
+            known, unknown = deps.missing_requirements(utoc, avail)
+            if known or unknown:
+                ids = ", ".join(f"{i:#x}" for i in sorted(unknown))
+                print(f"    {name}: needs {known or 'nothing known'}; "
+                      f"other unresolved: {ids or 'none'}")
         print()
 
 
@@ -676,6 +713,9 @@ def main(argv):
                 changed.append(name)
             else:
                 unchanged.append(name)
+            for r in _missing_reqs(utoc):
+                print(f"    note: this mod also needs {r}, which is not")
+                print("    installed -- without it, textures show as grey checkers.")
         except Exception as ex:
             print(f"    FAILED: {type(ex).__name__}: {ex}")
             failed.append(name)
