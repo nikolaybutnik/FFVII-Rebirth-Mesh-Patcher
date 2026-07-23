@@ -323,7 +323,7 @@ KNOWN_OODLE_GAMES = [
     "Indiana Jones and the Great Circle",
 ]
 
-# Reported by users to ship one, but unverified (I don't own them).
+# Reported by users to ship one, but unverified.
 REPORTED_OODLE_GAMES = [
     "Warhammer 40,000: Darktide",
     "ELDEN RING NIGHTREIGN",

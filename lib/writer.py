@@ -9,13 +9,14 @@ Writing a binary format from a reverse-engineered spec is exactly the kind of jo
 where you can be subtly wrong and not find out until the game crashes with no
 useful error.
 
-So before trusting it on a modified build, we ran it on the UNMODIFIED mod and
-compared the result to the original byte for byte. It reproduces Dresscode's
-original .utoc exactly -- 10821 bytes, all 51 chunks identical.
+So before trusting it on a modified build, we ran it on an UNMODIFIED mod and
+compared the result to the original byte for byte -- 10821 bytes, all 51 chunks
+identical.
 
 That single test catches endianness mistakes, alignment errors, and the
-virtual-vs-physical offset confusion all at once. `verify.py --roundtrip` runs it.
-Always do this after touching this file.
+virtual-vs-physical offset confusion all at once. After touching this file,
+repeat it: rebuild a mod's container with no changes and diff against the
+original.
 
 THE TWO ADDRESS SPACES
 ----------------------

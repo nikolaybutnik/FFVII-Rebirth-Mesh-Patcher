@@ -14,9 +14,6 @@ a file called global.utoc.
 So: to understand a mod you must read the game it was built for. This module loads
 that table once and caches it.
 
-This is what let us scan all 50 packages and prove exactly two contain a
-SkeletalMesh -- confirming the mod author's account.
-
 """
 
 import struct
@@ -69,8 +66,8 @@ def load():
     o = 4
     for _ in range(count):
         # CAREFUL: the object NAME comes first, before the global index.
-        # I originally had these swapped, which produced name indices in the
-        # billions -- a reliable sign you've got a field order wrong.
+        # Swapping them produces name indices in the billions -- the reliable
+        # sign of a field-order mistake.
         (name_i, name_n, global_id, outer,
          cdo_class) = struct.unpack_from("<IIQQQ", meta, o)
         o += 32

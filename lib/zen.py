@@ -14,11 +14,9 @@ A package has three parts that matter to us:
 
   IMPORTS     Things this package USES from other packages. If a blueprint places
               a mesh in the world, it has an import pointing at that mesh.
-              >>> This is what we edit to sever the PointerCrystal reference. <<<
 
-  EXPORTS     Things this package DEFINES. Empty.uasset exports one object called
-              "Empty" whose class is SkeletalMesh. Scanning every package's exports
-              for class == SkeletalMesh is how the two broken meshes were found.
+  EXPORTS     Things this package DEFINES. Scanning every package's exports for
+              class == SkeletalMesh is how the patcher finds the meshes to fix.
 
 """
 
@@ -29,8 +27,7 @@ def load_name_batch(namedata, hashdata):
     """
     Decode a package's name table into a list of strings.
 
-    Two things about this format are genuinely surprising, and both cost me a
-    debugging round:
+    Two things about this format are genuinely surprising:
 
     1. The NUMBER of names is not stored in the name data. You compute it from
        the size of the separate *hash* blob:  count = len(hashdata)/8 - 1
@@ -182,9 +179,9 @@ class ZenPackage:
         """
         True if this package uses the compact "unversioned" property format.
 
-        All of the game's packages set this; none of the mod's do. That is a real
+        All of the game's packages set this; mods generally do not. That is a real
         difference -- but it is NOT what patch V1.005 broke. It predates the patch,
-        the mod worked fine with it, and Unreal handles both styles per package.
-        Recorded here so nobody wastes time chasing it (as I nearly did).
+        and Unreal handles both styles per package. Recorded here so nobody wastes
+        time chasing it.
         """
         return bool(self.pkg_flags & 0x00002000)

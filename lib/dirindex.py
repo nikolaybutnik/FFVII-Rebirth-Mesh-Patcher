@@ -33,12 +33,12 @@ New entries are PREPENDED to their list, not appended. So each list ends up in
 reverse creation order: the last folder added becomes its parent's first child.
 
 Folder *numbers* are still assigned in creation order -- it's only the links that
-run backwards. In this mod the root's children chain is 9 -> 6 -> 5 -> 4 -> 3 -> 1,
-which is exactly the reverse of the order they were created in.
+run backwards. In one real container the root's children chain reads
+9 -> 6 -> 5 -> 4 -> 3 -> 1: exactly the reverse of the order they were created in.
 
 Appending instead of prepending still produces a perfectly valid, working tree --
 just a differently ordered one. We prepend so the output matches Unreal's own
-byte for byte, which is what makes the roundtrip test in verify.py meaningful.
+byte for byte, which is what makes byte-identical roundtrip checks possible.
 
 Verified correct: rebuilding the untouched file list reproduces the original
 index byte for byte (2380 bytes).
@@ -54,7 +54,7 @@ def build_dir_index(mount, files):
     """
     Serialize a directory index.
 
-        mount  path prefix, e.g. "../../../End/Mods/Dresscode/Content/"
+        mount  path prefix, e.g. "../../../End/Mods/SomeMod/Content/"
         files  list of (path, chunk_index) pairs
 
     Returns the raw bytes to drop into the .utoc.

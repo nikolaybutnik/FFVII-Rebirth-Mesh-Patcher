@@ -54,7 +54,7 @@ def find_bounds(data, start, end):
     """
     Locate the bounding box, which acts as our anchor into the binary section.
 
-    Why we search instead of calculating: for the mod's packages we could walk the
+    Why we search instead of calculating: for mod packages we could walk the
     tagged properties to find where they end, but the game's packages use the
     unversioned format which we can't decode without the class schema. Searching
     for a recognisable signature works for both.
@@ -68,7 +68,8 @@ def find_bounds(data, start, end):
     the length of the extent vector. Random bytes essentially never satisfy that,
     which makes this reliable rather than merely suggestive.
 
-    Confirmed on: Empty -> extent (1,1,1), radius 1.732 = sqrt(3), a unit cube.
+    Confirmed on a real cooked asset: extent (1,1,1), radius 1.732 = sqrt(3) --
+    a unit cube.
     """
     for o in range(start, min(start + 8000, end - 40)):
         if data[o] != 1 or data[o + 1] != 0:
@@ -142,8 +143,7 @@ def parse_lod_header(data, o):
     """
     Parse the start of the geometry: LOD count, then LOD 0's header.
 
-    Both the mod's meshes and the game's decode consistently here -- which is
-    exactly the negative result described at the top of this file.
+    Both mod and game meshes decode consistently here.
     """
     is_cooked = struct.unpack_from("<I", data, o)[0]
     n_lods = struct.unpack_from("<I", data, o + 4)[0]

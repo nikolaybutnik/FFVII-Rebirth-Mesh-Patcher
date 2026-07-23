@@ -5,9 +5,9 @@ WHAT THIS IS
 ------------
 A mod ships as three files:
 
-    DresscodeEnd-WindowsNoEditor.utoc   the index  ("what's inside, and where")
-    DresscodeEnd-WindowsNoEditor.ucas   the data   (everything, compressed)
-    DresscodeEnd-WindowsNoEditor.pak    a stub Unreal still expects to exist
+    SomeModEnd-WindowsNoEditor.utoc   the index  ("what's inside, and where")
+    SomeModEnd-WindowsNoEditor.ucas   the data   (everything, compressed)
+    SomeModEnd-WindowsNoEditor.pak    a stub Unreal still expects to exist
 
 Compare it to a ZIP file: the .ucas is the compressed bytes and the .utoc is the
 table of contents. This module reads the .utoc, then uses it to pull individual
@@ -25,13 +25,17 @@ number:
 
 and then look that block up in the block table, which holds the true .ucas position.
 
-This trips up everyone (it certainly tripped up me).
+This is easy to get wrong, and wrong reads look like random garbage.
 
 """
 
 import ctypes
 import os
 import struct
+import sys
+
+# config lives in the repo root; needed when this file is run directly.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import config
 
@@ -49,10 +53,8 @@ import config
 # codec/level from each block's own header (proven across oo2core 6/7/9).
 # ---------------------------------------------------------------------------
 
-# The DLL is loaded ON FIRST USE, not at import time. That distinction matters:
-# loading it at import means a machine without one cannot even import this
-# module, so the tool dies with a raw ctypes OSError before it can explain the
-# problem or offer to help. Deferring the load keeps that failure recoverable.
+# Loaded on first use, not at import: a machine with no DLL must still be able
+# to import this module and get a helpful error, not a raw ctypes OSError.
 _oodle = None
 
 
@@ -112,10 +114,8 @@ def oodle_decompress(src, out_size):
     return out.raw[:out_size]
 
 
-# Kraken, at a middling level. The game reads any Oodle codec/level from each
-# block's own header, so we need NOT match the build's original encoder settings
-# -- a valid Oodle block is a valid Oodle block. The patcher round-trips every
-# block it compresses (decompress == original) before trusting it.
+# Kraken, at a middling level. Any codec/level works (see header note above),
+# and every block is round-trip verified before use.
 _OODLE_KRAKEN = 8
 _OODLE_LEVEL = 4
 
@@ -148,7 +148,7 @@ class Toc:
 
         toc  = Toc("path/to/Mod.utoc")    # the .ucas is found automatically
         data = toc.read(4)                # decompressed bytes of chunk 4
-        print(toc.paths[4])               # "Assets/Empty/Empty.uasset"
+        print(toc.paths[4])               # "Asset/SomeMesh.uasset"
 
     Useful attributes:
         n            number of chunks
@@ -175,8 +175,8 @@ class Toc:
 
         self.container_id = struct.unpack_from("<Q", data, 0x38)[0]
         # Flags: 1=Compressed, 2=Encrypted, 4=Signed, 8=Indexed.
-        # Dresscode is 0x09 -> compressed + indexed, NOT encrypted or signed.
-        # That is precisely why this whole fix is possible.
+        # Mods ship as 0x09 -> compressed + indexed, NOT encrypted or signed --
+        # which is precisely why this tool can rewrite them.
         self.flags = data[0x50]
 
         o = self.hdr_size
@@ -345,8 +345,10 @@ class Toc:
 
 
 if __name__ == "__main__":
-    # Quick self-test: list everything in the mod.
-    toc = Toc(config.MOD_UTOC)
+    # Quick self-test: list everything in a container.
+    if len(sys.argv) < 2:
+        sys.exit("usage: python iostore.py <path-to.utoc>")
+    toc = Toc(sys.argv[1])
     print(f"version={toc.version} chunks={toc.n} flags={toc.flags:#x} "
           f"({'ENCRYPTED' if toc.flags & 2 else 'not encrypted'}, "
           f"{'SIGNED' if toc.flags & 4 else 'not signed'})")

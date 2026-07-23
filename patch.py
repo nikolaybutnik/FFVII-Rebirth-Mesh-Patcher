@@ -650,13 +650,18 @@ def _owns_console():
         return False
 
 
-def _finish(summary, argv):
-    """Print the closing summary and hold the window open if we own it."""
+def _finish(summary):
+    """Print the closing summary."""
     print()
     for line in summary:
         print(line)
     print()
 
+
+def _pause_before_exit(argv):
+    """Hold the window open when we own it, so double-clickers can read the
+    output. Runs on EVERY exit -- listing, errors, "nothing selected" -- not
+    just after patching."""
     if "--no-pause" in argv:
         return
     if "--pause" in argv or _owns_console():
@@ -729,7 +734,7 @@ def main(argv):
                           if unchanged else "."))
         summary.append("  Done. Start the game and check your outfits.")
 
-    _finish(summary, argv)
+    _finish(summary)
     return 1 if failed else 0
 
 
@@ -773,6 +778,8 @@ def startup():
 
 
 if __name__ == "__main__":
-    if not startup():
-        sys.exit(1)
-    sys.exit(main(sys.argv[1:]))
+    code = 0 if startup() else 1
+    if code == 0:
+        code = main(sys.argv[1:])
+    _pause_before_exit(sys.argv[1:])
+    sys.exit(code)

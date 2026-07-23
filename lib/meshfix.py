@@ -11,9 +11,6 @@ down:
 
 CHANGE #1 -- THE ONE THAT CRASHES
 ---------------------------------
-This is the thing the mod author referred to as "patch V1.005 changed the
-structure of skeletal meshes".
-
 A skeletal mesh is split into RENDER SECTIONS -- runs of triangles sharing one
 material. Each section ends with a small tail. In mods built before the patch that
 tail contains an extra structure, FDuplicatedVerticesBuffer:
@@ -43,8 +40,8 @@ misparse; it's the structure being read correctly.
 
 So the mods write two arrays the current game doesn't read. The reader desyncs
 immediately after the first section's ClothingData, then interprets vertex data as
-structure -- which is why hovering a broken costume in Dresscode is a hard crash
-rather than a missing model.
+structure -- which is why hovering a broken costume in the outfit menu is a hard
+crash rather than a missing model.
 
 THE FIX
 -------
