@@ -368,9 +368,14 @@ def patch_mod(name, utoc_path):
 
     print(f"    rebuilding container ({toc.n} chunks)")
     progress = sys.stdout.isatty()
-    # Compress rewritten chunks with the method the container already uses (Oodle),
-    # or None if it stores everything raw -- then _pack_blocks stores raw too.
-    comp_method = next((b[3] for b in toc.blocks if b[3] != 0), None)
+    # Oodle's index in THIS container's method table -- a wrong index would make
+    # the game misdecode our blocks. No Oodle in the table -> store raw.
+    comp_method = next((m for m, method_name in enumerate(toc.methods)
+                        if method_name.lower() == "oodle"), None)
+    if comp_method is None and len(toc.methods) > 1:
+        print(f"    note: container compresses with "
+              f"{', '.join(toc.methods[1:])}, not Oodle -- "
+              "storing patched chunks uncompressed")
     ucas_in = open(os.path.join(src_dir, base + ".ucas"), "rb")
     chunks = []
     new_paths = []

@@ -305,7 +305,17 @@ class Toc:
             pos, csize, usize, method = self.blocks[block]
             self.ucas.seek(pos)
             raw = self.ucas.read(csize)
-            out += raw[:usize] if method == 0 else oodle_decompress(raw, usize)
+            if method == 0:
+                out += raw[:usize]
+            else:
+                # Fail naming the codec -- Oodle's own error would blame the DLL.
+                name = (self.methods[method] if method < len(self.methods)
+                        else f"#{method}")
+                if name.lower() != "oodle":
+                    raise RuntimeError(
+                        f"this container is compressed with {name!r}, not Oodle "
+                        "-- this tool only decodes Oodle containers")
+                out += oodle_decompress(raw, usize)
             remaining -= usize
             block += 1
 
