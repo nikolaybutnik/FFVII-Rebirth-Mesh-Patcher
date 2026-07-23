@@ -394,6 +394,19 @@ def detect_dup_verts(data, sections_at, n_sections):
     return False, dict(candidates)[False]
 
 
+def old_format(payload, sections_at, n_sections):
+    """True if this mesh still has ANY pre-1.005 trait: dup-verts arrays (the
+    crash), 8/16-byte tangents (wrong shading), or full-precision UVs (wrong
+    textures). convert_payload fixes all three, so "needs patching" must test
+    all three -- dup arrays alone miss meshes that were partially hand-fixed."""
+    has_dup, end = detect_dup_verts(payload, sections_at, n_sections)
+    if has_dup:
+        return True
+    buf = _walk_vertex_buffers(payload, end)
+    return buf is not None and bool(buf["elem"] in (8, 16)
+                                    or (buf["full_uv"] and buf["uv_elem"] == 8))
+
+
 def convert_payload(payload):
     """
     Convert one skeletal mesh export payload from the old layout to the new one.

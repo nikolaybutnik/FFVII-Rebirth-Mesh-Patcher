@@ -196,12 +196,12 @@ def scan(utoc_path):
                     after, info = skm.parse_head(payload, 0, len(payload),
                                                  skm.NoNames(), verbose=False)
                     lod = skm.parse_lod_header(payload, after)
-                    has_dup, _ = meshfix.detect_dup_verts(
+                    needs = meshfix.old_format(
                         payload, lod["sections_at"], lod["n_sections"])
                     found.append(dict(chunk=i, path=toc.paths[i], export=e["name"],
                                       size=e["size"], n_lods=lod["n_lods"],
                                       n_sections=lod["n_sections"],
-                                      needs_fix=has_dup))
+                                      needs_fix=needs))
                 except Exception as ex:
                     found.append(dict(chunk=i, path=toc.paths[i], export=e["name"],
                                       size=e["size"], error=str(ex)))
@@ -499,21 +499,6 @@ def _plural(n):
     return "es" if n != 1 else ""
 
 
-def _wrap(items, width=66):
-    """Pack a list of names into comma-separated lines."""
-    out, line = [], ""
-    for word in items:
-        candidate = f"{line}, {word}" if line else word
-        if len(candidate) > width and line:
-            out.append(line + ",")
-            line = word
-        else:
-            line = candidate
-    if line:
-        out.append(line)
-    return out
-
-
 def show_list(mods, debug=False):
     """
     Print the status of every installed mod.
@@ -582,8 +567,10 @@ def show_list(mods, debug=False):
     if nomesh:
         print()
         print("  No character meshes -- unaffected by V1.005")
-        for chunk in _wrap(nomesh):
-            print(f"    {chunk}")
+        width = max(len(k) for k in nomesh) + 2
+        for name in nomesh:
+            src = "~mods" if mod_source(mods[name]) == "paks" else "Mods"
+            print(f"    [--]  {name:<{width}} ({src})")
 
     # ---- missing companion mods -----------------------------------------
     reqs = {name: r for name, utoc in mods.items()
