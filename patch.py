@@ -154,6 +154,12 @@ def scan(utoc_path):
     each is in the old (broken) or new layout.
     """
     toc = iostore.Toc(utoc_path)
+    # No file index but packages inside: we cannot see what they are, so never
+    # claim "unaffected".
+    if not toc.paths and any(toc.chunk_type(i) == 2 for i in range(toc.n)):
+        return toc, [dict(chunk=-1, path="", export="", size=0,
+                          error="container has no file index -- cannot tell "
+                                "what is inside; please report this mod")]
     found = []
     read_ok = 0     # .uasset chunks that decompressed without error
     parsed = 0      # ...of those, how many parsed as a Zen package
@@ -313,6 +319,9 @@ def patch_mod(name, utoc_path):
     mod is either fully converted or left exactly as it was.
     """
     toc = iostore.Toc(utoc_path)
+    if not toc.paths and any(toc.chunk_type(i) == 2 for i in range(toc.n)):
+        raise RuntimeError("container has no file index -- cannot see or patch "
+                           "its packages; please report this mod")
     base = os.path.splitext(os.path.basename(utoc_path))[0]
     src_dir = os.path.dirname(utoc_path)
 
