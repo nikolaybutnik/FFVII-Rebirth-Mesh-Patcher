@@ -280,6 +280,29 @@ def rebuild_header(header_bytes, size_deltas):
     return bytes(out)
 
 
+def _pack_blocks(payload, block_size, comp_method):
+    """Split `payload` into <=block_size .ucas blocks, Oodle-compressing each so a
+    patched mesh does not bloat the container (uncompressed it can double it).
+
+    Every compressed block is verified to round-trip -- decompress back to the
+    exact original -- before it is used. Anything that has no compressor, does
+    not shrink, or does not round-trip is stored raw (method 0), so the output is
+    always valid whatever the DLL does.
+    """
+    out = []
+    for k in range(0, len(payload), block_size):
+        raw = payload[k:k + block_size]
+        comp = iostore.oodle_compress(raw) if comp_method else None
+        ok = comp is not None and len(comp) < len(raw)
+        if ok:
+            try:
+                ok = iostore.oodle_decompress(comp, len(raw)) == raw
+            except Exception:
+                ok = False
+        out.append((comp, len(raw), comp_method) if ok else (raw, len(raw), 0))
+    return out
+
+
 def patch_mod(name, utoc_path):
     """
     Convert every skeletal mesh in one mod and rewrite its container.
@@ -344,15 +367,19 @@ def patch_mod(name, utoc_path):
     new_data[header_index] = rebuild_header(toc.read(header_index), size_deltas)
 
     print(f"    rebuilding container ({toc.n} chunks)")
+    progress = sys.stdout.isatty()
+    # Compress rewritten chunks with the method the container already uses (Oodle),
+    # or None if it stores everything raw -- then _pack_blocks stores raw too.
+    comp_method = next((b[3] for b in toc.blocks if b[3] != 0), None)
     ucas_in = open(os.path.join(src_dir, base + ".ucas"), "rb")
     chunks = []
     new_paths = []
     for i in range(toc.n):
+        if progress and i % 25 == 0:
+            print(f"\r    reading chunk {i}/{toc.n}...", end="", flush=True)
         if i in new_data:
             payload = new_data[i]
-            blocks = [(payload[k:k + toc.block_size],
-                       len(payload[k:k + toc.block_size]), 0)
-                      for k in range(0, len(payload), toc.block_size)]
+            blocks = _pack_blocks(payload, toc.block_size, comp_method)
             size = len(payload)
         else:
             # Untouched chunk: reuse its compressed blocks as-is. build_metas_from
@@ -373,6 +400,9 @@ def patch_mod(name, utoc_path):
         if i in toc.paths:
             new_paths.append((toc.paths[i], len(chunks) - 1))
 
+    if progress:
+        print("\r" + " " * 40 + "\r", end="", flush=True)
+
     directory = dirindex.build_dir_index(toc.mount, new_paths)
     body, ucas, offlen, block_table = writer.build_container(
         toc, chunks, toc.block_size)
@@ -380,6 +410,7 @@ def patch_mod(name, utoc_path):
                                    len(directory), toc.block_size)
     metas = writer.build_metas_from(toc, new_data)
 
+    print(f"    writing {len(ucas) / (1024 * 1024):,.0f} MB to disk...", flush=True)
     with open(os.path.join(src_dir, base + ".utoc"), "wb") as f:
         f.write(head + bytes(body) + directory + metas)
     with open(os.path.join(src_dir, base + ".ucas"), "wb") as f:

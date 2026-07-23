@@ -36,16 +36,17 @@ import struct
 import config
 
 # ---------------------------------------------------------------------------
-# Oodle decompression
+# Oodle (de)compression
 # ---------------------------------------------------------------------------
 # The container's data is compressed with Oodle, a proprietary library. There is
 # no Python implementation, so we call the real DLL through ctypes (Python's
 # "call a C function" mechanism).
 #
-# We only ever DEcompress. We never need to compress, because when rebuilding we
-# either reuse the original compressed bytes untouched or store new data
-# uncompressed. That's deliberate -- it means we never have to guess which Oodle
-# encoder settings the original build used.
+# Unchanged chunks reuse their original compressed bytes untouched, so mostly we
+# only DEcompress. We also compress the chunks we rewrite (oodle_compress, below)
+# so a patched mesh does not double the container -- and we do NOT need to match
+# the build's original encoder settings, because the game reads any Oodle
+# codec/level from each block's own header (proven across oo2core 6/7/9).
 # ---------------------------------------------------------------------------
 
 # The DLL is loaded ON FIRST USE, not at import time. That distinction matters:
@@ -109,6 +110,32 @@ def oodle_decompress(src, out_size):
             "This almost always means the block table was parsed incorrectly."
         )
     return out.raw[:out_size]
+
+
+# Kraken, at a middling level. The game reads any Oodle codec/level from each
+# block's own header, so we need NOT match the build's original encoder settings
+# -- a valid Oodle block is a valid Oodle block. The patcher round-trips every
+# block it compresses (decompress == original) before trusting it.
+_OODLE_KRAKEN = 8
+_OODLE_LEVEL = 4
+
+
+def oodle_compress(src):
+    """Kraken-compress `src`, or None if the DLL exposes no compressor or the
+    call failed. The caller decides whether the result actually helped and
+    verifies it round-trips."""
+    lib = _load_oodle()
+    if not hasattr(lib, "OodleLZ_Compress"):
+        return None
+    fn = lib.OodleLZ_Compress
+    fn.restype = ctypes.c_int64
+    fn.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int64, ctypes.c_char_p,
+                   ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p,
+                   ctypes.c_void_p, ctypes.c_int64]
+    out = ctypes.create_string_buffer(len(src) + len(src) // 16 + 512)
+    n = fn(_OODLE_KRAKEN, src, len(src), out, _OODLE_LEVEL,
+           None, None, None, None, 0)
+    return out.raw[:n] if n > 0 else None
 
 
 # Marks a "no entry here" link in the directory tree.

@@ -44,10 +44,10 @@ def build_container(toc, chunks, block_size=65536):
           "size":   total uncompressed length of the chunk,
         }
 
-    For unchanged chunks we pass the ORIGINAL compressed blocks straight through,
-    so we never need an Oodle compressor. For chunks we modified we pass a single
-    uncompressed block with method 0. Method 0 is always legal, so this is safe;
-    it just costs some file size (~90KB here).
+    Blocks are supplied ready to write: unchanged chunks reuse their ORIGINAL
+    compressed blocks, and rewritten chunks come from patch_mod already Oodle-
+    compressed (or stored raw as a fallback). This just lays them out -- it does
+    no compression itself and does not care which method a block uses.
 
     Returns (toc_body, ucas_bytes, offlen, block_table).
     `toc_body` is everything between the .utoc header and the directory index --
