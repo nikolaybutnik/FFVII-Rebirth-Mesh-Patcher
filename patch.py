@@ -123,7 +123,7 @@ def find_mods():
                 continue
             for f in sorted(os.listdir(d)):
                 if f.endswith(".utoc"):
-                    out[name] = os.path.join(d, f)
+                    add(name, os.path.join(d, f))
 
     # --- Loose pak mods --------------------------------------------------
     paks = getattr(config, "MODS_PAKS_DIR", "")
