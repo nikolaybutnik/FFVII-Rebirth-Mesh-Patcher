@@ -224,7 +224,7 @@ class Toc:
         # --- Chunk metas: 33 bytes each (SHA-1 + 12 zero bytes + a flags byte).
         self.meta_off = o
 
-        self.ucas = open(utoc_path.replace(".utoc", ".ucas"), "rb")
+        self.ucas = open(os.path.splitext(utoc_path)[0] + ".ucas", "rb")
         self.paths = self.parse_directory_index(self.dir_raw) if self.dir_size else {}
 
     # -- filenames -----------------------------------------------------------

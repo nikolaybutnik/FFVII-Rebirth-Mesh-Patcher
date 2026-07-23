@@ -690,6 +690,9 @@ def main(argv):
         return 0
 
     targets = mods if want_all else {k: v for k, v in mods.items() if k in named}
+    unknown = [n for n in named if n not in mods]
+    if unknown:
+        print("No mod called:", ", ".join(unknown), " (check the spelling)")
     if not targets:
         print("Nothing selected. Use --list, --all, or name a mod.")
         print("Installed mods:", ", ".join(mods))
