@@ -423,8 +423,9 @@ def convert_payload(payload):
 
     if lod["n_lods"] != 1:
         raise NotImplementedError(
-            f"mesh has {lod['n_lods']} LODs; only single-LOD meshes are supported "
-            "(see the LIMITATION note in meshfix.py)")
+            f"this mod's model has {lod['n_lods']} levels of detail; this tool "
+            "only handles the single-level models that costume mods use -- "
+            "please report this mod")
 
     has_dup, sections_end = detect_dup_verts(
         payload, lod["sections_at"], lod["n_sections"])

@@ -1,7 +1,8 @@
 __pycache__/
 *.pyc
 backups/
+oo2core*.dll
 config_local.py
 releases/
 assets/
-ACTION_PLAN.md
+tests/

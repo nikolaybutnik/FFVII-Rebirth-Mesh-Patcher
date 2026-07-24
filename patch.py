@@ -24,13 +24,18 @@ send on -- point the tool at any folder instead:
 
 --path takes only the Oodle library, not the game, so it works on a machine
 without FFVII Rebirth installed. A folder given as a bare argument (or dropped
-onto patch.py) is treated the same as --path.
+onto patch.py) is treated the same as --path; a dropped .zip/.7z/.rar is
+unpacked first, archives nested inside it included.
 
-A mod's .utoc/.ucas/.pak names are never changed -- the loader (Dresscode) keys
-off them, so a rename makes the mod undetectable. Originals are copied to
-./backups/<ModName>/ before an in-place write; --out writes the patched triple
-(same names) into another folder instead, taking no backup. The game and the
-Oodle library are located automatically; see config.py.
+Names cut both ways. A mod's .utoc/.ucas/.pak names are never changed -- the
+loader keys off them, so a rename makes the mod undetectable. A loader mod's
+FOLDER is the opposite: Dresscode looks a mod up by folder name and ignores one
+that does not match the .uplugin inside, so a dropped mod's folder is corrected
+to match (see _fix_loader_names).
+
+Originals are copied to ./backups/<ModName>/ before an in-place write; --out
+writes the patched triple (same names) into another folder instead, taking no
+backup. The game and the Oodle library are located automatically; see config.py.
 
 WHAT IT FIXES
 -------------
@@ -71,6 +76,7 @@ import os
 import shutil
 import struct
 import sys
+import zipfile
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "lib"))
 
@@ -92,6 +98,30 @@ SKIP = {"FF7RML", "FF7RModMenu"}
 _SELF = os.path.basename(os.path.dirname(os.path.abspath(__file__)))
 
 
+# Windows paths and mod names are case-insensitive, so every comparison of them
+# must be too: ...\mods\ff7rml is the SAME folder as ...\Mods\FF7RML, and an
+# exact match walks straight past the guards that keep the loader framework and
+# Dresscode from being patched.
+def _same_path(a, b):
+    return (os.path.normcase(os.path.abspath(a))
+            == os.path.normcase(os.path.abspath(b)))
+
+
+def _path_under(path, root):
+    """True when `path` is `root` or sits inside it."""
+    p = os.path.normcase(os.path.abspath(path))
+    r = os.path.normcase(os.path.abspath(root))
+    try:
+        return os.path.commonpath([p, r]) == r
+    except ValueError:                  # different drive
+        return False
+
+
+def _is_skipped(name):
+    """A loader-framework folder, or this tool itself -- never content."""
+    return name.lower() in {s.lower() for s in SKIP} or name.lower() == _SELF.lower()
+
+
 def _find_pak_utocs(root, max_depth=5):
     """Every .utoc under `root`, depth-limited. The game loads paks recursively
     beneath ~mods, and some users nest each mod in its own subfolder. Skips our
@@ -99,11 +129,12 @@ def _find_pak_utocs(root, max_depth=5):
     root = os.path.abspath(root)
     out = []
     for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = [d for d in dirnames if d != "_patch_backups"]
+        dirnames[:] = [d for d in dirnames
+                       if d.lower() != "_patch_backups"]
         if dirpath[len(root):].count(os.sep) >= max_depth:
             dirnames[:] = []
         for f in filenames:
-            if f.endswith(".utoc"):
+            if f.lower().endswith(".utoc"):
                 out.append(os.path.join(dirpath, f))
     return sorted(out)
 
@@ -114,13 +145,13 @@ def _add_loader_mods(add, mods_dir):
     if not os.path.isdir(mods_dir):
         return
     for name in sorted(os.listdir(mods_dir)):
-        if name in SKIP or name == _SELF:
+        if _is_skipped(name):
             continue
         d = os.path.join(mods_dir, name, "Content", "Paks", "WindowsNoEditor")
         if not os.path.isdir(d):
             continue
         for f in sorted(os.listdir(d)):
-            if f.endswith(".utoc"):
+            if f.lower().endswith(".utoc"):
                 add(name, os.path.join(d, f))
 
 
@@ -138,27 +169,26 @@ def _add_one_source(add, source):
     src = os.path.abspath(source)
     if _game_present():
         mods_dir = os.path.abspath(config.MODS_DIR)
-        if src == mods_dir:
+        if _same_path(src, mods_dir):
             _add_loader_mods(add, config.MODS_DIR)
             return
-        try:
-            rel = os.path.relpath(src, mods_dir)
-        except ValueError:              # different drive -> not under Mods
-            rel = ".."
-        if rel != ".." and not rel.startswith(".." + os.sep):
-            # Inside Mods: key by the owning mod folder, like the library view,
-            # so backups match what --restore looks for and skips still apply.
-            name = rel.split(os.sep)[0]
-            if name not in SKIP and name != _SELF:
+        if _path_under(src, mods_dir):
+            # Inside Mods: key by the owning mod folder under its real on-disk
+            # name, whatever casing was typed, so the key matches the library
+            # view -- which is what --restore looks for and what SKIP matches.
+            name = os.path.relpath(src, mods_dir).split(os.sep)[0]
+            name = next((a for a in os.listdir(mods_dir)
+                         if a.lower() == name.lower()), name)
+            if not _is_skipped(name):
                 d = os.path.join(mods_dir, name,
                                  "Content", "Paks", "WindowsNoEditor")
                 if os.path.isdir(d):
                     for f in sorted(os.listdir(d)):
-                        if f.endswith(".utoc"):
+                        if f.lower().endswith(".utoc"):
                             add(name, os.path.join(d, f))
             return
         paks = getattr(config, "MODS_PAKS_DIR", "")
-        if paks and src == os.path.abspath(paks):
+        if paks and _same_path(src, paks):
             _add_loose_paks(add, paks)
             return
     if src.lower().endswith(".utoc"):
@@ -213,13 +243,8 @@ def mod_source(utoc_path):
     """Which folder a mod was found in: 'paks' for ~mods, 'mods' otherwise.
     Derived from the path so it needs no separate bookkeeping."""
     paks = getattr(config, "MODS_PAKS_DIR", "")
-    if paks:
-        try:
-            if os.path.commonpath([os.path.abspath(utoc_path),
-                                   os.path.abspath(paks)]) == os.path.abspath(paks):
-                return "paks"
-        except ValueError:      # different drives -> not under ~mods
-            pass
+    if paks and _path_under(utoc_path, paks):
+        return "paks"
     return "mods"
 
 
@@ -420,7 +445,9 @@ def patch_mod(name, utoc_path, out_dir=None, backup_dir=None, no_backup=False):
     src_dir = os.path.dirname(utoc_path)
     dst_dir = os.path.abspath(out_dir) if out_dir else src_dir
     backup_dir = backup_dir or BACKUP_DIR
-    in_place = os.path.abspath(dst_dir) == os.path.abspath(src_dir)
+    # Same folder written differently is still the same folder -- get this wrong
+    # and we would rewrite the originals while reading them, with no backup.
+    in_place = _same_path(dst_dir, src_dir)
 
     # --- Convert every package that needs it.
     pkg_indices = [i for i in sorted(toc.paths)
@@ -579,6 +606,11 @@ def restore(name, utoc_path, backup_dir=None):
 # state matters separately -- a costume mod is useless without it.
 DRESSCODE = "Dresscode"
 
+
+def _is_dresscode(name):
+    return name.lower() == DRESSCODE.lower()
+
+
 MARK = {"needs_fix": "[!!]", "patched": "[ok]", "none": "[--]", "error": "[??]"}
 
 
@@ -679,7 +711,7 @@ def show_list(mods, debug=False, sources=None):
     # ---- Dresscode, on its own -------------------------------------------
     if show_dresscode:
         print("  Dresscode  (the base mod, by YIISx)")
-        if DRESSCODE not in results:
+        if not any(_is_dresscode(k) for k in results):
             print("    [!!]  NOT INSTALLED")
             print("          Costume mods have no menu without it. Install Dresscode")
             print("          from its author first, then run this again.")
@@ -691,7 +723,7 @@ def show_list(mods, debug=False, sources=None):
             print("          V1.005 release.")
 
     # ---- everything else ------------------------------------------------
-    others = {k: v for k, v in results.items() if k != DRESSCODE}
+    others = {k: v for k, v in results.items() if not _is_dresscode(k)}
     withmesh = {k: v for k, v in others.items() if v[0] in ("needs_fix", "patched")}
     errored = {k: v for k, v in others.items() if v[0] == "error"}
     nomesh = sorted(k for k, v in others.items() if v[0] == "none")
@@ -735,8 +767,9 @@ def show_list(mods, debug=False, sources=None):
     # ---- summary ---------------------------------------------------------
     # Dresscode is excluded -- it has an official update and is not patched here.
     need = sorted(k for k, v in results.items()
-                  if v[0] == "needs_fix" and k != DRESSCODE)
-    done = [k for k, v in results.items() if v[0] == "patched" and k != DRESSCODE]
+                  if v[0] == "needs_fix" and not _is_dresscode(k))
+    done = [k for k, v in results.items()
+            if v[0] == "patched" and not _is_dresscode(k)]
     print()
     if need:
         s = "s" if len(need) != 1 else ""
@@ -880,10 +913,209 @@ def _pause_before_exit(argv):
 
 
 def _wrapper_dir(source):
-    """The "Patched Mods" folder placed beside a dropped folder to hold its
-    patched copies."""
+    """The "Patched Mods" folder placed beside a dropped folder (or zip) to hold
+    its patched copies."""
     return os.path.join(os.path.dirname(os.path.abspath(source.rstrip("\\/"))),
                         "Patched Mods")
+
+
+# Archives a drop may contain; unpacked by _extract_archive.
+_ARCHIVE_EXTS = (".zip", ".7z", ".rar")
+
+
+def _is_archive(source):
+    return source.lower().endswith(_ARCHIVE_EXTS)
+
+
+def _archives_in(source):
+    """Every archive inside a dropped FOLDER -- mods are often shared as a
+    folder of per-mod archives, whose contents only appear once unpacked."""
+    if not os.path.isdir(source):
+        return []
+    return sorted(os.path.join(dp, f)
+                  for dp, _dn, fn in os.walk(source) for f in fn
+                  if _is_archive(f))
+
+
+def _contains_archive(source):
+    return bool(_archives_in(source))
+
+
+def _tar_exe():
+    """Windows 10 and 11 bundle tar (libarchive), which reads zip, 7z and rar
+    with nothing installed."""
+    tar = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"),
+                       "System32", "tar.exe")
+    if os.path.exists(tar):
+        return tar
+    import shutil as _sh
+    return _sh.which("tar")
+
+
+def _archive_listing(src):
+    """Every path inside `src`, read from its index without unpacking -- fast
+    even on a multi-gigabyte archive. Empty if the index cannot be read; the
+    extraction attempt is what reports why."""
+    if src.lower().endswith(".zip"):
+        try:
+            with zipfile.ZipFile(src) as z:
+                return z.namelist()
+        except Exception:
+            pass                        # fall through to tar, which may cope
+    tar = _tar_exe()
+    if not tar:
+        return []
+    import subprocess
+    try:
+        r = subprocess.run([tar, "-tf", src], capture_output=True, text=True)
+    except OSError:
+        return []
+    return r.stdout.splitlines() if r.returncode == 0 else []
+
+
+def _archive_summary(src):
+    """What an archive holds, as (mod names, archives nested inside).
+
+    Lets a drop show its contents before anything is unpacked. A loader mod is
+    named by its .uplugin -- the name Dresscode looks for, and the one it will
+    be renamed to, which is often not the name the download arrived under.
+    """
+    mods, inner = set(), set()
+    for entry in _archive_listing(src):
+        path = entry.replace("\\", "/").rstrip("/")
+        stem, ext = os.path.splitext(path.rsplit("/", 1)[-1])
+        ext = ext.lower()
+        if ext == ".uplugin":
+            mods.add(stem)
+        elif ext == ".utoc":
+            # A loader mod's container sits under Content/Paks/WindowsNoEditor
+            # and is named for the container, not the mod -- its .uplugin above
+            # is the real name, so only loose paks are named from the .utoc.
+            if "content/paks/windowsnoeditor" not in path.lower():
+                mods.add(stem)
+        elif _is_archive(path):
+            inner.add(path.rsplit("/", 1)[-1])
+    return sorted(mods), sorted(inner)
+
+
+def _show_archive(src, indent):
+    """Print what `src` holds, for the listing shown before the drop menu."""
+    mods, inner = _archive_summary(src)
+    for m in mods:
+        print(f"{indent}{m}")
+    for i in inner:
+        print(f"{indent}{i}   (unpacks to more)")
+    if not mods and not inner:
+        print(f"{indent}(cannot see inside this one until it is unpacked)")
+
+
+def _archive_tools(src, dst):
+    """Command lines that can unpack `src` into `dst`, best first. tar handles
+    all three formats with nothing installed; a 7-Zip install is the fallback
+    for anything older than Windows 10."""
+    import shutil as _sh
+    tar = _tar_exe()
+    if tar:
+        yield tar, [tar, "-xf", src, "-C", dst]
+    seven = (_sh.which("7z") or _sh.which("7za")
+             or next((p for p in (r"C:\Program Files\7-Zip\7z.exe",
+                                   r"C:\Program Files (x86)\7-Zip\7z.exe")
+                      if os.path.exists(p)), None))
+    if seven:
+        yield seven, [seven, "x", src, f"-o{dst}", "-y"]
+
+
+def _extract_archive(src, dst):
+    """Extract `src` into `dst`. A .zip goes through the standard library first,
+    then falls back to the same tools as .7z/.rar -- tar reads zip too, and
+    copes with ones zipfile rejects. Raises with a readable reason, and a way
+    forward, if nothing can unpack it."""
+    os.makedirs(dst, exist_ok=True)
+    reasons = []
+    if src.lower().endswith(".zip"):
+        try:
+            with zipfile.ZipFile(src) as z:
+                z.extractall(dst)
+            return
+        except Exception as ex:
+            reasons.append(str(ex))
+    import subprocess
+    for tool, argv in _archive_tools(src, dst):
+        try:
+            r = subprocess.run(argv, capture_output=True, text=True)
+        except OSError as ex:
+            reasons.append(str(ex))
+            continue
+        if r.returncode == 0 and any(os.scandir(dst)):
+            return
+        reasons.append(r.stderr.strip() or r.stdout.strip() or "nothing extracted")
+    raise RuntimeError(
+        "could not unpack it -- " + ("; ".join(reasons) if reasons else
+        f"no tool for {os.path.splitext(src)[1]} files") +
+        ". You can unpack it yourself and drop the folder instead.")
+
+
+def _expand_archives(root, max_depth=4):
+    """Unpack archives inside `root`, repeatedly -- mods are often shared as an
+    archive (or folder) of per-mod archives, which a single pass would leave
+    unopened. Each archive becomes a folder and is removed. Runs only on our
+    own copy, never the original."""
+    failed = set()
+    for _ in range(max_depth):
+        found = [p for p in (os.path.join(dp, f)
+                             for dp, _dn, fn in os.walk(root) for f in fn)
+                 if _is_archive(p) and p not in failed]
+        if not found:
+            return
+        for arc in found:
+            print(f"  Unpacking {os.path.basename(arc)} ...")
+            try:
+                _extract_archive(arc, os.path.splitext(arc)[0])
+            except Exception as ex:
+                print(f"  Could not unpack {os.path.basename(arc)}: {ex}")
+                failed.add(arc)
+                continue
+            os.remove(arc)
+
+
+def _dresscode_stem(folder):
+    """The .uplugin stem inside `folder` -- the name Dresscode looks a loader mod
+    up by, and thus the name the folder must have. None unless there is exactly
+    one .uplugin, so plain pak folders and anything irregular are left alone."""
+    try:
+        ups = [f for f in os.listdir(folder) if f.lower().endswith(".uplugin")]
+    except OSError:
+        return None
+    return os.path.splitext(ups[0])[0] if len(ups) == 1 else None
+
+
+def _fix_loader_names(root):
+    """Rename every loader mod folder under `root` to match its .uplugin.
+
+    Dresscode looks a mod up by its folder name and ignores it if that does not
+    equal the .uplugin inside; some authors ship a folder named for the download,
+    so the mod never appears. Returns root's own path, which may itself have
+    been renamed.
+    """
+    root = os.path.abspath(root)
+    targets = []
+    for dirpath, _dirnames, _filenames in os.walk(root):
+        stem = _dresscode_stem(dirpath)
+        if stem and os.path.basename(dirpath) != stem:
+            targets.append((dirpath, stem))
+    # Deepest first, so a parent rename never invalidates a pending child path.
+    new_root = root
+    for old, stem in sorted(targets, key=lambda t: -t[0].count(os.sep)):
+        new = os.path.join(os.path.dirname(old), stem)
+        if os.path.normcase(new) != os.path.normcase(old) and os.path.exists(new):
+            print(f"  note: \"{os.path.basename(old)}\" should be named \"{stem}\""
+                  " for Dresscode, but that name is taken -- left as is")
+            continue
+        os.rename(old, new)
+        print(f"  named for Dresscode:  {os.path.basename(old)}  ->  {stem}")
+        if os.path.normcase(old) == os.path.normcase(root):
+            new_root = new
+    return new_root
 
 
 def _folder_menu(sources):
@@ -892,11 +1124,10 @@ def _folder_menu(sources):
     job. Returns an exit code."""
     global _INTERACTED
     print("  ----------------------------------------------------------------")
-    n = len(sources)
-    where = "this folder" if n == 1 else f"these {n} folders"
-    print(f"  This will patch every mod in {where} and save the patched")
-    print("  copies -- originals untouched -- to a \"Patched Mods\" folder beside")
-    print("  " + ("it:" if n == 1 else "each:"))
+    print("  This will patch every mod in what you dropped (archives are")
+    print("  extracted first) and save the patched copies -- originals")
+    print("  untouched -- to a \"Patched Mods\" folder beside "
+          + ("it:" if len(sources) == 1 else "each:"))
     for s in sources:
         print(f"      {_wrapper_dir(s)}{os.sep}")
     try:
@@ -913,14 +1144,28 @@ def _folder_menu(sources):
 
 
 def _patch_copy(source):
-    """Patch a COPY into the "Patched Mods" wrapper, keeping the mod's EXACT
-    folder and file names -- the loader keys off them, and the wrapper (which
-    the game never reads) is the only added name. A folder is copied whole and
-    patched in place with no backup (the untouched source is the backup); a
-    lone .utoc goes through --out. Returns an exit code."""
+    """Patch a COPY into the "Patched Mods" wrapper. The .utoc/.ucas/.pak names
+    are kept exactly (the loader keys off them); loader mod FOLDERS are renamed
+    to match their .uplugin, which is what Dresscode keys off -- see
+    _fix_loader_names. A folder is copied whole, a zip extracted, then patched in
+    place with no backup (the untouched source is the backup); a lone .utoc goes
+    through --out. Returns an exit code."""
     global _INTERACTED
     src = os.path.abspath(source.rstrip("\\/"))
     wrapper = _wrapper_dir(source)
+
+    if _is_archive(src):
+        dst = os.path.join(wrapper, os.path.splitext(os.path.basename(src))[0])
+        print(f"  Extracting {os.path.basename(src)} to {dst} ...")
+        try:
+            _extract_archive(src, dst)
+        except Exception as ex:
+            print(f"  Could not extract: {ex}")
+            _INTERACTED = True
+            return 0
+        _expand_archives(dst)
+        dst = _fix_loader_names(dst)
+        return main(["--path", dst, "--all", "--no-backup"])
 
     if os.path.isfile(src):                     # a lone .utoc -- exact name kept
         return main(["--path", src, "--out", wrapper, "--all"])
@@ -933,6 +1178,8 @@ def _patch_copy(source):
         print(f"  Could not copy: {ex}")
         _INTERACTED = True
         return 0
+    _expand_archives(dst)
+    dst = _fix_loader_names(dst)
     return main(["--path", dst, "--all", "--no-backup"])
 
 
@@ -986,7 +1233,7 @@ def _parse_args(argv):
                 out = val
         elif a.startswith("-"):
             flags.append(a)
-        elif os.path.isdir(a) or a.lower().endswith(".utoc"):
+        elif os.path.isdir(a) or a.lower().endswith((".utoc",) + _ARCHIVE_EXTS):
             sources.append(a)
         else:
             names.append(a)
@@ -1008,23 +1255,15 @@ def _game_mod_dirs():
 def _under_game_mods(source):
     """True when `source` is one of the game's mod folders or inside one --
     installed mods, handled in place with central backups."""
-    if source is None:
-        return False
-    p = os.path.abspath(source)
-    for d in _game_mod_dirs():
-        try:
-            if os.path.commonpath([p, d]) == d:
-                return True
-        except ValueError:              # different drive -> not under it
-            pass
-    return False
+    return source is not None and any(_path_under(source, d)
+                                      for d in _game_mod_dirs())
 
 
 def _is_loader_root(source):
     """True when `source` IS the game's Mods (loader) folder -- the only place
     Dresscode lives, so the Dresscode note belongs only here. Never ~mods."""
     return (source is not None and _game_present()
-            and os.path.abspath(source) == os.path.abspath(config.MODS_DIR))
+            and _same_path(source, config.MODS_DIR))
 
 
 def _all_under_game(sources):
@@ -1049,8 +1288,20 @@ def main(argv):
     """Run the requested action. Returns a process exit code."""
     sources, out_dir, named, flags = _parse_args(argv)
 
-    mods = find_mods(sources)
-    if not mods:
+    # Archives can't be scanned in place -- they are extracted and patched by
+    # the drop menu -- so keep them out of find_mods but still count as work.
+    archives = [s for s in sources if _is_archive(s)]
+    # A dropped folder of archives has to be unpacked before its mods appear --
+    # but never the installed library, where a leftover download is just
+    # clutter and unpacking it would copy the whole library needlessly.
+    packed = [s for s in sources
+              if not _under_game_mods(s) and _contains_archive(s)]
+    scan_sources = [s for s in sources if not _is_archive(s)]
+
+    # Scan the library only with no sources at all -- an archive-only drop scans
+    # nothing here (its mods appear once extracted), never the whole install.
+    mods = find_mods(scan_sources) if scan_sources or not sources else {}
+    if not mods and not archives and not packed:
         if sources:
             print("No mods (.utoc) found under:")
             for s in sources:
@@ -1071,15 +1322,34 @@ def main(argv):
         listing = True
 
     if listing:
-        show_list(mods, debug, sources=sources)
+        if mods:
+            show_list(mods, debug, sources=scan_sources)
+        if archives or packed:
+            print()
+            print("  Archives to unpack and patch:")
+            for a in archives + [p for p in packed if p not in archives]:
+                print(f"    {os.path.abspath(a)}")
+                if _is_archive(a):
+                    _show_archive(a, " " * 8)
+                else:
+                    for arc in _archives_in(a):
+                        print(f"        {os.path.basename(arc)}")
+                        _show_archive(arc, " " * 12)
         # A drop owns its window, so a bare listing would dead-end at the exit
-        # pause -- offer the follow-up: in-place confirm for installed mods,
-        # the copy flow for anything else.
+        # pause -- offer the follow-up: in-place confirm for installed mods, the
+        # copy flow for anything else (an archive is always the copy flow).
         if sources and not (want_all or do_restore or named) and _owns_console():
-            if _all_under_game(sources):
-                return _confirm_game_folder(sources)
+            if (scan_sources and not archives and not packed
+                    and _all_under_game(scan_sources)):
+                return _confirm_game_folder(scan_sources)
             return _folder_menu(sources)
         return 0
+
+    # Archives are handled by the drop menu, not this direct-action path.
+    if (archives or packed) and not mods:
+        print("An archive is extracted and patched by dragging it onto patch.py,")
+        print("not with flags. Drop it on patch.py, or unpack it and use --path.")
+        return 1
 
     targets = mods if want_all else {k: v for k, v in mods.items() if k in named}
     unknown = [n for n in named if n not in mods]
@@ -1090,12 +1360,12 @@ def main(argv):
         print("Installed mods:", ", ".join(mods))
         return 1
 
-    backup_base = _backup_root(sources)
+    backup_base = _backup_root(scan_sources)
     print()
     changed, unchanged, failed = [], [], []
     for name, utoc in targets.items():
         print(name)
-        if name == DRESSCODE and not do_restore:
+        if _is_dresscode(name) and not do_restore:
             print("    skipped -- Dresscode has an official V1.005 update; install")
             print("    it from its author instead of patching it here.")
             continue
@@ -1140,7 +1410,8 @@ def main(argv):
             else:
                 summary.append("  Patched in place; no backup was taken"
                                " (--no-backup).")
-        elif out_dir:
+        elif out_dir and not all(_same_path(out_dir, os.path.dirname(u))
+                                 for u in targets.values()):
             summary.append(f"  Patched copies written to  {os.path.abspath(out_dir)}")
             summary.append("  Your original files were left exactly as they were.")
         else:

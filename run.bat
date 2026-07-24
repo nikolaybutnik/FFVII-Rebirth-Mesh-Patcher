@@ -22,7 +22,8 @@ echo     python patch.py --path "D:\my mods" --out "D:\send"  patched COPIES to
 echo                                                           --out, originals kept
 echo     python patch.py --restore --all --path "D:\my mods"  undo that folder
 echo.
-echo     Tip: you can also just drag a mod folder onto patch.py to list it.
+echo     Tip: you can also just drag mod folders -- or .zip/.7z/.rar archives,
+echo     even one containing several mods -- onto patch.py.
 echo     --path needs no game installed, only the Oodle DLL.
 echo.
 cmd /k
