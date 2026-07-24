@@ -90,16 +90,21 @@ except ImportError:
     pass
 
 
-def check():
-    """Return a list of problems; empty means everything is usable."""
+def check(require_game=True):
+    """Return a list of problems; empty means everything is usable.
+
+    Oodle is always required. The game folder is only needed in library mode;
+    --path (require_game False) works with just the DLL, so mods can be patched
+    on a machine without the game."""
     problems = []
 
-    if not GAME_DIR:
-        problems.append(
-            "Could not find FINAL FANTASY VII REBIRTH.\n"
-            "    Set GAME_DIR in config.py, or put this tool inside the game folder.")
-    elif not os.path.isdir(GAME_PAKS):
-        problems.append(f"Game folder looks wrong (no End\\Content\\Paks): {GAME_DIR}")
+    if require_game:
+        if not GAME_DIR:
+            problems.append(
+                "Could not find FINAL FANTASY VII REBIRTH.\n"
+                "    Set GAME_DIR in config.py, or put this tool inside the game folder.")
+        elif not os.path.isdir(GAME_PAKS):
+            problems.append(f"Game folder looks wrong (no End\\Content\\Paks): {GAME_DIR}")
 
     if not OODLE_DLL:
         games = "\n".join(f"        - {g}" for g in detect.KNOWN_OODLE_GAMES)

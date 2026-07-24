@@ -88,6 +88,30 @@ def find_bounds(data, start, end):
     return None
 
 
+def _find_stub_bounds(data, start, end):
+    """
+    Fallback for stub meshes ("remove X"/"invisible X" mods), whose bounds can
+    sit below find_bounds()'s 0.5 radius floor. Runs only when the strict pass
+    found nothing, so existing anchors never change. The floor guarded against
+    float noise; in its place a hit must be followed by a sane material count,
+    where parse_head() will read it.
+    """
+    for o in range(start, min(start + 8000, end - 44)):
+        if data[o] != 1 or data[o + 1] != 0:
+            continue
+        v = struct.unpack_from("<7f", data, o + 2)
+        if not all(math.isfinite(x) for x in v):
+            continue
+        ox, oy, oz, ex, ey, ez, radius = v
+        if ex <= 0 or ey <= 0 or ez <= 0 or not (1e-4 < radius < 100000):
+            continue
+        if abs(math.sqrt(ex * ex + ey * ey + ez * ez) - radius) / radius < 0.02 \
+                and abs(ox) < 10000:
+            if 0 <= struct.unpack_from("<i", data, o + 30)[0] <= 64:
+                return o
+    return None
+
+
 def parse_head(data, start, end, pkg, verbose=True):
     """
     Parse from the bounds through to the end of the skeleton.
@@ -96,7 +120,19 @@ def parse_head(data, start, end, pkg, verbose=True):
     """
     bounds_at = find_bounds(data, start, end)
     if bounds_at is None:
-        raise ValueError("could not locate mesh bounds")
+        bounds_at = _find_stub_bounds(data, start, end)
+    if bounds_at is None:
+        # An all-zero box is a mesh hollowed out on purpose (an "invisible"
+        # mod) -- name that instead of failing generically.
+        if data.find(b"\x01\x00" + b"\x00" * 28,
+                     start, min(start + 8000, end)) != -1:
+            raise ValueError("this mod's model is an empty placeholder (an "
+                             "'invisible'-type mod) with nothing left for "
+                             "this tool to check -- if the game crashes with "
+                             "it installed, remove it or ask its author for "
+                             "a V1.005 version")
+        raise ValueError("could not find the model data in this mod -- "
+                         "please report this mod")
 
     o = bounds_at + 2 + 28          # skip strip flags + bounds
 

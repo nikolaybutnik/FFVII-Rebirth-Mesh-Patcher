@@ -183,6 +183,22 @@ Only mod files are ever modified, never the game's own packages. Loose pak mods
 live under `End\Content\Paks\~mods\`, so those files sit inside the game folder —
 but the game's own `.pak`/`.utoc`/`.ucas` (in `Paks\` itself) are never touched.
 
+### Mods that aren't installed
+
+The tool can also work on any folder of mods. This needs only the Oodle DLL, not the game, so it works on a machine without FFVII Rebirth installed:
+
+```
+python patch.py --path "D:\my mods"                  list that folder
+python patch.py --path "D:\my mods" --all            patch it in place
+python patch.py --path "D:\my mods" --out "D:\send"  patched COPIES to --out,
+                                                     originals left untouched
+```
+
+In-place patches back up to a `_patch_backups\` folder inside the folder itself;
+`python patch.py --restore --all --path "D:\my mods"` puts them back.
+
+Or skip the command line (almost) entirely: **drag a mod folder onto `patch.py`**. It lists what is inside, then offers to patch everything and save the copies to a `Patched Mods` folder beside the original. The originals are not touched, and every folder and file keeps its exact name — renaming any of them would make the loader lose track of the mod, so only the `Patched Mods` wrapper (which the game never reads) is added. Dropping folders from inside the game's own `End\Mods` or `~mods` is recognized as your installed library and offers the normal in-place patch, with backups in `backups\`, instead.
+
 ### Other options
 
 ```

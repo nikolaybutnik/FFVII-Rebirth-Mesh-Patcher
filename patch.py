@@ -12,8 +12,25 @@ End\\Content\\Paks\\~mods (loose paks the game loads directly); see find_mods.
     python patch.py ModName            patch specific mods by folder or .utoc name
     python patch.py --restore --all    undo everything, from the backups
 
-Originals are copied to ./backups/<ModName>/ before anything is written. The
-game and the Oodle library are located automatically; see config.py.
+By default the game is found automatically and its installed mods are patched in
+place. To work on mods that are not installed -- e.g. to prepare a fixed build to
+send on -- point the tool at any folder instead:
+
+    python patch.py --path "D:\\mods"            list what is in that folder
+    python patch.py --path "D:\\mods" --all      patch it all, in place
+    python patch.py --path "D:\\mods" MyMod      patch just one
+    python patch.py --path "D:\\mods" --out "D:\\send"   patched copies to --out,
+                                                          originals left untouched
+
+--path takes only the Oodle library, not the game, so it works on a machine
+without FFVII Rebirth installed. A folder given as a bare argument (or dropped
+onto patch.py) is treated the same as --path.
+
+A mod's .utoc/.ucas/.pak names are never changed -- the loader (Dresscode) keys
+off them, so a rename makes the mod undetectable. Originals are copied to
+./backups/<ModName>/ before an in-place write; --out writes the patched triple
+(same names) into another folder instead, taking no backup. The game and the
+Oodle library are located automatically; see config.py.
 
 WHAT IT FIXES
 -------------
@@ -77,10 +94,12 @@ _SELF = os.path.basename(os.path.dirname(os.path.abspath(__file__)))
 
 def _find_pak_utocs(root, max_depth=5):
     """Every .utoc under `root`, depth-limited. The game loads paks recursively
-    beneath ~mods, and some users nest each mod in its own subfolder."""
+    beneath ~mods, and some users nest each mod in its own subfolder. Skips our
+    _patch_backups folders so backed-up originals don't resurface as mods."""
     root = os.path.abspath(root)
     out = []
     for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if d != "_patch_backups"]
         if dirpath[len(root):].count(os.sep) >= max_depth:
             dirnames[:] = []
         for f in filenames:
@@ -89,10 +108,71 @@ def _find_pak_utocs(root, max_depth=5):
     return sorted(out)
 
 
-def find_mods():
-    """Return {mod_name: utoc_path} for every installed mod.
+def _add_loader_mods(add, mods_dir):
+    """End\\Mods layout: one folder per mod, keyed by the FOLDER name -- the
+    handle the SKIP/Dresscode rules match on."""
+    if not os.path.isdir(mods_dir):
+        return
+    for name in sorted(os.listdir(mods_dir)):
+        if name in SKIP or name == _SELF:
+            continue
+        d = os.path.join(mods_dir, name, "Content", "Paks", "WindowsNoEditor")
+        if not os.path.isdir(d):
+            continue
+        for f in sorted(os.listdir(d)):
+            if f.endswith(".utoc"):
+                add(name, os.path.join(d, f))
 
-    Mods come from two places, and both are treated the same once found:
+
+def _add_loose_paks(add, paks):
+    """Loose-pak folder (~mods, or any --path folder): one .utoc per mod, keyed
+    by its .utoc stem."""
+    for utoc in _find_pak_utocs(paks):
+        add(os.path.splitext(os.path.basename(utoc))[0], utoc)
+
+
+def _add_one_source(add, source):
+    """Add the mods under a single dropped/`--path` folder (or .utoc). The
+    game's own mod folders are discovered library-style, so their names and
+    skips match the installed view."""
+    src = os.path.abspath(source)
+    if _game_present():
+        mods_dir = os.path.abspath(config.MODS_DIR)
+        if src == mods_dir:
+            _add_loader_mods(add, config.MODS_DIR)
+            return
+        try:
+            rel = os.path.relpath(src, mods_dir)
+        except ValueError:              # different drive -> not under Mods
+            rel = ".."
+        if rel != ".." and not rel.startswith(".." + os.sep):
+            # Inside Mods: key by the owning mod folder, like the library view,
+            # so backups match what --restore looks for and skips still apply.
+            name = rel.split(os.sep)[0]
+            if name not in SKIP and name != _SELF:
+                d = os.path.join(mods_dir, name,
+                                 "Content", "Paks", "WindowsNoEditor")
+                if os.path.isdir(d):
+                    for f in sorted(os.listdir(d)):
+                        if f.endswith(".utoc"):
+                            add(name, os.path.join(d, f))
+            return
+        paks = getattr(config, "MODS_PAKS_DIR", "")
+        if paks and src == os.path.abspath(paks):
+            _add_loose_paks(add, paks)
+            return
+    if src.lower().endswith(".utoc"):
+        if os.path.isfile(src):
+            add(os.path.splitext(os.path.basename(src))[0], src)
+    else:
+        _add_loose_paks(add, src)
+
+
+def find_mods(sources=None):
+    """Return {mod_name: utoc_path} for every mod to consider.
+
+    Default (library) mode -- sources empty -- finds installed mods in the two
+    places the game loads them, both treated the same once found:
 
       End\\Mods\\<name>\\Content\\Paks\\WindowsNoEditor\\   the FF7RML layout,
                                                             one folder per mod
@@ -100,9 +180,11 @@ def find_mods():
                                                             folder, one .utoc
                                                             per mod
 
-    A mod's name is its folder name in the first case and its .utoc filename in
-    the second. Names key the backup folders, so a clash would make one mod's
-    backup overwrite another's -- add() keeps them unique.
+    Folder mode -- sources is a list of paths (dropped folders, or --path) --
+    scans ONLY those, merged, replacing the default locations.
+
+    Names key the backup folders, so a clash would make one mod's backup overwrite
+    another's -- add() keeps them unique.
     """
     out = {}
 
@@ -113,23 +195,16 @@ def find_mods():
             n += 1
         out[key] = utoc
 
-    # --- Mod-loader mods -------------------------------------------------
-    if os.path.isdir(config.MODS_DIR):
-        for name in sorted(os.listdir(config.MODS_DIR)):
-            if name in SKIP or name == _SELF:
-                continue
-            d = os.path.join(config.MODS_DIR, name, "Content", "Paks", "WindowsNoEditor")
-            if not os.path.isdir(d):
-                continue
-            for f in sorted(os.listdir(d)):
-                if f.endswith(".utoc"):
-                    add(name, os.path.join(d, f))
+    if sources:
+        for source in sources:
+            _add_one_source(add, source)
+        return out
 
-    # --- Loose pak mods --------------------------------------------------
+    # --- Library mode: the game's two mod locations ----------------------
+    _add_loader_mods(add, config.MODS_DIR)
     paks = getattr(config, "MODS_PAKS_DIR", "")
     if paks and os.path.isdir(paks):
-        for utoc in _find_pak_utocs(paks):
-            add(os.path.splitext(os.path.basename(utoc))[0], utoc)
+        _add_loose_paks(add, paks)
 
     return out
 
@@ -158,8 +233,9 @@ def scan(utoc_path):
     # claim "unaffected".
     if not toc.paths and any(toc.chunk_type(i) == 2 for i in range(toc.n)):
         return toc, [dict(chunk=-1, path="", export="", size=0,
-                          error="container has no file index -- cannot tell "
-                                "what is inside; please report this mod")]
+                          error="this mod has no list of its own files, so "
+                                "this tool cannot see what is inside -- "
+                                "please report this mod")]
     found = []
     read_ok = 0     # .uasset chunks that decompressed without error
     parsed = 0      # ...of those, how many parsed as a Zen package
@@ -310,9 +386,26 @@ def _pack_blocks(payload, block_size, comp_method):
     return out
 
 
-def patch_mod(name, utoc_path):
+def _mod_rel(utoc_path):
+    """The mod's own on-disk wrapping (loader mods live under
+    Content\\Paks\\WindowsNoEditor), mirrored into its backup so the backup
+    stands alone."""
+    tail = os.path.join("Content", "Paks", "WindowsNoEditor")
+    d = os.path.dirname(os.path.abspath(utoc_path))
+    return tail if d.lower().endswith(tail.lower()) else ""
+
+
+def patch_mod(name, utoc_path, out_dir=None, backup_dir=None, no_backup=False):
     """
     Convert every skeletal mesh in one mod and rewrite its container.
+
+    The mod's .utoc/.ucas/.pak names are NEVER changed -- the loader keys off
+    them, so a rename makes the mod vanish. Default is in place: originals are
+    first copied to backup_dir/<name>/ (mirroring the mod's structure, see
+    _mod_rel) and --restore undoes it from the same root. out_dir writes the
+    triple elsewhere instead, original untouched, unchanged .pak copied along
+    so the result loads. no_backup skips the backup when patching a throwaway
+    copy -- the untouched source is the backup; see _patch_copy.
 
     Returns True if anything changed, False if the mod was already converted.
     Raises if a mesh cannot be parsed -- in which case nothing is written, so a
@@ -320,10 +413,14 @@ def patch_mod(name, utoc_path):
     """
     toc = iostore.Toc(utoc_path)
     if not toc.paths and any(toc.chunk_type(i) == 2 for i in range(toc.n)):
-        raise RuntimeError("container has no file index -- cannot see or patch "
-                           "its packages; please report this mod")
+        raise RuntimeError("this mod has no list of its own files, so this "
+                           "tool cannot see inside it to patch it -- please "
+                           "report this mod")
     base = os.path.splitext(os.path.basename(utoc_path))[0]
     src_dir = os.path.dirname(utoc_path)
+    dst_dir = os.path.abspath(out_dir) if out_dir else src_dir
+    backup_dir = backup_dir or BACKUP_DIR
+    in_place = os.path.abspath(dst_dir) == os.path.abspath(src_dir)
 
     # --- Convert every package that needs it.
     pkg_indices = [i for i in sorted(toc.paths)
@@ -356,20 +453,25 @@ def patch_mod(name, utoc_path):
         print("    nothing to fix (already new-format)")
         return False
 
-    # --- Back up before writing anything.
-    backup = os.path.abspath(os.path.join(BACKUP_DIR, name))
-    os.makedirs(backup, exist_ok=True)
-    to_copy = []
-    for ext in (".utoc", ".ucas", ".pak"):
-        src = os.path.join(src_dir, base + ext)
-        dst = os.path.join(backup, base + ext)
-        if os.path.exists(src) and not os.path.exists(dst):
-            to_copy.append((src, dst))
-    if to_copy:
-        mb = sum(os.path.getsize(s) for s, _ in to_copy) / (1024 * 1024)
-        print(f"    backing up originals ({mb:,.0f} MB)")
-        for src, dst in to_copy:
-            shutil.copy(src, dst)
+    # Back up before writing anything (in-place only).
+    if not in_place:
+        os.makedirs(dst_dir, exist_ok=True)
+    elif no_backup:
+        pass                            # patching a throwaway copy -- see above
+    else:
+        backup = os.path.abspath(os.path.join(backup_dir, name, _mod_rel(utoc_path)))
+        os.makedirs(backup, exist_ok=True)
+        to_copy = []
+        for ext in (".utoc", ".ucas", ".pak"):
+            src = os.path.join(src_dir, base + ext)
+            dst = os.path.join(backup, base + ext)
+            if os.path.exists(src) and not os.path.exists(dst):
+                to_copy.append((src, dst))
+        if to_copy:
+            mb = sum(os.path.getsize(s) for s, _ in to_copy) / (1024 * 1024)
+            print(f"    backing up originals ({mb:,.0f} MB)")
+            for src, dst in to_copy:
+                shutil.copy(src, dst)
 
     # --- Rebuild the container.
     header_index = next(i for i in range(toc.n)
@@ -426,22 +528,40 @@ def patch_mod(name, utoc_path):
     metas = writer.build_metas_from(toc, new_data)
 
     print(f"    writing {len(ucas) / (1024 * 1024):,.0f} MB to disk...", flush=True)
-    with open(os.path.join(src_dir, base + ".utoc"), "wb") as f:
+    with open(os.path.join(dst_dir, base + ".utoc"), "wb") as f:
         f.write(head + bytes(body) + directory + metas)
-    with open(os.path.join(src_dir, base + ".ucas"), "wb") as f:
+    with open(os.path.join(dst_dir, base + ".ucas"), "wb") as f:
         f.write(ucas)
+    # The .pak is never rewritten, but the game loads a mod as a triple -- copy
+    # it across whenever the original is not being overwritten in place.
+    if not in_place:
+        pak_src = os.path.join(src_dir, base + ".pak")
+        if os.path.exists(pak_src):
+            shutil.copy(pak_src, os.path.join(dst_dir, base + ".pak"))
 
-    print(f"    written; .ucas now {len(ucas):,} bytes  (backup in backups/{name}/)")
+    if not in_place:
+        print(f"    written {base}.utoc/.ucas/.pak  in  {dst_dir}")
+    elif no_backup:
+        print(f"    written; .ucas now {len(ucas):,} bytes")
+    else:
+        # The full backup path is stated once, in the closing summary.
+        print(f"    written; .ucas now {len(ucas):,} bytes  (original backed up)")
     return True
 
 
-def restore(name, utoc_path):
+def restore(name, utoc_path, backup_dir=None):
     """
-    Put a mod back from ./backups/<name>/. Returns True if files were restored.
+    Put a mod back from its backup. backup_dir must be the same root patch_mod
+    wrote to -- the central ./backups for installed mods, or the folder-local one
+    for a mod patched via --path. Returns True if files were restored.
     """
     base = os.path.splitext(os.path.basename(utoc_path))[0]
     src_dir = os.path.dirname(utoc_path)
-    backup = os.path.abspath(os.path.join(BACKUP_DIR, name))
+    # Backups mirror the mod's structure; fall back to the flat root for backups
+    # written by older versions.
+    root = os.path.abspath(os.path.join(backup_dir or BACKUP_DIR, name))
+    structured = os.path.join(root, _mod_rel(utoc_path))
+    backup = structured if os.path.isdir(structured) else root
     if not os.path.isdir(backup):
         print("    no backup found")
         return False
@@ -484,9 +604,18 @@ def mod_status(utoc):
 _avail = None
 
 
+def _game_present():
+    """Whether a real game install was located -- folder mode runs without one,
+    so anything install-relative (companion-mod warnings, the game's own mod
+    folders) must check first."""
+    return bool(config.GAME_DIR) and os.path.isdir(config.GAME_PAKS)
+
+
 def _missing_reqs(utoc):
     """Known companion mods this mod needs but the user has not installed."""
     global _avail
+    if not _game_present():
+        return []
     try:
         if _avail is None:
             _avail = deps.installed_ids()
@@ -499,21 +628,40 @@ def _plural(n):
     return "es" if n != 1 else ""
 
 
-def show_list(mods, debug=False):
+def show_list(mods, debug=False, sources=None):
     """
-    Print the status of every installed mod.
+    Print the status of every mod found.
 
     Dresscode is reported separately: it is the menu framework rather than a
-    costume, and a missing one is worth flagging on its own.
+    costume, and a missing one is worth flagging on its own. It only makes
+    sense where the loader folder is in scope -- library mode, or a drop of
+    Mods itself -- so folder mode otherwise leaves it (and the install-specific
+    header) out.
     """
+    sources = sources or []
+    folder_mode = bool(sources)
+    show_dresscode = not sources or any(_is_loader_root(s) for s in sources)
+
+    def src_tag(utoc):
+        """The '(Mods)'/'(~mods)' suffix; noise in folder mode."""
+        if folder_mode:
+            return ""
+        return "  (~mods)" if mod_source(utoc) == "paks" else "  (Mods)"
+
     print()
     for line in config.describe():
         print(line)
     for path in config.other_oodles():
         print(f"         also found:  {path}")
-    print(f"  Mods   :            {config.MODS_DIR}")
-    if getattr(config, "MODS_PAKS_DIR", "") and os.path.isdir(config.MODS_PAKS_DIR):
-        print(f"  ~mods  :            {config.MODS_PAKS_DIR}")
+    if folder_mode:
+        label = "Source" if len(sources) == 1 else "Sources"
+        print(f"  {label:<7}:            {os.path.abspath(sources[0])}")
+        for s in sources[1:]:
+            print(f"                      {os.path.abspath(s)}")
+    else:
+        print(f"  Mods   :            {config.MODS_DIR}")
+        if getattr(config, "MODS_PAKS_DIR", "") and os.path.isdir(config.MODS_PAKS_DIR):
+            print(f"  ~mods  :            {config.MODS_PAKS_DIR}")
     print()
 
     # Reading a mod decompresses its meshes -- slow with a big library, so show a
@@ -528,18 +676,19 @@ def show_list(mods, debug=False):
     if progress:
         print("\r" + " " * 62 + "\r", end="", flush=True)
 
-    # ---- Dresscode, on its own -----------------------------------------
-    print("  Dresscode  (the base mod, by YIISx)")
-    if DRESSCODE not in results:
-        print("    [!!]  NOT INSTALLED")
-        print("          Costume mods have no menu without it. Install Dresscode")
-        print("          from its author first, then run this again.")
-    else:
-        # Dresscode ships its own official V1.005 build, so this tool never
-        # patches it and makes no claim about its format.
-        print("    [ok]  installed -- not patched by this tool")
-        print("          If Dresscode itself crashes, get the author's official")
-        print("          V1.005 release.")
+    # ---- Dresscode, on its own -------------------------------------------
+    if show_dresscode:
+        print("  Dresscode  (the base mod, by YIISx)")
+        if DRESSCODE not in results:
+            print("    [!!]  NOT INSTALLED")
+            print("          Costume mods have no menu without it. Install Dresscode")
+            print("          from its author first, then run this again.")
+        else:
+            # Dresscode ships its own official V1.005 build, so this tool never
+            # patches it and makes no claim about its format.
+            print("    [ok]  installed -- not patched by this tool")
+            print("          If Dresscode itself crashes, get the author's official")
+            print("          V1.005 release.")
 
     # ---- everything else ------------------------------------------------
     others = {k: v for k, v in results.items() if k != DRESSCODE}
@@ -554,9 +703,8 @@ def show_list(mods, debug=False):
         for name in sorted(withmesh):
             state, n, _ = withmesh[name]
             label = "needs patching" if state == "needs_fix" else "patched"
-            src = "~mods" if mod_source(mods[name]) == "paks" else "Mods"
             print(f"    {MARK[state]}  {name:<{width}} {label:<15} "
-                  f"{n} mesh{_plural(n)}  ({src})")
+                  f"{n} mesh{_plural(n)}{src_tag(mods[name])}")
 
     if errored:
         print()
@@ -569,8 +717,7 @@ def show_list(mods, debug=False):
         print("  No character meshes -- unaffected by V1.005")
         width = max(len(k) for k in nomesh) + 2
         for name in nomesh:
-            src = "~mods" if mod_source(mods[name]) == "paks" else "Mods"
-            print(f"    [--]  {name:<{width}} ({src})")
+            print(f"    [--]  {name:<{width}}{src_tag(mods[name])}")
 
     # ---- missing companion mods -----------------------------------------
     reqs = {name: r for name, utoc in mods.items()
@@ -595,7 +742,8 @@ def show_list(mods, debug=False):
         s = "s" if len(need) != 1 else ""
         verb = "" if len(need) != 1 else "s"
         print(f"  {len(need)} mod{s} need{verb} patching:  {', '.join(need)}")
-        print("  Run:  python patch.py --all")
+        scope = "".join(f' --path "{os.path.abspath(s)}"' for s in sources)
+        print(f"  Run:  python patch.py{scope} --all")
     else:
         s = "s" if len(done) != 1 else ""
         print(f"  Nothing to do -- {len(done)} mod{s} already patched.")
@@ -629,25 +777,80 @@ def show_list(mods, debug=False):
         print()
 
 
+# Names (lowercase) of interactive shells / terminals. If one of these is
+# sharing our console, we were launched from it rather than owning the window.
+_SHELLS = {"cmd.exe", "powershell.exe", "pwsh.exe", "wt.exe",
+           "windowsterminal.exe", "openconsole.exe", "bash.exe", "sh.exe",
+           "zsh.exe", "fish.exe", "conemu64.exe", "conemuc64.exe",
+           "mintty.exe", "alacritty.exe", "wezterm-gui.exe"}
+
+
+def _console_proc_names():
+    """Lowercase exe names of every process attached to this console, or None if
+    there is no console (output redirected/piped) or it cannot be queried."""
+    import ctypes
+    from ctypes import wintypes
+
+    k32 = ctypes.windll.kernel32
+    k32.GetConsoleProcessList.restype = wintypes.DWORD
+    count = k32.GetConsoleProcessList((wintypes.DWORD * 1)(), 1)
+    if not count:
+        return None
+    buf = (wintypes.DWORD * (count + 4))()
+    count = k32.GetConsoleProcessList(buf, len(buf))
+    if not count:
+        return None
+    pids = set(buf[:count])
+
+    class PE(ctypes.Structure):
+        _fields_ = [("dwSize", wintypes.DWORD),
+                    ("cntUsage", wintypes.DWORD),
+                    ("th32ProcessID", wintypes.DWORD),
+                    ("th32DefaultHeapID", ctypes.c_void_p),
+                    ("th32ModuleID", wintypes.DWORD),
+                    ("cntThreads", wintypes.DWORD),
+                    ("th32ParentProcessID", wintypes.DWORD),
+                    ("pcPriClassBase", ctypes.c_long),
+                    ("dwFlags", wintypes.DWORD),
+                    ("szExeFile", ctypes.c_char * 260)]
+
+    # restype MUST be HANDLE -- the default c_int truncates the handle on 64-bit
+    # and the snapshot walk silently finds nothing.
+    k32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+    snap = k32.CreateToolhelp32Snapshot(0x2, 0)     # TH32CS_SNAPPROCESS
+    if snap == ctypes.c_void_p(-1).value:
+        return None
+    names = []
+    try:
+        e = PE()
+        e.dwSize = ctypes.sizeof(PE)
+        ok = k32.Process32First(snap, ctypes.byref(e))
+        while ok:
+            if e.th32ProcessID in pids:
+                names.append(e.szExeFile.decode("mbcs", "replace").lower())
+            ok = k32.Process32Next(snap, ctypes.byref(e))
+    finally:
+        k32.CloseHandle(snap)
+    return names
+
+
 def _owns_console():
     """
-    True when this process created the console window it is printing to --
-    i.e. it was double-clicked rather than run from an existing terminal.
-
-    Windows reports how many processes are attached to the console. If we are
-    the only one, the window was created for us and will vanish the moment we
-    exit, so the user needs a chance to read the output. Run from PowerShell or
-    cmd, the shell is attached too, and pausing would just be an annoyance.
+    True when this process owns the console window -- double-clicked or a
+    folder dropped on it, so the window vanishes on exit and the user needs a
+    pause to read the output. Decided by WHAT is attached, not how many:
+    counting fails because the py.exe launcher stays attached, making a
+    double-clicked script two processes with no shell among them.
     """
     if os.name != "nt":
         return False
     try:
-        import ctypes
-        buf = (ctypes.c_uint * 8)()
-        n = ctypes.windll.kernel32.GetConsoleProcessList(buf, 8)
-        return n <= 1
+        names = _console_proc_names()
     except Exception:
         return False
+    if not names:
+        return False
+    return not any(n in _SHELLS for n in names)
 
 
 def _finish(summary):
@@ -658,11 +861,16 @@ def _finish(summary):
     print()
 
 
+# Set once a menu has handled the final keypress, so the end-of-run pause
+# does not demand a second Enter.
+_INTERACTED = False
+
+
 def _pause_before_exit(argv):
     """Hold the window open when we own it, so double-clickers can read the
     output. Runs on EVERY exit -- listing, errors, "nothing selected" -- not
     just after patching."""
-    if "--no-pause" in argv:
+    if _INTERACTED or "--no-pause" in argv:
         return
     if "--pause" in argv or _owns_console():
         try:
@@ -671,22 +879,206 @@ def _pause_before_exit(argv):
             pass
 
 
+def _wrapper_dir(source):
+    """The "Patched Mods" folder placed beside a dropped folder to hold its
+    patched copies."""
+    return os.path.join(os.path.dirname(os.path.abspath(source.rstrip("\\/"))),
+                        "Patched Mods")
+
+
+def _folder_menu(sources):
+    """One y/N after a drop: patch every mod, copies to "Patched Mods" beside
+    each source, originals untouched. Custom in/out locations are the CLI's
+    job. Returns an exit code."""
+    global _INTERACTED
+    print("  ----------------------------------------------------------------")
+    n = len(sources)
+    where = "this folder" if n == 1 else f"these {n} folders"
+    print(f"  This will patch every mod in {where} and save the patched")
+    print("  copies -- originals untouched -- to a \"Patched Mods\" folder beside")
+    print("  " + ("it:" if n == 1 else "each:"))
+    for s in sources:
+        print(f"      {_wrapper_dir(s)}{os.sep}")
+    try:
+        ans = input("  Proceed?  [y/N] ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        _INTERACTED = True
+        return 0
+    if ans in ("y", "yes"):
+        codes = [_patch_copy(s) for s in sources]
+        return max(codes) if codes else 0
+    _INTERACTED = True
+    print("  Nothing changed.")
+    return 0
+
+
+def _patch_copy(source):
+    """Patch a COPY into the "Patched Mods" wrapper, keeping the mod's EXACT
+    folder and file names -- the loader keys off them, and the wrapper (which
+    the game never reads) is the only added name. A folder is copied whole and
+    patched in place with no backup (the untouched source is the backup); a
+    lone .utoc goes through --out. Returns an exit code."""
+    global _INTERACTED
+    src = os.path.abspath(source.rstrip("\\/"))
+    wrapper = _wrapper_dir(source)
+
+    if os.path.isfile(src):                     # a lone .utoc -- exact name kept
+        return main(["--path", src, "--out", wrapper, "--all"])
+
+    dst = os.path.join(wrapper, os.path.basename(src))
+    print(f"  Copying to {dst} ...")
+    try:
+        shutil.copytree(src, dst, dirs_exist_ok=True)
+    except Exception as ex:
+        print(f"  Could not copy: {ex}")
+        _INTERACTED = True
+        return 0
+    return main(["--path", dst, "--all", "--no-backup"])
+
+
+def _confirm_game_folder(sources):
+    """Drop was the game's own Mods/~mods (or inside them): a copy beside the
+    original would just load twice, so confirm a straight in-place patch with
+    central backups. Returns an exit code."""
+    global _INTERACTED
+    print("  ----------------------------------------------------------------")
+    print("  That is inside your game install -- these are your installed mods.")
+    print("  This patches the ones that need it, in place. Your originals are")
+    print("  backed up first, to:")
+    print(f"      {os.path.abspath(BACKUP_DIR)}{os.sep}")
+    try:
+        ans = input("  Proceed?  [y/N] ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        _INTERACTED = True
+        return 0
+    if ans in ("y", "yes"):
+        argv = []
+        for s in sources:
+            argv += ["--path", s]
+        argv.append("--all")
+        return main(argv)
+    _INTERACTED = True
+    print("  Nothing changed.")
+    return 0
+
+
+def _parse_args(argv):
+    """Split argv into (sources, out, names, flags).
+
+    --path/--out take a value, as the next token or glued on (--path=DIR).
+    Bare positionals that resolve to an existing folder or .utoc are sources
+    too, so dropping one or several folders onto patch.py lands in folder mode
+    without typing --path. Other positionals are mod names.
+    """
+    sources, names, flags = [], [], []
+    out = None
+    i, n = 0, len(argv)
+    while i < n:
+        a = argv[i]
+        key, eq, val = a.partition("=")
+        if key in ("--path", "--out"):
+            if not eq:                              # value is the next token
+                i += 1
+                val = argv[i] if i < n else ""
+            if key == "--path":
+                sources.append(val)
+            else:
+                out = val
+        elif a.startswith("-"):
+            flags.append(a)
+        elif os.path.isdir(a) or a.lower().endswith(".utoc"):
+            sources.append(a)
+        else:
+            names.append(a)
+        i += 1
+    return sources, out, names, flags
+
+
+def _game_mod_dirs():
+    """The game's own mod folders, absolute; empty when no game is installed."""
+    if not _game_present():
+        return []
+    dirs = [os.path.abspath(config.MODS_DIR)]
+    paks = getattr(config, "MODS_PAKS_DIR", "")
+    if paks:
+        dirs.append(os.path.abspath(paks))
+    return dirs
+
+
+def _under_game_mods(source):
+    """True when `source` is one of the game's mod folders or inside one --
+    installed mods, handled in place with central backups."""
+    if source is None:
+        return False
+    p = os.path.abspath(source)
+    for d in _game_mod_dirs():
+        try:
+            if os.path.commonpath([p, d]) == d:
+                return True
+        except ValueError:              # different drive -> not under it
+            pass
+    return False
+
+
+def _is_loader_root(source):
+    """True when `source` IS the game's Mods (loader) folder -- the only place
+    Dresscode lives, so the Dresscode note belongs only here. Never ~mods."""
+    return (source is not None and _game_present()
+            and os.path.abspath(source) == os.path.abspath(config.MODS_DIR))
+
+
+def _all_under_game(sources):
+    """True when every dropped source is installed mods -- the whole drop is
+    handled in place rather than via the copy flow."""
+    return bool(sources) and all(_under_game_mods(s) for s in sources)
+
+
+def _backup_root(sources):
+    """Where in-place backups for this run live: central ./backups for
+    installed mods, a _patch_backups inside the folder otherwise -- so folder
+    mods never collide with same-named installed ones."""
+    if not sources or _all_under_game(sources):
+        return BACKUP_DIR
+    root = os.path.abspath(sources[0])
+    if root.lower().endswith(".utoc"):
+        root = os.path.dirname(root)
+    return os.path.join(root, "_patch_backups")
+
+
 def main(argv):
     """Run the requested action. Returns a process exit code."""
-    mods = find_mods()
+    sources, out_dir, named, flags = _parse_args(argv)
+
+    mods = find_mods(sources)
     if not mods:
-        print("No mods found under", config.MODS_DIR)
-        print("                or", config.MODS_PAKS_DIR)
+        if sources:
+            print("No mods (.utoc) found under:")
+            for s in sources:
+                print("   ", os.path.abspath(s))
+        else:
+            print("No mods found under", config.MODS_DIR)
+            print("                or", config.MODS_PAKS_DIR)
         return 1
 
-    want_all = "--all" in argv
-    do_restore = "--restore" in argv
-    listing = "--list" in argv
-    debug = "--debug" in argv or "--verbose" in argv or "-v" in argv
-    named = [a for a in argv if not a.startswith("-")]
+    want_all = "--all" in flags
+    do_restore = "--restore" in flags
+    listing = "--list" in flags
+    no_backup = "--no-backup" in flags
+    debug = any(f in flags for f in ("--debug", "--verbose", "-v"))
+
+    # A source with no action is a request to see what is there.
+    if sources and not (want_all or do_restore or named):
+        listing = True
 
     if listing:
-        show_list(mods, debug)
+        show_list(mods, debug, sources=sources)
+        # A drop owns its window, so a bare listing would dead-end at the exit
+        # pause -- offer the follow-up: in-place confirm for installed mods,
+        # the copy flow for anything else.
+        if sources and not (want_all or do_restore or named) and _owns_console():
+            if _all_under_game(sources):
+                return _confirm_game_folder(sources)
+            return _folder_menu(sources)
         return 0
 
     targets = mods if want_all else {k: v for k, v in mods.items() if k in named}
@@ -698,6 +1090,7 @@ def main(argv):
         print("Installed mods:", ", ".join(mods))
         return 1
 
+    backup_base = _backup_root(sources)
     print()
     changed, unchanged, failed = [], [], []
     for name, utoc in targets.items():
@@ -707,13 +1100,13 @@ def main(argv):
             print("    it from its author instead of patching it here.")
             continue
         if do_restore:
-            if restore(name, utoc):
+            if restore(name, utoc, backup_base):
                 changed.append(name)
             else:
                 unchanged.append(name)
             continue
         try:
-            if patch_mod(name, utoc):
+            if patch_mod(name, utoc, out_dir, backup_base, no_backup):
                 changed.append(name)
             else:
                 unchanged.append(name)
@@ -735,21 +1128,47 @@ def main(argv):
                        f"{'s' if len(changed) != 1 else ''}"
                        + (f", skipped {len(unchanged)} already done."
                           if unchanged else "."))
+
+    # Spell out where the originals are so the user knows what they can delete.
+    if changed and not do_restore:
+        summary.append("")
+        if no_backup:
+            if sources:
+                summary.append("  Patched copy is ready (your original was left"
+                               " untouched):")
+                summary.append(f"      {os.path.abspath(sources[0])}{os.sep}")
+            else:
+                summary.append("  Patched in place; no backup was taken"
+                               " (--no-backup).")
+        elif out_dir:
+            summary.append(f"  Patched copies written to  {os.path.abspath(out_dir)}")
+            summary.append("  Your original files were left exactly as they were.")
+        else:
+            summary.append("  Your untouched originals are backed up in:")
+            summary.append(f"    {os.path.abspath(backup_base)}{os.sep}"
+                           "   (one folder per mod)")
+            summary.append("  Keep it to undo later with --restore, or just delete")
+            summary.append("  it once the game looks right -- your call.")
+
+    if not failed:
+        summary.append("")
         summary.append("  Done. Start the game and check your outfits.")
 
     _finish(summary)
     return 1 if failed else 0
 
 
-def startup():
+def startup(require_game=True):
     """
     Resolve everything needed before running, prompting if the Oodle library is
     the only thing missing.
 
     Any other problem (no game folder, a wrong path) is reported and we stop --
-    those need a decision from the user, not a file.
+    those need a decision from the user, not a file. In folder mode
+    (require_game False) the game folder is not needed at all, so only Oodle is
+    checked.
     """
-    problems = config.check()
+    problems = config.check(require_game)
     if not problems:
         return True
 
@@ -771,7 +1190,7 @@ def startup():
         got = oodle_setup.prompt_for_oodle(here)
         if got:
             config.OODLE_DLL = got
-            return not config.check()
+            return not config.check(require_game)
 
     print()
     for p in problems:
@@ -781,7 +1200,9 @@ def startup():
 
 
 if __name__ == "__main__":
-    code = 0 if startup() else 1
+    # Folder mode (--path or dropped folders) needs only Oodle, not the game.
+    _sources = _parse_args(sys.argv[1:])[0]
+    code = 0 if startup(require_game=not _sources) else 1
     if code == 0:
         code = main(sys.argv[1:])
     _pause_before_exit(sys.argv[1:])
