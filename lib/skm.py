@@ -35,6 +35,9 @@ import globals_meta
 
 SKELETAL_MESH = globals_meta.SKELETAL_MESH
 
+# Room for outlier property blocks, short of chance matches in vertex data.
+BOUNDS_SEARCH_LIMIT = 65536
+
 
 class NoNames:
     """
@@ -71,7 +74,7 @@ def find_bounds(data, start, end):
     Confirmed on a real cooked asset: extent (1,1,1), radius 1.732 = sqrt(3) --
     a unit cube.
     """
-    for o in range(start, min(start + 8000, end - 40)):
+    for o in range(start, min(start + BOUNDS_SEARCH_LIMIT, end - 40)):
         if data[o] != 1 or data[o + 1] != 0:
             continue
         v = struct.unpack_from("<7f", data, o + 2)
@@ -96,7 +99,7 @@ def _find_stub_bounds(data, start, end):
     float noise; in its place a hit must be followed by a sane material count,
     where parse_head() will read it.
     """
-    for o in range(start, min(start + 8000, end - 44)):
+    for o in range(start, min(start + BOUNDS_SEARCH_LIMIT, end - 44)):
         if data[o] != 1 or data[o + 1] != 0:
             continue
         v = struct.unpack_from("<7f", data, o + 2)
@@ -125,7 +128,7 @@ def parse_head(data, start, end, pkg, verbose=True):
         # An all-zero box is a mesh hollowed out on purpose (an "invisible"
         # mod) -- name that instead of failing generically.
         if data.find(b"\x01\x00" + b"\x00" * 28,
-                     start, min(start + 8000, end)) != -1:
+                     start, min(start + BOUNDS_SEARCH_LIMIT, end)) != -1:
             raise ValueError("this mod's model is an empty placeholder (an "
                              "'invisible'-type mod) with nothing left for "
                              "this tool to check -- if the game crashes with "

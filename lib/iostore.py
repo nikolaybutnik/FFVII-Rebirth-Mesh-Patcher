@@ -33,6 +33,7 @@ import ctypes
 import os
 import struct
 import sys
+import zlib
 
 # config lives in the repo root; needed when this file is run directly.
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -311,11 +312,14 @@ class Toc:
                 # Fail naming the codec -- Oodle's own error would blame the DLL.
                 name = (self.methods[method] if method < len(self.methods)
                         else f"#{method}")
-                if name.lower() != "oodle":
+                if name.lower() == "zlib":
+                    out += zlib.decompress(raw)[:usize]
+                elif name.lower() == "oodle":
+                    out += oodle_decompress(raw, usize)
+                else:
                     raise RuntimeError(
-                        f"this container is compressed with {name!r}, not Oodle "
-                        "-- this tool only decodes Oodle containers")
-                out += oodle_decompress(raw, usize)
+                        f"this container is compressed with {name!r}, which "
+                        "this tool cannot decode -- please report this mod")
             remaining -= usize
             block += 1
 
