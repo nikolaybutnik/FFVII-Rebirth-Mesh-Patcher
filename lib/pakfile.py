@@ -15,11 +15,12 @@ A version 11 pak holding NO files -- just a mount point and two empty indexes.
 That is exactly what loose pak mods ship, so it is a shape the game is known to
 accept, and building it is verified by reproducing one byte for byte.
 
-Plugin paks in the wild additionally carry AccessTransformers.ini,
-PluginSettings.ini and AssetRegistry.bin. Whether the loader actually requires
-them is untested -- the assets it reads come from the container, not from here.
-Writing real entries means the encoded-entry and path-hash formats too, so it is
-deliberately not attempted until something is shown to need it.
+Plugin paks additionally carry AccessTransformers.ini, PluginSettings.ini and
+AssetRegistry.bin -- the registry is how the mod loader discovers a plugin's
+data assets, so build_plugin writes the full shape: entries with local
+headers, encoded entries, a path-hash index (FNV-1a-64 over the lowercased
+UTF-16 path plus a seed -- verified against a real plugin pak's hashes) and a
+directory index.
 
 LAYOUT
 ------
@@ -123,3 +124,120 @@ LOOSE_MOUNT = "/"
 
 def plugin_mount(plugin):
     return f"../../../End/Mods/{plugin}/"
+
+
+def _fnv64(data, seed):
+    h = (0xcbf29ce484222325 + seed) & 0xFFFFFFFFFFFFFFFF
+    for b in data:
+        h ^= b
+        h = (h * 0x00000100000001b3) & 0xFFFFFFFFFFFFFFFF
+    return h
+
+
+def path_hash(path, seed):
+    """FPakFile::HashPath -- FNV-1a-64 over the lowercased UTF-16 path."""
+    return _fnv64(path.lower().encode("utf-16-le"), seed)
+
+
+def build_plugin(mount, files, compressor=None):
+    """
+    A real plugin pak: `files` is [(path, data)], stored in order. `compressor`
+    Oodle-compresses a blob (or returns None to store raw); when given, every
+    entry that shrinks is compressed as a single block, which is how real
+    plugin paks ship their AssetRegistry.bin.
+    """
+    entries = bytearray()
+    encoded = bytearray()
+    records = []                                     # (path, encoded offset)
+
+    for path, data in files:
+        comp = compressor(data) if compressor else None
+        if comp is not None and len(comp) < len(data):
+            method, stored = 1, comp
+        else:
+            method, stored = 0, data
+        entry_off = len(entries)
+        records.append((path, len(encoded)))
+
+        # The header copy in front of the data records its Offset as ZERO --
+        # the loader compares this copy against the index entry on every
+        # read, with the offset taken as entry-relative, and a mismatch is a
+        # fatal "pak entry mismatch" at startup.
+        header = struct.pack("<qqqI", 0, len(stored), len(data), method)
+        header += hashlib.sha1(stored).digest()
+        if method:
+            head_len = 48 + 4 + 16 + 5
+            header += struct.pack("<I", 1)           # one block
+            header += struct.pack("<qq", head_len, head_len + len(stored))
+            header += b"\0" + struct.pack("<I", len(data))
+        else:
+            header += b"\0" + struct.pack("<I", 0)
+        entries += header + stored
+
+        value = (1 << 31) | (1 << 30) | (1 << 29)    # all sizes 32-bit safe
+        if method:
+            value |= (method << 23) | (1 << 6) | ((len(data) >> 11) & 0x3F)
+        encoded += struct.pack("<I", value)
+        encoded += struct.pack("<II", entry_off, len(data))
+        if method:
+            encoded += struct.pack("<I", len(stored))
+
+    # Directory tree: files at the root live in "/", the rest in "<dir>/".
+    dirs = {}
+    for path, off in records:
+        folder, _, name = path.rpartition("/")
+        dirs.setdefault(folder + "/" if folder else "/", []).append((name, off))
+
+    def dir_blob(keep):
+        blob = struct.pack("<i", len(dirs))
+        for folder in sorted(dirs, key=lambda f: (f != "/", f)):
+            kept = [(n, o) for n, o in dirs[folder] if keep(n)]
+            blob += _fstring(folder)
+            blob += struct.pack("<i", len(kept))
+            for name, off in kept:
+                blob += _fstring(name) + struct.pack("<I", off)
+        return blob
+
+    dir_index = dir_blob(lambda n: True)
+
+    seed = _fnv64(mount.lower().encode("utf-16-le"), 0) & 0xFFFFFFFF
+    ph_index = struct.pack("<i", len(records))
+    for path, off in records:
+        ph_index += struct.pack("<QI", path_hash(path, seed), off)
+    # The embedded copy is PRUNED: real plugin paks keep only the .ini files
+    # in it, dropping the registry from the memory-resident directory.
+    ph_index += dir_blob(lambda n: n.lower().endswith(".ini"))
+
+    head = _fstring(mount)
+    head += struct.pack("<i", len(records))
+    head += struct.pack("<Q", seed)
+    fixed_tail = 4 + 8 + 8 + 20 + 4 + 8 + 8 + 20 + 4 + len(encoded) + 4
+    index_offset = len(entries)
+    index_size = len(head) + fixed_tail
+    ph_offset = index_offset + index_size
+    fd_offset = ph_offset + len(ph_index)
+
+    head += struct.pack("<i", 1)
+    head += struct.pack("<qq", ph_offset, len(ph_index))
+    head += hashlib.sha1(ph_index).digest()
+    head += struct.pack("<i", 1)
+    head += struct.pack("<qq", fd_offset, len(dir_index))
+    head += hashlib.sha1(dir_index).digest()
+    head += struct.pack("<i", len(encoded)) + bytes(encoded)
+    head += struct.pack("<i", 0)                     # non-encoded entries
+    assert len(head) == index_size, (len(head), index_size)
+
+    out = bytearray()
+    out += entries
+    out += head
+    out += ph_index
+    out += dir_index
+    out += b"\0" * 16                                # encryption key GUID
+    out += b"\0"                                     # bEncryptedIndex
+    out += struct.pack("<II", MAGIC, VERSION)
+    out += struct.pack("<qq", index_offset, index_size)
+    out += hashlib.sha1(bytes(head)).digest()
+    for slot in range(COMPRESSION_SLOTS):
+        name = b"oodle" if slot == 0 else b""
+        out += name + b"\0" * (METHOD_NAME_LEN - len(name))
+    return bytes(out)

@@ -49,6 +49,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "lib
 import conheader                                                # noqa: E402
 import drops                                                    # noqa: E402
 import iostore                                                  # noqa: E402
+import mkdc                                                     # noqa: E402
 import moddata                                                  # noqa: E402
 import pakfile                                                  # noqa: E402
 import rename                                                   # noqa: E402
@@ -452,7 +453,7 @@ def plugin_id(name):
     return cleaned or "Mod"
 
 
-def loose_to_dresscode(source, mods):
+def loose_to_dresscode(source, mods, assume_yes=False):
     """
     The template flow for a dropped loose pak mod. Returns an exit code, or
     None when `source` is not a loose mod root this direction understands.
@@ -483,16 +484,36 @@ def loose_to_dresscode(source, mods):
     icon = (os.path.basename(meta["icon"]) if meta["icon"]
             else "none (optional -- a picture next to dresscode.json)")
     print(f"      thumbnail: {icon}")
-    print(f"      -> {os.path.join(os.path.dirname(source), plugin)}{os.sep}"
+    print(f"      -> {os.path.join(os.path.dirname(source), f'{plugin} (Dresscode)', plugin)}{os.sep}"
           f"   (goes into End\\Mods)")
     for k, o in enumerate(outfits):
         pic = (os.path.basename(o["preview"]) if o["preview"]
                else "no picture (optional)")
         print(f"      {k + 1}. {o['name']}   [{pic}]")
     print()
-    print("  Building the Dresscode package from this is not wired up yet;")
-    print("  the template and folder layout check out.")
-    return 1
+    if not confirm(assume_yes, len(outfits)):
+        print("  Nothing converted.")
+        return 0
+
+    # A wrapper folder, so the output can never land on (and overwrite) an
+    # existing copy of the mod -- roundtrips make that collision routine. The
+    # folder INSIDE keeps the exact plugin name Dresscode requires.
+    out_root = os.path.join(os.path.dirname(source), f"{plugin} (Dresscode)")
+    root = mkdc.build(meta, outfits, plugin, out_root)
+    written = os.path.join(root, "Content", "Paks", "WindowsNoEditor",
+                           f"{plugin}End-WindowsNoEditor.utoc")
+    problems = rename.verify(written)
+    if problems:
+        print()
+        print("  PROBLEM -- the converted mod is not sound, do not install it:")
+        for p in problems[:8]:
+            print(f"    {p}")
+        return 1
+    print(f"    checked  {os.path.basename(written)} is internally consistent")
+    print()
+    print(f"  Done. Copy the \"{plugin}\" folder from inside "
+          f"\"{os.path.basename(out_root)}\" into End\\Mods.")
+    return 0
 
 
 def folder_name(text):
@@ -642,6 +663,7 @@ def main(argv):
         return 2
 
     runners, code, temps, tocs = [], 0, [], []
+    handled_any = False
     try:
         for raw in args:
             source = os.path.abspath(raw.rstrip("\\/"))
@@ -650,8 +672,16 @@ def main(argv):
                 code = 1
                 continue
             if os.path.isdir(source):
-                handled = loose_to_dresscode(source, find_mods(source))
+                # A bad template in one dropped folder must not abort the rest.
+                try:
+                    handled = loose_to_dresscode(source, find_mods(source),
+                                                 assume_yes)
+                except RuntimeError as ex:
+                    print(f"  {ex}")
+                    code = max(code, 1)
+                    continue
                 if handled is not None:
+                    handled_any = True
                     code = max(code, handled)
                     continue
             found = False
@@ -678,7 +708,9 @@ def main(argv):
                 code = max(code, 1)
 
         if not runners:
-            return code or 1
+            # "Nothing found at all" is a failure; a drop fully handled by
+            # the template flow is not.
+            return code if handled_any else (code or 1)
 
         print()
         if not confirm(assume_yes, len(runners)):

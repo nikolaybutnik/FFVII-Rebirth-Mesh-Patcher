@@ -275,7 +275,7 @@ def rename_container(toc, renames, mount, path_for, out_dir, base,
             continue
         if i in new_data:
             payload = new_data[i]
-            blocks = _pack(payload, toc.block_size, comp_method)
+            blocks = pack_blocks(payload, toc.block_size, comp_method)
             size = len(payload)
         else:
             offset, length = toc.offlen[i]
@@ -460,7 +460,7 @@ def verify(utoc_path):
     return problems
 
 
-def _pack(payload, block_size, comp_method):
+def pack_blocks(payload, block_size, comp_method):
     """Split into blocks, Oodle-compressing each only where it round trips."""
     out = []
     for k in range(0, len(payload), block_size):

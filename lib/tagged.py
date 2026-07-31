@@ -144,8 +144,10 @@ def _read_array(r, inner, end):
 #     ("str", text)                        StrProperty
 #     ("obj", package_index)               ObjectProperty (FPackageIndex)
 #     ("enum", enum_type, value_name)      EnumProperty
+#     ("bool", value)                      BoolProperty (value in the tag)
 #     ("softpath", "/Pkg/A.A" or None)     StructProperty<SoftObjectPath>
 #     ("struct", type_name, guid16, props) StructProperty
+#     ("struct_raw", type_name, bytes)     StructProperty, opaque value
 #     ("array_structs", type_name, guid16, [props, ...])
 #     ("map", key_type, value_type)        MapProperty, empty
 #
@@ -164,8 +166,9 @@ def collect_names(props, out):
         kind = spec[0]
         out.add(name)
         out.add({"str": "StrProperty", "obj": "ObjectProperty",
-                 "enum": "EnumProperty", "softpath": "StructProperty",
-                 "struct": "StructProperty",
+                 "enum": "EnumProperty", "bool": "BoolProperty",
+                 "softpath": "StructProperty",
+                 "struct": "StructProperty", "struct_raw": "StructProperty",
                  "array_structs": "ArrayProperty",
                  "map": "MapProperty"}[kind])
         if kind == "enum":
@@ -181,6 +184,8 @@ def collect_names(props, out):
         elif kind == "struct":
             out.add(spec[1])
             collect_names(spec[3], out)
+        elif kind == "struct_raw":
+            out.add(spec[1])
         elif kind == "array_structs":
             out.add("StructProperty")
             out.add(spec[1])
@@ -218,6 +223,12 @@ def emit_properties(props, name_of):
             out += tag(name, "ObjectProperty", struct.pack("<i", spec[1]))
         elif kind == "enum":
             out += tag(name, "EnumProperty", fname(spec[2]), fname(spec[1]))
+        elif kind == "bool":
+            out += tag(name, "BoolProperty", b"",
+                       b"\x01" if spec[1] else b"\x00")
+        elif kind == "struct_raw":
+            out += tag(name, "StructProperty", spec[2],
+                       fname(spec[1]) + b"\0" * 16)
         elif kind == "softpath":
             value = fname(spec[1] or TERMINATOR) + struct.pack("<i", 0)
             out += tag(name, "StructProperty", value,
