@@ -21,10 +21,12 @@ destination format; Dresscode authors ship such textures re-cooked under the
 plugin root too.
 """
 
+import base64
 import hashlib
 import json
 import os
 import struct
+import zlib
 
 import assetreg
 import cityhash
@@ -34,6 +36,7 @@ import iostore
 import mkpkg
 import moddata
 import pakfile
+import pkgedit
 import pngfile
 import rename
 import tagged
@@ -162,6 +165,286 @@ def safe_id(text, used, fallback):
         out = f"{cleaned}{n}"
     used.add(out.lower())
     return out
+
+
+def arc_positions(data):
+    """Byte offset of every graph arc's FromExportBundleIndex, in order.
+
+    Ordinals over this list identify an arc independent of the name table's
+    size, which is what lets the round trip put back the -1 arcs the loose
+    conversion had to flatten (the ~mods loader rejects them; a plugin
+    container carries them fine)."""
+    z = ZenPackage(data)
+    out = []
+    o = z.graph_off
+    count = struct.unpack_from("<I", data, o)[0]
+    o += 4
+    for _ in range(count):
+        o += 8
+        narcs = struct.unpack_from("<I", data, o)[0]
+        o += 4
+        for _ in range(narcs):
+            out.append(o)
+            o += 8
+    return out
+
+
+def original_blocks(toc, index):
+    """A chunk's compressed blocks exactly as stored -- reusing them keeps
+    untouched data byte-identical instead of re-Oodled."""
+    offset, length = toc.offlen[index]
+    b = offset // toc.block_size
+    out, remaining = [], length
+    while remaining > 0:
+        pos, csize, usize, method = toc.blocks[b]
+        toc.ucas.seek(pos)
+        out.append((toc.ucas.read(csize), usize, method))
+        remaining -= usize
+        b += 1
+    return out
+
+
+def restore(rt, parts, out_root, say=print):
+    """
+    Rebuild the ORIGINAL Dresscode mod these loose paks came from, from the
+    record their dresscode.json carries. Every package returns to its
+    original name and bytes, the registration assets and registry drop in
+    verbatim, and the container keeps the original chunk order, load order
+    and header shape. Only recompressed streams can differ from the original
+    files -- same content, same checksums, different Oodle output.
+
+    `parts`: {outfit folder ("." for the root): its .utoc path}.
+    """
+    plugin = rt["plugin"]
+    cid = int(rt["cid"])
+    mount = rt["mount"]
+
+    merged = {}         # original pid -> record
+    tocs = []
+    template_toc = None
+    for rel, vinfo in rt["variants"].items():
+        utoc = parts.get(rel)
+        if not utoc:
+            raise RuntimeError(f"an outfit folder is missing: {rel!r} -- "
+                               "delete dresscode.json to rebuild fresh")
+        toc = iostore.Toc(utoc)
+        tocs.append(toc)
+        if template_toc is None:
+            template_toc = toc
+        packages = rename.read_packages(toc)
+        renames = {k: v for k, v in vinfo["renames_back"].items()}
+        objects = {k: dict(v) for k, v in vinfo["objects_back"].items()}
+        new_data, _new_ids = rename.rewrite_chunks(toc, packages, renames,
+                                                   object_renames=objects)
+        pid_map = {pid: cityhash.package_id(renames[p["name"].lower()])
+                   for pid, p in packages.items()
+                   if p["name"].lower() in renames}
+
+        # The forward export rename APPENDED the stock object's name so the
+        # table's indices stayed valid; renaming back orphans it at the
+        # tail. Drop it, or the package comes back a few bytes bigger than
+        # it started.
+        by_low = {p["name"].lower(): p for p in packages.values()}
+        for pkg_low, m in objects.items():
+            pkg = by_low.get(pkg_low)
+            if not pkg or pkg["chunk"] not in new_data:
+                continue
+            d = new_data[pkg["chunk"]]
+            z = ZenPackage(d)
+            stock = set(m)
+            while z.names and z.names[-1] in stock:
+                gone = len(z.names) - 1
+                used = {e["name"] for e in z.exports}
+                if z.names[gone] in used:
+                    break
+                d = pkgedit.rewrite(d, names=z.names[:gone],
+                                    allow_shrink=True)
+                z = ZenPackage(d)
+            new_data[pkg["chunk"]] = d
+
+        hdr = next(toc.read(i) for i in range(toc.n)
+                   if toc.chunk_ids[i][11] == 10)
+        info = conheader.parse(hdr)
+        entry_meta = {}
+        for j, pid in enumerate(conheader.package_ids(hdr, info)):
+            _sz, exp, bun = struct.unpack_from(
+                "<Qii", hdr, info["store_off"] + j * 32)[:3]
+            entry_meta[pid] = (exp, bun, [
+                pid_map.get(p, p)
+                for p in conheader.imported_packages(hdr, info, j)])
+
+        bulks = {}
+        for i in range(toc.n):
+            t = toc.chunk_ids[i][11]
+            if t in (3, 4):
+                owner = int.from_bytes(toc.chunk_ids[i][:8], "little")
+                owner = pid_map.get(owner, owner)
+                cid12 = owner.to_bytes(8, "little") + toc.chunk_ids[i][8:]
+                bulks.setdefault(owner, []).append((cid12, t, toc, i))
+
+        neg = {k.lower(): v for k, v in rt.get("neg_arcs", {}).items()}
+        for pid, pkg in packages.items():
+            new_pid = pid_map.get(pid, pid)
+            name = renames.get(pkg["name"].lower(), pkg["name"])
+            i = pkg["chunk"]
+            changed = i in new_data
+            payload = new_data[i] if changed else toc.read(i)
+            ordinals = neg.get(name.lower())
+            if ordinals:
+                buf = bytearray(payload)
+                pos = arc_positions(buf)
+                for k in ordinals:
+                    struct.pack_into("<i", buf, pos[k], -1)
+                payload, changed = bytes(buf), True
+            have = merged.get(new_pid)
+            if have is not None:
+                if have["payload"] != payload:
+                    raise RuntimeError(
+                        f"outfits disagree about {name} -- the folders were "
+                        "not converted from the same mod")
+                continue
+            exp, bun, pdeps = entry_meta.get(pid, (1, 1, []))
+            merged[new_pid] = dict(
+                name=name, payload=payload,
+                src=None if changed else (toc, i),
+                deps=pdeps, exp=exp, bun=bun, bulks=bulks.get(new_pid, []))
+
+    for name, rec in rt["reg_chunks"].items():
+        data = zlib.decompress(base64.b64decode(rec["data"]))
+        merged[cityhash.package_id(name)] = dict(
+            name=name, payload=data, src=None,
+            deps=[int(d) for d in rec["deps"]],
+            exp=rec["exp"], bun=rec["bun"], bulks=[])
+
+    # ---- header chunk in the original's exact shape ----
+    id_order = rt["id_order"]
+    by_pid = {cityhash.package_id(n): n for n in id_order}
+    missing = [n for n in id_order
+               if cityhash.package_id(n) not in merged]
+    if missing:
+        raise RuntimeError(
+            "these packages of the original mod are gone from the loose "
+            "paks: " + ", ".join(missing[:4])
+            + " -- delete dresscode.json to rebuild fresh")
+
+    entries = rt["entries"]
+    hdr_out = struct.pack("<QIIIIQ", cid, len(id_order), 0, 0, 8, 0xC1640000)
+    hdr_out += struct.pack("<I", len(id_order))
+    hdr_out += b"".join(cityhash.package_id(n).to_bytes(8, "little")
+                        for n in id_order)
+    store = bytearray()
+    for j, n in enumerate(id_order):
+        rec = merged[cityhash.package_id(n)]
+        lo, pad = entries.get(n, [j, -1])
+        store += struct.pack("<QiiiI", len(rec["payload"]), rec["exp"],
+                             rec["bun"], lo, pad & 0xFFFFFFFF)
+        store += struct.pack("<II", 0, 0)
+    for j, n in enumerate(id_order):
+        rec = merged[cityhash.package_id(n)]
+        view = j * 32 + 24
+        if rec["deps"]:
+            struct.pack_into("<II", store, view, len(rec["deps"]),
+                             len(store) - view)
+            store += struct.pack(f"<{len(rec['deps'])}Q", *rec["deps"])
+    hdr_out += struct.pack("<I", len(store)) + store
+    if len(hdr_out) > rt["hdr_len"]:
+        raise RuntimeError("restore: header grew past the original -- "
+                           "delete dresscode.json to rebuild fresh")
+    hdr_out += b"\0" * (rt["hdr_len"] - len(hdr_out))
+
+    # ---- chunks in the original order ----
+    comp = next((m for m, nm in enumerate(template_toc.methods)
+                 if nm.lower() == "oodle"), None)
+
+    def fresh_blocks(payload):
+        return rename.pack_blocks(payload, template_toc.block_size, comp)
+
+    chunks, payloads, paths = [], [], []
+    pending_bulks = {pid: list(rec["bulks"]) for pid, rec in merged.items()}
+    prefix = f"/{plugin}/"
+    for name, t in rt["chunk_order"]:
+        if t == 10:
+            chunks.append(dict(id=cid.to_bytes(8, "little") + b"\0\0\0\x0a",
+                               blocks=fresh_blocks(hdr_out),
+                               size=len(hdr_out)))
+            payloads.append(hdr_out)
+            continue
+        pid = cityhash.package_id(name)
+        rec = merged[pid]
+        rel = rec["name"][len(prefix):] \
+            if rec["name"].lower().startswith(prefix.lower()) \
+            else rec["name"].lstrip("/")
+        if t == 2:
+            blocks = original_blocks(*rec["src"]) if rec["src"] \
+                else fresh_blocks(rec["payload"])
+            chunks.append(dict(id=pid.to_bytes(8, "little") + b"\0\0\0\x02",
+                               blocks=blocks, size=len(rec["payload"])))
+            payloads.append(rec["payload"])
+            paths.append((rel + ".uasset", len(chunks) - 1))
+        else:
+            queue = pending_bulks.get(pid, [])
+            k = next((x for x, (_c, bt, _t, _i) in enumerate(queue)
+                      if bt == t), None)
+            if k is None:
+                raise RuntimeError(f"restore: bulk data missing for {name}")
+            cid12, _bt, btoc, bi = queue.pop(k)
+            data = btoc.read(bi)
+            chunks.append(dict(id=bytes(cid12),
+                               blocks=original_blocks(btoc, bi),
+                               size=len(data)))
+            payloads.append(data)
+            paths.append((rel + (".uptnl" if t == 4 else ".ubulk"),
+                          len(chunks) - 1))
+
+    directory = dirindex.build_dir_index(mount, paths)
+    body, ucas, _offlen, block_table = writer.build_container(
+        template_toc, chunks, template_toc.block_size)
+    head = bytearray(writer.build_toc_header(
+        template_toc, len(chunks), len(block_table), len(directory),
+        template_toc.block_size))
+    struct.pack_into("<Q", head, 0x38, cid)
+    metas = b"".join(hashlib.sha1(p).digest() + b"\0" * 12 + b"\x01"
+                     for p in payloads)
+
+    pak_dir = os.path.join(out_root, plugin, "Content", "Paks",
+                           "WindowsNoEditor")
+    os.makedirs(pak_dir, exist_ok=True)
+    base = f"{plugin}End-WindowsNoEditor"
+    with open(os.path.join(pak_dir, base + ".utoc"), "wb") as f:
+        f.write(bytes(head) + bytes(body) + directory + metas)
+    with open(os.path.join(pak_dir, base + ".ucas"), "wb") as f:
+        f.write(ucas)
+
+    pak_files = [(p, zlib.decompress(base64.b64decode(z)))
+                 for p, z in rt["pak_files"]]
+    pak = pakfile.build_plugin(rt["pak_mount"], pak_files,
+                               compressor=iostore.oodle_compress,
+                               seed=int(rt["pak_seed"]))
+    with open(os.path.join(pak_dir, base + ".pak"), "wb") as f:
+        f.write(pak)
+
+    root = os.path.join(out_root, plugin)
+    with open(os.path.join(root, f"{plugin}.uplugin"), "wb") as f:
+        f.write(base64.b64decode(rt["uplugin"]))
+    if rt.get("icon_md5"):
+        # icon.png beside the template IS the original Icon128.png.
+        rel0 = next(iter(rt["variants"]))
+        src_root = os.path.dirname(parts[rel0]) if rel0 == "." \
+            else os.path.dirname(os.path.dirname(parts[rel0]))
+        icon = os.path.join(src_root, "icon.png")
+        if os.path.exists(icon):
+            os.makedirs(os.path.join(root, "Resources"), exist_ok=True)
+            with open(icon, "rb") as s, \
+                    open(os.path.join(root, "Resources", "Icon128.png"),
+                         "wb") as d:
+                d.write(s.read())
+
+    for toc in tocs:
+        toc.close()
+    say(f"    restored  {plugin}{os.sep}  "
+        f"({len(chunks)} chunks, {len(ucas) / (1024 * 1024):,.1f} MB, "
+        "original layout)")
+    return root
 
 
 def build(meta, outfits, plugin, out_root, say=print):

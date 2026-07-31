@@ -1,15 +1,39 @@
 """
-pngfile.py -- decodes a PNG into the BGRA pixels a Texture2D mip wants.
+pngfile.py -- PNG to and from the BGRA pixels a Texture2D mip wants.
 
 Only PNG is accepted from users (JPEG has no standard-library decoder, and
 shipping one is not worth it for preview pictures). All common 8-bit PNG
 flavors are handled -- grayscale, palette, truecolor, each with or without
 alpha, all five row filters. Interlaced and 16-bit files are rare enough to
 refuse with advice rather than support.
+
+encode() is the other direction: converting a Dresscode mod to loose paks
+extracts its preview pictures so the person can see (and later swap) them.
 """
 
 import struct
 import zlib
+
+
+def encode(width, height, bgra):
+    """The pixels as a plain truecolor+alpha PNG (filter 0, one IDAT)."""
+    raw = bytearray()
+    for y in range(height):
+        raw.append(0)                               # row filter: none
+        row = bgra[y * width * 4:(y + 1) * width * 4]
+        for i in range(0, len(row), 4):
+            raw += bytes((row[i + 2], row[i + 1], row[i], row[i + 3]))
+
+    def chunk(kind, body):
+        c = kind + body
+        return struct.pack(">I", len(body)) + c \
+            + struct.pack(">I", zlib.crc32(c))
+
+    return (b"\x89PNG\r\n\x1a\n"
+            + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height,
+                                         8, 6, 0, 0, 0))
+            + chunk(b"IDAT", zlib.compress(bytes(raw), 9))
+            + chunk(b"IEND", b""))
 
 
 def decode(path):

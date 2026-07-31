@@ -118,7 +118,7 @@ def source_name_of(pkg):
 
 def rewrite(data, names=None, import_map=None, pkgid_map=None,
             new_package_name=None, new_source_name=None, export_names=None,
-            fix_arcs=False):
+            fix_arcs=False, allow_shrink=False):
     """
     Rebuild one package's header.
 
@@ -159,7 +159,12 @@ def rewrite(data, names=None, import_map=None, pkgid_map=None,
     """
     pkg = ZenPackage(data)
     names = list(names) if names is not None else list(pkg.names)
-    if len(names) < len(pkg.names):
+    if len(names) < len(pkg.names) and not allow_shrink:
+        # Indices into the table live in the object data too, where nothing
+        # can rewrite them -- dropping a name from anywhere but an
+        # unreferenced tail corrupts the package. allow_shrink is for the
+        # round-trip restore, which drops exactly the tail name a forward
+        # export rename appended.
         raise ValueError("the replacement name table may grow, but not shrink")
 
     # Renamed exports need their new name in the table. Appending keeps every

@@ -97,6 +97,78 @@ def build(mount, methods=()):
     return bytes(out)
 
 
+def read_entries(data, decompressor=None):
+    """
+    Parse a pak written by build_plugin's conventions (or by the Dresscode
+    toolchain): returns (mount, seed, [(path, plain bytes)]) in entry order.
+    `decompressor(blob, out_size)` inflates compressed entries -- pass
+    iostore.oodle_decompress. Raises on shapes this reader does not know.
+    """
+    pos = data.rfind(struct.pack("<I", MAGIC))
+    if pos < 0:
+        raise RuntimeError("not a pak file")
+    ioff, isize = struct.unpack_from("<qq", data, pos + 8)
+    p = ioff
+    n = struct.unpack_from("<i", data, p)[0]
+    mount = data[p + 4:p + 4 + n - 1].decode("utf-8")
+    p += 4 + n
+    count = struct.unpack_from("<i", data, p)[0]
+    seed = struct.unpack_from("<Q", data, p + 4)[0]
+    p += 12
+    p += 4 + 16 + 20 + 4 + 16 + 20                  # both sub-index records
+    esize = struct.unpack_from("<i", data, p)[0]
+    p += 4
+    encoded, offsets = data[p:p + esize], []
+    o = 0
+    while o < len(encoded):
+        value = struct.unpack_from("<I", encoded, o)[0]
+        # Keyed by the entry's offset WITHIN the encoded array -- that, not
+        # the data offset, is what the directory index points at.
+        offsets.append((o, struct.unpack_from("<I", encoded, o + 4)[0]))
+        o += 12 + (4 if (value >> 23) & 0x3F else 0)
+
+    # Paths come from the full directory index, keyed by entry offset.
+    fd_off = struct.unpack_from("<q", data,
+                                ioff + 4 + n + 12 + 4 + 16 + 20 + 4)[0]
+    d = fd_off
+    paths = {}
+    ndirs = struct.unpack_from("<i", data, d)[0]
+    d += 4
+    for _ in range(ndirs):
+        ln = struct.unpack_from("<i", data, d)[0]
+        folder = data[d + 4:d + 4 + ln - 1].decode("utf-8")
+        d += 4 + ln
+        nfiles = struct.unpack_from("<i", data, d)[0]
+        d += 4
+        for _f in range(nfiles):
+            ln = struct.unpack_from("<i", data, d)[0]
+            fname = data[d + 4:d + 4 + ln - 1].decode("utf-8")
+            d += 4 + ln
+            off = struct.unpack_from("<I", data, d)[0]
+            d += 4
+            paths[off] = (folder.lstrip("/") + fname) if folder != "/" \
+                else fname
+
+    files = []
+    for enc_off, off in offsets:
+        _eo, size, usize, method = struct.unpack_from("<qqqI", data, off)
+        if method == 0:
+            body = data[off + 53:off + 53 + usize]
+        else:
+            nblocks = struct.unpack_from("<I", data, off + 48)[0]
+            bsize = struct.unpack_from("<I", data,
+                                       off + 52 + nblocks * 16 + 1)[0]
+            body = b""
+            o = off + 52
+            for _ in range(nblocks):
+                s, e = struct.unpack_from("<qq", data, o)
+                o += 16
+                body += decompressor(data[off + s:off + e],
+                                     min(bsize, usize - len(body)))
+        files.append((paths.get(enc_off, f"entry@{off}"), body))
+    return mount, seed, files
+
+
 def mount_of(data):
     """The mount point recorded in an existing pak, or None if unreadable."""
     pos = data.rfind(struct.pack("<I", MAGIC))
@@ -139,12 +211,13 @@ def path_hash(path, seed):
     return _fnv64(path.lower().encode("utf-16-le"), seed)
 
 
-def build_plugin(mount, files, compressor=None):
+def build_plugin(mount, files, compressor=None, seed=None):
     """
     A real plugin pak: `files` is [(path, data)], stored in order. `compressor`
     Oodle-compresses a blob (or returns None to store raw); when given, every
     entry that shrinks is compressed as a single block, which is how real
-    plugin paks ship their AssetRegistry.bin.
+    plugin paks ship their AssetRegistry.bin. `seed` fixes the path-hash seed
+    -- reproducing a specific pak needs its seed, a fresh one derives its own.
     """
     entries = bytearray()
     encoded = bytearray()
@@ -200,7 +273,8 @@ def build_plugin(mount, files, compressor=None):
 
     dir_index = dir_blob(lambda n: True)
 
-    seed = _fnv64(mount.lower().encode("utf-16-le"), 0) & 0xFFFFFFFF
+    if seed is None:
+        seed = _fnv64(mount.lower().encode("utf-16-le"), 0) & 0xFFFFFFFF
     ph_index = struct.pack("<i", len(records))
     for path, off in records:
         ph_index += struct.pack("<QI", path_hash(path, seed), off)
