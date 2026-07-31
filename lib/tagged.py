@@ -136,6 +136,113 @@ def _read_array(r, inner, end):
     return [read_properties(r, end) for _ in range(count)]
 
 
+# ---------------------------------------------------------------------------
+# Writing. The mirror of the reader above, for building a Dresscode mod's
+# registration assets from scratch. A property list is modelled as
+# [(name, spec), ...] where spec is one of:
+#
+#     ("str", text)                        StrProperty
+#     ("obj", package_index)               ObjectProperty (FPackageIndex)
+#     ("enum", enum_type, value_name)      EnumProperty
+#     ("softpath", "/Pkg/A.A" or None)     StructProperty<SoftObjectPath>
+#     ("struct", type_name, guid16, props) StructProperty
+#     ("array_structs", type_name, guid16, [props, ...])
+#     ("map", key_type, value_type)        MapProperty, empty
+#
+# Emitting needs every FName's final table index, and the table must exist
+# before anything can be emitted -- so building is two passes: collect_names
+# gathers every string a property list will intern, emit_properties writes the
+# bytes once the caller can resolve them.
+# ---------------------------------------------------------------------------
+
+TERMINATOR = "None"
+
+
+def collect_names(props, out):
+    """Add every FName `props` will reference to the set `out`."""
+    for name, spec in props:
+        kind = spec[0]
+        out.add(name)
+        out.add({"str": "StrProperty", "obj": "ObjectProperty",
+                 "enum": "EnumProperty", "softpath": "StructProperty",
+                 "struct": "StructProperty",
+                 "array_structs": "ArrayProperty",
+                 "map": "MapProperty"}[kind])
+        if kind == "enum":
+            out.add(spec[1])
+            out.add(spec[2])
+        elif kind == "softpath":
+            out.add("SoftObjectPath")
+            if spec[1]:
+                out.add(spec[1])
+                out.add(spec[1].split(".")[0])  # cooker interns the bare
+            else:                               # package path too
+                out.add(TERMINATOR)
+        elif kind == "struct":
+            out.add(spec[1])
+            collect_names(spec[3], out)
+        elif kind == "array_structs":
+            out.add("StructProperty")
+            out.add(spec[1])
+            for body in spec[3]:
+                collect_names(body, out)
+        elif kind == "map":
+            out.add(spec[1])
+            out.add(spec[2])
+    out.add(TERMINATOR)
+
+
+def _fstring(text):
+    if not text:
+        return struct.pack("<i", 0)
+    raw = text.encode("utf-8") + b"\0"
+    return struct.pack("<i", len(raw)) + raw
+
+
+def emit_properties(props, name_of):
+    """The property list as bytes, TERMINATOR excluded -- nested lists get
+    theirs, the caller of the outermost list adds its own."""
+    def fname(text):
+        return struct.pack("<II", name_of(text), 0)
+
+    def tag(name, typ, value, extra=b""):
+        return (fname(name) + fname(typ)
+                + struct.pack("<ii", len(value), 0) + extra + b"\0" + value)
+
+    out = b""
+    for name, spec in props:
+        kind = spec[0]
+        if kind == "str":
+            out += tag(name, "StrProperty", _fstring(spec[1]))
+        elif kind == "obj":
+            out += tag(name, "ObjectProperty", struct.pack("<i", spec[1]))
+        elif kind == "enum":
+            out += tag(name, "EnumProperty", fname(spec[2]), fname(spec[1]))
+        elif kind == "softpath":
+            value = fname(spec[1] or TERMINATOR) + struct.pack("<i", 0)
+            out += tag(name, "StructProperty", value,
+                       fname("SoftObjectPath") + b"\0" * 16)
+        elif kind == "struct":
+            body = emit_properties(spec[3], name_of) + fname(TERMINATOR)
+            out += tag(name, "StructProperty", body,
+                       fname(spec[1]) + spec[2])
+        elif kind == "array_structs":
+            bodies = b"".join(emit_properties(b, name_of) + fname(TERMINATOR)
+                              for b in spec[3])
+            inner = (fname(name) + fname("StructProperty")
+                     + struct.pack("<ii", len(bodies), 0)
+                     + fname(spec[1]) + spec[2] + b"\0")
+            value = struct.pack("<i", len(spec[3])) + inner + bodies
+            out += tag(name, "ArrayProperty", value, fname("StructProperty"))
+        elif kind == "map":
+            value = struct.pack("<ii", 0, 0)          # no removals, no pairs
+            out += tag(name, "MapProperty", value,
+                       fname(spec[1]) + fname(spec[2]))
+        else:
+            raise ValueError(f"unknown property spec {kind!r}")
+    return out
+
+
 def base_field(name):
     """
     Strip a blueprint property's GUID suffix: "Name_10_E3B3..." -> "Name".
