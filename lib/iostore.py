@@ -225,6 +225,7 @@ class Toc:
         # --- Chunk metas: 33 bytes each (SHA-1 + 12 zero bytes + a flags byte).
         self.meta_off = o
 
+        self.path = utoc_path
         self.ucas = open(os.path.splitext(utoc_path)[0] + ".ucas", "rb")
         self.paths = self.parse_directory_index(self.dir_raw) if self.dir_size else {}
 
@@ -326,6 +327,11 @@ class Toc:
         return bytes(out[:length])
 
     # -- small helpers -------------------------------------------------------
+
+    def close(self):
+        """Release the .ucas handle -- Windows will not delete a folder while
+        it is held, so anything reading from a temp copy must close first."""
+        self.ucas.close()
 
     def meta_hash(self, index):
         """The stored 32-byte checksum for a chunk (SHA-1, zero-padded)."""

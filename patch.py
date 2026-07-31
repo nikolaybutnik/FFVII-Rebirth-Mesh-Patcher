@@ -76,13 +76,13 @@ import os
 import shutil
 import struct
 import sys
-import zipfile
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "lib"))
 
 import config
 import deps
 import dirindex
+import drops
 import iostore
 import meshfix
 import skm
@@ -810,80 +810,8 @@ def show_list(mods, debug=False, sources=None):
         print()
 
 
-# Names (lowercase) of interactive shells / terminals. If one of these is
-# sharing our console, we were launched from it rather than owning the window.
-_SHELLS = {"cmd.exe", "powershell.exe", "pwsh.exe", "wt.exe",
-           "windowsterminal.exe", "openconsole.exe", "bash.exe", "sh.exe",
-           "zsh.exe", "fish.exe", "conemu64.exe", "conemuc64.exe",
-           "mintty.exe", "alacritty.exe", "wezterm-gui.exe"}
-
-
-def _console_proc_names():
-    """Lowercase exe names of every process attached to this console, or None if
-    there is no console (output redirected/piped) or it cannot be queried."""
-    import ctypes
-    from ctypes import wintypes
-
-    k32 = ctypes.windll.kernel32
-    k32.GetConsoleProcessList.restype = wintypes.DWORD
-    count = k32.GetConsoleProcessList((wintypes.DWORD * 1)(), 1)
-    if not count:
-        return None
-    buf = (wintypes.DWORD * (count + 4))()
-    count = k32.GetConsoleProcessList(buf, len(buf))
-    if not count:
-        return None
-    pids = set(buf[:count])
-
-    class PE(ctypes.Structure):
-        _fields_ = [("dwSize", wintypes.DWORD),
-                    ("cntUsage", wintypes.DWORD),
-                    ("th32ProcessID", wintypes.DWORD),
-                    ("th32DefaultHeapID", ctypes.c_void_p),
-                    ("th32ModuleID", wintypes.DWORD),
-                    ("cntThreads", wintypes.DWORD),
-                    ("th32ParentProcessID", wintypes.DWORD),
-                    ("pcPriClassBase", ctypes.c_long),
-                    ("dwFlags", wintypes.DWORD),
-                    ("szExeFile", ctypes.c_char * 260)]
-
-    # restype MUST be HANDLE -- the default c_int truncates the handle on 64-bit
-    # and the snapshot walk silently finds nothing.
-    k32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
-    snap = k32.CreateToolhelp32Snapshot(0x2, 0)     # TH32CS_SNAPPROCESS
-    if snap == ctypes.c_void_p(-1).value:
-        return None
-    names = []
-    try:
-        e = PE()
-        e.dwSize = ctypes.sizeof(PE)
-        ok = k32.Process32First(snap, ctypes.byref(e))
-        while ok:
-            if e.th32ProcessID in pids:
-                names.append(e.szExeFile.decode("mbcs", "replace").lower())
-            ok = k32.Process32Next(snap, ctypes.byref(e))
-    finally:
-        k32.CloseHandle(snap)
-    return names
-
-
-def _owns_console():
-    """
-    True when this process owns the console window -- double-clicked or a
-    folder dropped on it, so the window vanishes on exit and the user needs a
-    pause to read the output. Decided by WHAT is attached, not how many:
-    counting fails because the py.exe launcher stays attached, making a
-    double-clicked script two processes with no shell among them.
-    """
-    if os.name != "nt":
-        return False
-    try:
-        names = _console_proc_names()
-    except Exception:
-        return False
-    if not names:
-        return False
-    return not any(n in _SHELLS for n in names)
+# Console-ownership detection lives in lib/drops.py, shared with convert.py.
+_owns_console = drops.owns_console
 
 
 def _finish(summary):
@@ -919,163 +847,15 @@ def _wrapper_dir(source):
                         "Patched Mods")
 
 
-# Archives a drop may contain; unpacked by _extract_archive.
-_ARCHIVE_EXTS = (".zip", ".7z", ".rar")
-
-
-def _is_archive(source):
-    return source.lower().endswith(_ARCHIVE_EXTS)
-
-
-def _archives_in(source):
-    """Every archive inside a dropped FOLDER -- mods are often shared as a
-    folder of per-mod archives, whose contents only appear once unpacked."""
-    if not os.path.isdir(source):
-        return []
-    return sorted(os.path.join(dp, f)
-                  for dp, _dn, fn in os.walk(source) for f in fn
-                  if _is_archive(f))
-
-
-def _contains_archive(source):
-    return bool(_archives_in(source))
-
-
-def _tar_exe():
-    """Windows 10 and 11 bundle tar (libarchive), which reads zip, 7z and rar
-    with nothing installed."""
-    tar = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"),
-                       "System32", "tar.exe")
-    if os.path.exists(tar):
-        return tar
-    import shutil as _sh
-    return _sh.which("tar")
-
-
-def _archive_listing(src):
-    """Every path inside `src`, read from its index without unpacking -- fast
-    even on a multi-gigabyte archive. Empty if the index cannot be read; the
-    extraction attempt is what reports why."""
-    if src.lower().endswith(".zip"):
-        try:
-            with zipfile.ZipFile(src) as z:
-                return z.namelist()
-        except Exception:
-            pass                        # fall through to tar, which may cope
-    tar = _tar_exe()
-    if not tar:
-        return []
-    import subprocess
-    try:
-        r = subprocess.run([tar, "-tf", src], capture_output=True, text=True)
-    except OSError:
-        return []
-    return r.stdout.splitlines() if r.returncode == 0 else []
-
-
-def _archive_summary(src):
-    """What an archive holds, as (mod names, archives nested inside).
-
-    Lets a drop show its contents before anything is unpacked. A loader mod is
-    named by its .uplugin -- the name Dresscode looks for, and the one it will
-    be renamed to, which is often not the name the download arrived under.
-    """
-    mods, inner = set(), set()
-    for entry in _archive_listing(src):
-        path = entry.replace("\\", "/").rstrip("/")
-        stem, ext = os.path.splitext(path.rsplit("/", 1)[-1])
-        ext = ext.lower()
-        if ext == ".uplugin":
-            mods.add(stem)
-        elif ext == ".utoc":
-            # A loader mod's container sits under Content/Paks/WindowsNoEditor
-            # and is named for the container, not the mod -- its .uplugin above
-            # is the real name, so only loose paks are named from the .utoc.
-            if "content/paks/windowsnoeditor" not in path.lower():
-                mods.add(stem)
-        elif _is_archive(path):
-            inner.add(path.rsplit("/", 1)[-1])
-    return sorted(mods), sorted(inner)
-
-
-def _show_archive(src, indent):
-    """Print what `src` holds, for the listing shown before the drop menu."""
-    mods, inner = _archive_summary(src)
-    for m in mods:
-        print(f"{indent}{m}")
-    for i in inner:
-        print(f"{indent}{i}   (unpacks to more)")
-    if not mods and not inner:
-        print(f"{indent}(cannot see inside this one until it is unpacked)")
-
-
-def _archive_tools(src, dst):
-    """Command lines that can unpack `src` into `dst`, best first. tar handles
-    all three formats with nothing installed; a 7-Zip install is the fallback
-    for anything older than Windows 10."""
-    import shutil as _sh
-    tar = _tar_exe()
-    if tar:
-        yield tar, [tar, "-xf", src, "-C", dst]
-    seven = (_sh.which("7z") or _sh.which("7za")
-             or next((p for p in (r"C:\Program Files\7-Zip\7z.exe",
-                                   r"C:\Program Files (x86)\7-Zip\7z.exe")
-                      if os.path.exists(p)), None))
-    if seven:
-        yield seven, [seven, "x", src, f"-o{dst}", "-y"]
-
-
-def _extract_archive(src, dst):
-    """Extract `src` into `dst`. A .zip goes through the standard library first,
-    then falls back to the same tools as .7z/.rar -- tar reads zip too, and
-    copes with ones zipfile rejects. Raises with a readable reason, and a way
-    forward, if nothing can unpack it."""
-    os.makedirs(dst, exist_ok=True)
-    reasons = []
-    if src.lower().endswith(".zip"):
-        try:
-            with zipfile.ZipFile(src) as z:
-                z.extractall(dst)
-            return
-        except Exception as ex:
-            reasons.append(str(ex))
-    import subprocess
-    for tool, argv in _archive_tools(src, dst):
-        try:
-            r = subprocess.run(argv, capture_output=True, text=True)
-        except OSError as ex:
-            reasons.append(str(ex))
-            continue
-        if r.returncode == 0 and any(os.scandir(dst)):
-            return
-        reasons.append(r.stderr.strip() or r.stdout.strip() or "nothing extracted")
-    raise RuntimeError(
-        "could not unpack it -- " + ("; ".join(reasons) if reasons else
-        f"no tool for {os.path.splitext(src)[1]} files") +
-        ". You can unpack it yourself and drop the folder instead.")
-
-
-def _expand_archives(root, max_depth=4):
-    """Unpack archives inside `root`, repeatedly -- mods are often shared as an
-    archive (or folder) of per-mod archives, which a single pass would leave
-    unopened. Each archive becomes a folder and is removed. Runs only on our
-    own copy, never the original."""
-    failed = set()
-    for _ in range(max_depth):
-        found = [p for p in (os.path.join(dp, f)
-                             for dp, _dn, fn in os.walk(root) for f in fn)
-                 if _is_archive(p) and p not in failed]
-        if not found:
-            return
-        for arc in found:
-            print(f"  Unpacking {os.path.basename(arc)} ...")
-            try:
-                _extract_archive(arc, os.path.splitext(arc)[0])
-            except Exception as ex:
-                print(f"  Could not unpack {os.path.basename(arc)}: {ex}")
-                failed.add(arc)
-                continue
-            os.remove(arc)
+# Archive handling -- detection, extraction, nested unpacking -- lives in
+# lib/drops.py, shared with convert.py. Aliased so call sites read the same.
+_ARCHIVE_EXTS = drops.ARCHIVE_EXTS
+_is_archive = drops.is_archive
+_archives_in = drops.archives_in
+_contains_archive = drops.contains_archive
+_show_archive = drops.show_archive
+_extract_archive = drops.extract_archive
+_expand_archives = drops.expand_archives
 
 
 def _dresscode_stem(folder):
