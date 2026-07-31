@@ -38,6 +38,7 @@ to the old one needs none of it, and every one of those is a way to damage
 something. Conversion only ever creates.
 """
 
+import json
 import os
 import shutil
 import sys
@@ -276,6 +277,224 @@ def loose_path(package_name):
     return package_name[len(LOOSE_ROOT):]
 
 
+# ---------------------------------------------------------------------------
+# Loose pak -> Dresscode: the template.
+#
+# A Dresscode mod needs things a loose pak simply does not have -- a display
+# name, an author, per-outfit names, optional preview images -- and prompting
+# for each in a console is miserable. So the first drop of a loose mod writes
+# a dresscode.json template beside its paks, prefilled with everything
+# detectable, and the second drop reads it and builds. Editing it is optional:
+# the prefilled values already work.
+#
+# The folder layout IS the variant structure: paks directly in the dropped
+# folder are a single outfit; each sub-folder holding paks is one variant,
+# named for its folder.
+# ---------------------------------------------------------------------------
+
+TEMPLATE = "dresscode.json"
+IMAGE_EXTS = (".png", ".jpg", ".jpeg")
+
+
+def loose_layout(source, mods):
+    """
+    (mod_name, [(relative folder, utoc)]) when `source` is the root of a loose
+    pak mod in the shape the template supports -- otherwise None.
+    """
+    if not mods or any(uplugin for _utoc, uplugin in mods):
+        return None
+    root = os.path.normcase(os.path.abspath(source))
+    parts = []
+    for utoc, _ in mods:
+        d = os.path.dirname(os.path.abspath(utoc))
+        if os.path.normcase(d) == root:
+            parts.append((".", utoc))
+        elif os.path.normcase(os.path.dirname(d)) == root:
+            parts.append((os.path.basename(d), utoc))
+        else:
+            return None                 # deeper nesting; not a shape we know
+    kinds = {p == "." for p, _ in parts}
+    if kinds == {True} and len(parts) > 1:
+        return None                     # several paks loose in one folder
+    if len(kinds) > 1:
+        return None                     # a pak both at the root and in subs
+    name = os.path.basename(os.path.abspath(source).rstrip("\\/"))
+    if name.lower().endswith(" (loose pak)"):
+        name = name[:-len(" (loose pak)")]
+    return name, sorted(parts)
+
+
+def images_in(folder):
+    try:
+        return sorted(f for f in os.listdir(folder)
+                      if f.lower().endswith(IMAGE_EXTS))
+    except OSError:
+        return []
+
+
+def find_image(folder, preferred):
+    """
+    The picture a folder nominates, with no configuration: a file named
+    `preferred` (preview.png, icon.jpg, ...) wins, otherwise the first image
+    alphabetically. Nobody should ever have to type a file path into JSON --
+    where a picture SITS is the whole interface.
+    """
+    pics = images_in(folder)
+    for p in pics:
+        if os.path.splitext(p)[0].lower() == preferred:
+            return os.path.join(folder, p)
+    return os.path.join(folder, pics[0]) if pics else None
+
+
+def write_template(source, mod_name, parts):
+    """Prefill dresscode.json with the little a build needs. Pictures are on
+    purpose NOT in here -- they are picked up by where they sit."""
+    outfits = [{"folder": rel, "name": mod_name if rel == "." else rel,
+                "description": ""}
+               for rel, _utoc in parts]
+    template = {
+        "_how_this_works": [
+            "convert.py made this file. Drop the folder on it again and it",
+            "builds the Dresscode mod -- changing anything below is optional.",
+            "",
+            "What you can change:",
+            "  \"name\" at the top       what the whole mod is called",
+            "  \"name\" in an outfit     what THAT outfit is called in",
+            "                          Dresscode's outfit menu",
+            "  \"author\", descriptions  shown on the mod's page",
+            "",
+            "Pictures (optional). Two different pictures exist:",
+            "  the THUMBNAIL, one per mod, shown in Dresscode's mod list",
+            "     -> put a picture next to this file",
+            "  the PREVIEW, one per outfit, shown when picking outfits",
+            "     -> put a picture inside that outfit's folder",
+            "  If a folder has several pictures, name the right one",
+            "  preview.png (or icon.png for the thumbnail).",
+            "",
+            "Do NOT change the \"folder\" lines -- they say where each",
+            "outfit's files live.",
+        ],
+        "name": mod_name,
+        "author": "",
+        "description": "",
+        "category": "Outfit",
+        "version": "1.0.0",
+        "outfits": outfits,
+    }
+    path = os.path.join(source, TEMPLATE)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(template, f, indent=2)
+    return path
+
+
+def read_template(source, parts):
+    """Parse and validate dresscode.json against the folder layout. Returns
+    (meta, outfits) with image paths resolved, or raises with what to fix."""
+    path = os.path.join(source, TEMPLATE)
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+    except ValueError as ex:
+        raise RuntimeError(f"{TEMPLATE} is not valid JSON: {ex}")
+
+    if not str(data.get("name", "")).strip():
+        raise RuntimeError(f'{TEMPLATE} needs at least a "name"')
+
+    by_folder = {rel: utoc for rel, utoc in parts}
+    outfits = []
+    for entry in data.get("outfits") or []:
+        rel = str(entry.get("folder", ""))
+        if rel not in by_folder:
+            raise RuntimeError(
+                f'{TEMPLATE} mentions an outfit folder that is not there: '
+                f'"{rel}". The folders are: {", ".join(sorted(by_folder))}. '
+                f'(The "folder" lines must match the real folders.)')
+        # Pictures come from where they sit, never from typed paths.
+        folder = source if rel == "." else os.path.join(source, rel)
+        outfits.append(dict(
+            folder=rel, utoc=by_folder[rel],
+            name=str(entry.get("name", "")) or (rel if rel != "." else
+                                                str(data["name"])),
+            description=str(entry.get("description", "")),
+            preview=find_image(folder, "preview"),
+        ))
+    missing = sorted(set(by_folder) - {o["folder"] for o in outfits})
+    if missing:
+        raise RuntimeError(
+            f"{TEMPLATE} is missing its entry for: {', '.join(missing)}. "
+            "Delete the file and drop the folder again to get a fresh one.")
+    if not outfits:
+        raise RuntimeError(
+            f"{TEMPLATE} has no outfits in it. Delete the file and drop the "
+            "folder again to get a fresh one.")
+
+    meta = dict(
+        name=str(data["name"]).strip(),
+        author=str(data.get("author", "")),
+        description=str(data.get("description", "")),
+        category=str(data.get("category", "")) or "Outfit",
+        version=str(data.get("version", "")) or "1.0.0",
+        icon=find_image(source, "icon"),
+    )
+    return meta, outfits
+
+
+def plugin_id(name):
+    """
+    The display name reduced to a plugin identifier.
+
+    Dresscode looks a mod up by its folder name and ignores it unless that
+    exactly equals the .uplugin inside (the patcher repairs mismatched
+    downloads for the same reason). Building from one derived id -- folder,
+    .uplugin and container all -- makes a mismatch impossible.
+    """
+    cleaned = "".join(c for c in name if c.isalnum() or c == "_")
+    return cleaned or "Mod"
+
+
+def loose_to_dresscode(source, mods):
+    """
+    The template flow for a dropped loose pak mod. Returns an exit code, or
+    None when `source` is not a loose mod root this direction understands.
+    """
+    layout = loose_layout(source, mods)
+    if layout is None:
+        return None
+    mod_name, parts = layout
+
+    if not os.path.exists(os.path.join(source, TEMPLATE)):
+        path = write_template(source, mod_name, parts)
+        print()
+        print(f"  {mod_name}  (loose pak -> Dresscode)")
+        print(f"      created  {os.path.basename(path)}"
+              f"  ({len(parts)} outfit{'s' if len(parts) > 1 else ''})")
+        print("      Drop the folder again to build. Before that, if you")
+        print(f"      want, open {TEMPLATE} to set names and author, and put")
+        print("      a picture in an outfit's folder to give it a preview.")
+        return 0
+
+    meta, outfits = read_template(source, parts)
+    plugin = plugin_id(meta["name"])
+    print()
+    print(f"  {meta['name']}  (loose pak -> Dresscode"
+          + (f", {len(outfits)} outfits" if len(outfits) > 1 else "") + ")")
+    if meta["author"]:
+        print(f"      by {meta['author']}")
+    icon = (os.path.basename(meta["icon"]) if meta["icon"]
+            else "none (optional -- a picture next to dresscode.json)")
+    print(f"      thumbnail: {icon}")
+    print(f"      -> {os.path.join(os.path.dirname(source), plugin)}{os.sep}"
+          f"   (goes into End\\Mods)")
+    for k, o in enumerate(outfits):
+        pic = (os.path.basename(o["preview"]) if o["preview"]
+               else "no picture (optional)")
+        print(f"      {k + 1}. {o['name']}   [{pic}]")
+    print()
+    print("  Building the Dresscode package from this is not wired up yet;")
+    print("  the template and folder layout check out.")
+    return 1
+
+
 def folder_name(text):
     """`text` reduced to something Windows accepts as a folder name."""
     cleaned = "".join(" " if c in '<>:"/\\|?*' or ord(c) < 32 else c
@@ -430,13 +649,18 @@ def main(argv):
                 print(f"  Not found: {source}")
                 code = 1
                 continue
+            if os.path.isdir(source):
+                handled = loose_to_dresscode(source, find_mods(source))
+                if handled is not None:
+                    code = max(code, handled)
+                    continue
             found = False
             for utoc, uplugin, out_base in gather(source, temps):
                 found = True
                 if not uplugin:
                     print()
-                    print(f"  {os.path.basename(utoc)}  (loose pak -- "
-                          "converting this direction is not built yet)")
+                    print(f"  {os.path.basename(utoc)}  (loose pak -- drop "
+                          "its own folder to convert toward Dresscode)")
                     code = max(code, 1)
                     continue
                 try:
