@@ -463,8 +463,10 @@ def build(meta, outfits, plugin, out_root, say=print):
     used_names = set()
     entries_outfits = []        # per outfit: (mesh soft path, player key)
 
+    tocs = []
     for k, outfit in enumerate(outfits):
         toc = iostore.Toc(outfit["utoc"])
+        tocs.append(toc)
         if template_toc is None:
             template_toc = toc
         packages = rename.read_packages(toc)
@@ -758,6 +760,8 @@ def build(meta, outfits, plugin, out_root, say=print):
                      "wb") as dst:
             dst.write(src.read())
 
+    for toc in tocs:
+        toc.close()                     # Windows holds temp folders hostage
     say(f"    written  {plugin}{os.sep}  "
         f"({len(chunks)} chunks, {len(ucas) / (1024 * 1024):,.1f} MB)")
     return root
