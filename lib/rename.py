@@ -235,7 +235,7 @@ def rename_container(toc, renames, mount, path_for, out_dir, base,
             if info["name"].lower() in dropped}
     if gone:
         _refuse_if_needed(toc, packages, gone)
-        say(f"    dropping {len(gone)} package(s) that only Dresscode uses")
+        say(f"    dropping {len(gone)} package(s) this form does not use")
     say(f"    rewriting {len(packages) - len(gone)} packages")
     new_data, new_ids = rewrite_chunks(toc, packages, renames, object_renames,
                                        dropped, fix_arcs=fix_arcs)

@@ -45,6 +45,7 @@ import tempfile
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "lib"))
 
+import conheader                                                # noqa: E402
 import drops                                                    # noqa: E402
 import iostore                                                  # noqa: E402
 import moddata                                                  # noqa: E402
@@ -122,15 +123,24 @@ def find_mods(path):
     return found
 
 
-def plan_to_loose(toc, plugin):
+def plan_variants(toc, plugin):
     """
-    Rename map for Dresscode -> loose pak.
+    A conversion plan per wearable outfit -- a Dresscode mod can register
+    several variants, and each becomes its own loose pak.
 
-    The outfit's mesh takes over the character's DEFAULT costume package, so it
-    is worn without a menu. Everything else moves into a subfolder of that same
-    costume folder, named for the mod: /<Mod>/... names would keep their IDs,
-    but the loader silently skips imports into an unmounted root, so they must
-    live under /Game/ to resolve from ~mods.
+    Each variant's mesh takes over the character's DEFAULT costume package, so
+    it is worn without a menu. Everything else moves into a subfolder of that
+    same costume folder, named for the mod: /<Mod>/... names would keep their
+    IDs, but the loader silently skips imports into an unmounted root, so they
+    must live under /Game/ to resolve from ~mods.
+
+    A variant carries everything except what provably is not its: the
+    registration assets, preview images no mesh uses, and packages reachable
+    only from OTHER variants' meshes. Packages no variant references (physics
+    assets and the like, wired up in ways a dependency walk cannot see) ride
+    along in every variant -- a few wasted megabytes beat a missing feature.
+
+    Returns [(outfit, target, renames, objects, drop)], one entry per variant.
     """
     assets = moddata.find_data_assets(toc)
     if "character" not in assets:
@@ -141,12 +151,6 @@ def plan_to_loose(toc, plugin):
     if not wearable:
         raise RuntimeError("this mod registers no mesh of its own to convert")
 
-    outfit = wearable[0]
-    mesh = outfit["skeletal_mesh"].split(".")[0]
-    target = moddata.default_costume_package(outfit["player_type"])
-    if not target:
-        raise RuntimeError(f"unknown character {outfit['player_type']!r}")
-
     # The registration assets are Dresscode's, and only Dresscode's. Carried
     # into a loose pak they become data assets whose CLASS lives in a plugin
     # that is not mounted when ~mods is -- and the loader still enumerates them
@@ -155,38 +159,103 @@ def plan_to_loose(toc, plugin):
 
     packages = rename.read_packages(toc)
     own = {p["name"].lower() for p in packages.values()}
+    by_name = {p["name"].lower(): pid for pid, p in packages.items()}
+    deps = header_deps(toc)
 
-    # ".../PC0002_00_Tifa_Standard" -- the costume folder the mesh lives in.
-    costume_root = target.rsplit("/Model/", 1)[0]
+    def closure(seed_pid):
+        """Everything a mesh pulls in, walking the container header's
+        dependency lists -- in-container packages only."""
+        keep, todo = set(), [seed_pid]
+        while todo:
+            pid = todo.pop()
+            if pid in keep or pid not in packages:
+                continue
+            keep.add(pid)
+            todo += deps.get(pid, [])
+        return keep
 
-    renames, objects, drop = {}, {}, set()
-    for info in packages.values():
-        if info["chunk"] in registration:
-            drop.add(info["name"])
-        name = info["name"]
-        if name.lower() == mesh.lower():
-            renames[name.lower()] = target
-            # The mesh's EndCharacterConditionUserData soft-references a
-            # condition (petrify) mesh, and Dresscode authors can leave it
-            # pointing into their own uncooked project folder -- Dresscode never
-            # follows the reference, but the stock costume pipeline does. Point
-            # it at the condition mesh of the costume being replaced.
-            for cond in condition_refs(toc, info["chunk"], own):
-                if cond.lower() != f"{target}_Condition".lower():
-                    renames[cond.lower()] = f"{target}_Condition"
-            # The object inside has to take the stock name too. The game imports
-            # /Game/.../PC0002_00.PC0002_00, and an import ID hashes the object
-            # name with the package's -- so a mesh still called MyOutfit answers
-            # to an ID nothing asks for, and the override silently does nothing.
-            stock_object = target.rsplit("/", 1)[-1]
-            objects[name.lower()] = {e: stock_object for e in info["exports"]
-                                     if "/" not in e and e != stock_object
-                                     and e == mesh.rsplit("/", 1)[-1]}
-        elif name.lower().startswith(f"/{plugin.lower()}/"):
-            renames[name.lower()] = f"{costume_root}/{plugin}{name[len(plugin) + 1:]}"
-        else:
-            renames[name.lower()] = name
-    return renames, objects, drop, outfit, target, len(wearable)
+    closures = []
+    for outfit in wearable:
+        mesh = outfit["skeletal_mesh"].split(".")[0]
+        pid = by_name.get(mesh.lower())
+        closures.append(closure(pid) if pid is not None else set())
+
+    # Preview images exist for the Dresscode menu; drop any that no mesh needs.
+    previews = set()
+    for o in outfits:
+        if o["preview_image"]:
+            p = by_name.get(o["preview_image"].split(".")[0].lower())
+            if p is not None and not any(p in c for c in closures):
+                previews.add(p)
+
+    plans = []
+    for k, outfit in enumerate(wearable):
+        mesh = outfit["skeletal_mesh"].split(".")[0]
+        if by_name.get(mesh.lower()) is None:
+            print(f"  skipping {outfit['name'] or mesh!r}: its mesh package "
+                  "is not in the container")
+            continue
+        target = moddata.default_costume_package(outfit["player_type"])
+        if not target:
+            print(f"  skipping {outfit['name'] or mesh!r}: unknown character "
+                  f"{outfit['player_type']!r}")
+            continue
+
+        others = set().union(*(c for j, c in enumerate(closures) if j != k)) \
+            if len(closures) > 1 else set()
+        exclusive_elsewhere = (others - closures[k]) | previews
+
+        # ".../PC0002_00_Tifa_Standard" -- the costume folder the mesh lives in.
+        costume_root = target.rsplit("/Model/", 1)[0]
+
+        renames, objects, drop = {}, {}, set()
+        for pid, info in packages.items():
+            name = info["name"]
+            if info["chunk"] in registration or pid in exclusive_elsewhere:
+                drop.add(name)
+            if name.lower() == mesh.lower():
+                renames[name.lower()] = target
+                # The mesh's EndCharacterConditionUserData soft-references a
+                # condition (petrify) mesh, and Dresscode authors can leave it
+                # pointing into their own uncooked project folder -- Dresscode
+                # never follows the reference, but the stock costume pipeline
+                # does. Point it at the condition mesh of the costume being
+                # replaced.
+                for cond in condition_refs(toc, info["chunk"], own):
+                    if cond.lower() != f"{target}_Condition".lower():
+                        renames[cond.lower()] = f"{target}_Condition"
+                # The object inside has to take the stock name too. The game
+                # imports /Game/.../PC0002_00.PC0002_00, and an import ID
+                # hashes the object name with the package's -- so a mesh still
+                # called MyOutfit answers to an ID nothing asks for, and the
+                # override silently does nothing.
+                stock_object = target.rsplit("/", 1)[-1]
+                objects[name.lower()] = {e: stock_object for e in info["exports"]
+                                         if "/" not in e and e != stock_object
+                                         and e == mesh.rsplit("/", 1)[-1]}
+            elif name.lower().startswith(f"/{plugin.lower()}/"):
+                renames[name.lower()] = \
+                    f"{costume_root}/{plugin}{name[len(plugin) + 1:]}"
+            else:
+                renames[name.lower()] = name
+        plans.append((outfit, target, renames, objects, drop))
+    if not plans:
+        raise RuntimeError("none of this mod's outfits can be converted")
+    return plans
+
+
+def header_deps(toc):
+    """{package ID -> imported package IDs} from the container header."""
+    for i in range(toc.n):
+        if toc.chunk_ids[i][11] != 10:
+            continue
+        hdr = toc.read(i)
+        info = conheader.parse(hdr)
+        if not info:
+            break
+        return {pid: conheader.imported_packages(hdr, info, k)
+                for k, pid in enumerate(conheader.package_ids(hdr, info))}
+    return {}
 
 
 def condition_refs(toc, chunk, own):
@@ -207,57 +276,94 @@ def loose_path(package_name):
     return package_name[len(LOOSE_ROOT):]
 
 
+def folder_name(text):
+    """`text` reduced to something Windows accepts as a folder name."""
+    cleaned = "".join(" " if c in '<>:"/\\|?*' or ord(c) < 32 else c
+                      for c in text)
+    return " ".join(cleaned.split()).strip(" .")
+
+
 def prepare_to_loose(toc, uplugin, out_base=None):
     """
-    Plan one Dresscode -> loose conversion and print its summary. Returns a
-    zero-argument callable that performs it -- planning is separated from
+    Plan a mod's conversions and print their summaries. Returns a list of
+    zero-argument callables, one per variant -- planning is separated from
     writing so a multi-mod drop can show everything before one confirmation.
+
+    A single-outfit mod writes straight into "<Mod> (loose pak)". Variants
+    each get a sub-folder inside it, named for the outfit, and every variant
+    keeps the same file name -- they all replace the same stock costume, so
+    installing one over another in ~mods swaps them cleanly.
 
     `out_base` overrides where the output folder goes: beside the mod's own
     folder normally, but a mod unpacked from an archive lives in a temp
     folder, so its output belongs beside the archive instead.
     """
     plugin = os.path.splitext(os.path.basename(uplugin))[0]
-    renames, objects, drop, outfit, target, count = plan_to_loose(toc, plugin)
+    plans = plan_variants(toc, plugin)
 
     source_root = os.path.abspath(os.path.dirname(uplugin)).rstrip("\\/")
-    out_dir = (os.path.join(out_base, os.path.basename(source_root) + " (loose pak)")
+    mod_out = (os.path.join(out_base, os.path.basename(source_root) + " (loose pak)")
                if out_base else source_root + " (loose pak)")
     base = f"{plugin}_P"
 
+    # One scannable block per mod: what it is, where it goes, and the variant
+    # list -- per-variant paths and package details would drown a multi-mod
+    # drop. Characters are named per variant only when they differ.
+    n = len(plans)
+    chars = [o["player_type"].split("::")[-1].title() for o, *_ in plans]
+    mixed = len(set(chars)) > 1
+    head = f"  {plugin}  (Dresscode"
+    if n > 1:
+        head += f", {n} outfits"
+    if not mixed:
+        head += f", replaces {chars[0]}'s standard outfit"
     print()
-    print(f"  Mod        : {plugin}   (Dresscode plugin)")
-    print(f"  Outfit     : {outfit['name'] or '(unnamed)'}   "
-          f"{outfit['player_type'].split('::')[-1].title()}")
-    if count > 1:
-        print(f"               this mod has {count} outfits; a loose pak holds one,")
-        print(f"               so the first is used and the rest are dropped")
-    print(f"  Replaces   : {target}")
-    print(f"  Writes     : {out_dir}{os.sep}{base}.utoc/.ucas/.pak")
+    print(head + ")")
+    print(f"      -> {mod_out}{os.sep}")
 
-    def run():
-        written = rename.rename_container(toc, renames, CONTAINER_MOUNT,
-                                          loose_path, out_dir, base,
-                                          container_name=base,
-                                          object_renames=objects,
-                                          drop=drop, fix_arcs=True)
-        with open(os.path.join(out_dir, base + ".pak"), "wb") as f:
-            f.write(pakfile.build(pakfile.LOOSE_MOUNT))
-        print(f"    written {base}.pak")
+    runners, used = [], set()
+    for k, (outfit, target, renames, objects, drop) in enumerate(plans):
+        if n == 1:
+            out_dir, label = mod_out, os.path.basename(mod_out)
+        else:
+            # Named for the outfit; authors reuse display names across
+            # variants, so a clash falls back to the mesh's own name.
+            sub = folder_name(outfit["name"])
+            if not sub or sub.lower() in used:
+                mesh_leaf = outfit["skeletal_mesh"].split(".")[-1]
+                sub = folder_name(f"{outfit['name']} ({mesh_leaf})".strip())
+            used.add(sub.lower())
+            out_dir, label = os.path.join(mod_out, sub), sub
+            print(f"      {k + 1}. {sub}"
+                  + (f"   ({chars[k]})" if mixed else ""))
 
-        problems = rename.verify(written)
-        if problems:
-            print()
-            print("  PROBLEM -- the converted mod is not sound, do not install it:")
-            for p in problems[:8]:
-                print(f"    {p}")
-            if len(problems) > 8:
-                print(f"    ... and {len(problems) - 8} more")
-            return 1
-        print(f"    checked  {os.path.basename(written)} is internally consistent")
-        return 0
+        def run(renames=renames, objects=objects, drop=drop,
+                out_dir=out_dir, label=label):
+            written = rename.rename_container(toc, renames, CONTAINER_MOUNT,
+                                              loose_path, out_dir, base,
+                                              container_name=base,
+                                              object_renames=objects,
+                                              drop=drop, fix_arcs=True,
+                                              quiet=True)
+            with open(os.path.join(out_dir, base + ".pak"), "wb") as f:
+                f.write(pakfile.build(pakfile.LOOSE_MOUNT))
 
-    return run
+            problems = rename.verify(written)
+            if problems:
+                print()
+                print(f"  PROBLEM -- {label} is not sound, do not install it:")
+                for p in problems[:8]:
+                    print(f"    {p}")
+                if len(problems) > 8:
+                    print(f"    ... and {len(problems) - 8} more")
+                return 1
+            mb = os.path.getsize(os.path.splitext(written)[0] + ".ucas") \
+                / (1024 * 1024)
+            print(f"    converted  {label}   ({mb:,.1f} MB, verified)")
+            return 0
+
+        runners.append(run)
+    return runners
 
 
 # Set once a prompt has handled the final keypress, so the end-of-run pause
@@ -329,17 +435,14 @@ def main(argv):
                 found = True
                 if not uplugin:
                     print()
-                    print(f"  Mod        : {os.path.basename(utoc)}   (loose pak)")
-                    print("  Converting a loose pak into a Dresscode mod is "
-                          "not built yet.")
-                    print("  It needs the two registration assets written "
-                          "from scratch.")
+                    print(f"  {os.path.basename(utoc)}  (loose pak -- "
+                          "converting this direction is not built yet)")
                     code = max(code, 1)
                     continue
                 try:
                     toc = iostore.Toc(utoc)
                     tocs.append(toc)
-                    runners.append(prepare_to_loose(toc, uplugin, out_base))
+                    runners += prepare_to_loose(toc, uplugin, out_base)
                 except RuntimeError as ex:
                     print(f"  {os.path.basename(utoc)}: {ex}")
                     code = max(code, 1)
