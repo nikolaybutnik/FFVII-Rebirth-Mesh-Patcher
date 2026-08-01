@@ -569,6 +569,12 @@ def restore(rt, parts, out_root, optionals=None, say=print):
     root = os.path.join(out_root, plugin)
     with open(os.path.join(root, f"{plugin}.uplugin"), "wb") as f:
         f.write(base64.b64decode(rt["uplugin"]))
+    if rt.get("icon_b64"):
+        # A library mod's icon rides in its record verbatim -- it has no
+        # extracted icon.png in the loose folder to read back.
+        os.makedirs(os.path.join(root, "Resources"), exist_ok=True)
+        with open(os.path.join(root, "Resources", "Icon128.png"), "wb") as f:
+            f.write(base64.b64decode(rt["icon_b64"]))
     if rt.get("icon_md5"):
         # icon.png beside the template IS the original Icon128.png.
         rel0 = next(iter(rt["variants"]))

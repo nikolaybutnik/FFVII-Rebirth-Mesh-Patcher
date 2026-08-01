@@ -39,6 +39,7 @@ something. Conversion only ever creates.
 """
 
 import base64
+import glob
 import hashlib
 import json
 import os
@@ -136,10 +137,100 @@ def find_mods(path):
     return found
 
 
-def plan_variants(toc, plugin):
+def actor_mesh(toc, packages, by_name, resolve, probed, actor):
+    """
+    The SkeletalMesh an actor blueprint equips, as "package.object" -- the
+    mesh of a row that carries no mesh path of its own. `probed` caches
+    which packages hold a mesh export; a 100 MB mesh decompresses once.
+    """
+    pid = by_name.get(str(actor).split(".")[0].lower())
+    if pid is None:
+        return None
+    z = zen.ZenPackage(toc.read(packages[pid]["chunk"]))
+    for imp in z.imports:
+        tgt = resolve.get(imp)
+        if not tgt:
+            continue
+        tp = by_name.get(tgt[0].lower())
+        if tp is None:
+            continue
+        if tp not in probed:
+            zz = zen.ZenPackage(toc.read(packages[tp]["chunk"]))
+            probed[tp] = {e["name"] for e in zz.exports
+                          if e["cls"] == mkdc.SKELETAL_MESH}
+        if tgt[1] in probed[tp]:
+            return f"{tgt[0]}.{tgt[1]}"
+    return None
+
+
+def foreign_roots(toc, plugin):
+    """
+    Other PLUGINS this container HARD-IMPORTS from -- dependencies no
+    manifest declares (a shared skin library). Only packages named in the
+    container header's dependency lists count: name tables are full of
+    benign leftovers (soft paths into the author's other mods, uncooked
+    project folders) that the mod demonstrably lives without.
+    """
+    skip = {plugin.lower(), "game", "script", "engine", "ff7rml", "dresscode"}
+    hard = set()
+    for pids in header_deps(toc).values():
+        hard.update(pids)
+    roots = {}
+    for p in rename.read_packages(toc).values():
+        for n in zen.ZenPackage(toc.read(p["chunk"])).names:
+            if not n.startswith("/") or "/" not in n[1:]:
+                continue
+            root = n[1:].split("/", 1)[0]
+            if root.lower() in skip or root.lower() in roots:
+                continue
+            if cityhash.package_id(n) in hard:
+                roots[root.lower()] = root
+    return sorted(roots.values())
+
+
+def locate_libraries(roots, uplugin):
+    """
+    ({root: (utoc, uplugin, where)}, [missing]) -- each library found
+    beside the dependent mod (anywhere under the folder that holds it) or
+    installed in End\\Mods; `where` says which, for the person watching.
+    Dresscode's own rule makes the .uplugin name the identity.
+    """
+    import config
+    found, missing = {}, []
+    near = os.path.dirname(os.path.dirname(os.path.abspath(uplugin)))
+    for root in roots:
+        cands = glob.glob(os.path.join(near, "**", f"{root}.uplugin"),
+                          recursive=True)
+        installed = os.path.join(getattr(config, "MODS_DIR", ""), root,
+                                 f"{root}.uplugin")
+        if os.path.exists(installed):
+            cands.append(installed)
+        hit = None
+        for c in cands:
+            utoc = find_container(os.path.dirname(c))
+            if utoc:
+                if os.path.normcase(c) == os.path.normcase(installed):
+                    where = "installed in End\\Mods"
+                else:
+                    rel = os.path.relpath(os.path.dirname(c), near)
+                    where = f"found beside it: {rel}{os.sep}"
+                hit = (utoc, c, where)
+                break
+        if hit:
+            found[root] = hit
+        else:
+            missing.append(root)
+    return found, missing
+
+
+def plan_variants(toc, plugin, extra_roots=()):
     """
     A conversion plan per wearable outfit -- a Dresscode mod can register
     several variants, and each becomes its own loose pak.
+
+    `extra_roots` names library plugins whose packages ride inside `toc`
+    (a merged container): they relocate into the loose layout beside the
+    mod's own, each under its own subfolder.
 
     Each variant's mesh takes over the character's DEFAULT costume package, so
     it is worn without a menu. Everything else moves into a subfolder of that
@@ -164,10 +255,31 @@ def plan_variants(toc, plugin):
     Returns (plans, toggles, ctx): plans is [(outfit, target, renames,
     objects, drop)] per variant, toggles one dict per optional pak.
     """
-    assets = moddata.find_data_assets(toc)
+    assets = moddata.find_data_assets(toc,
+                                      prefer=f"/{plugin.lower()}/")
     if "character" not in assets:
         raise RuntimeError("no Dresscode outfit data in this mod")
     outfits = moddata.read_outfits(toc.read(assets["character"]))
+
+    packages = rename.read_packages(toc)
+    own = {p["name"].lower() for p in packages.values()}
+    by_name = {p["name"].lower(): pid for pid, p in packages.items()}
+    deps = header_deps(toc)
+
+    # Whole mods are authored with every mesh riding INSIDE its row's actor
+    # blueprint, the row's own mesh path left empty. Pull the mesh out of
+    # the blueprint and the row converts like any other outfit.
+    resolve = probed = None
+    for o in outfits:
+        if o["skeletal_mesh"] or not o.get("actor"):
+            continue
+        if resolve is None:
+            resolve = matpack.object_resolver(toc)
+            probed = {}
+        m = actor_mesh(toc, packages, by_name, resolve, probed, o["actor"])
+        if m:
+            o["skeletal_mesh"] = m
+
     meshed = [o for o in outfits
               if o["skeletal_mesh"]
               and not o["skeletal_mesh"].startswith("/Game/")]
@@ -193,11 +305,6 @@ def plan_variants(toc, plugin):
     # that is not mounted when ~mods is -- and the loader still enumerates them
     # at startup. They describe a mod that, in this format, does not exist.
     registration = set() if KEEP_REGISTRATION else set(assets.values())
-
-    packages = rename.read_packages(toc)
-    own = {p["name"].lower() for p in packages.values()}
-    by_name = {p["name"].lower(): pid for pid, p in packages.items()}
-    deps = header_deps(toc)
 
     def closure(seed_pid):
         """Everything a mesh pulls in, walking the container header's
@@ -248,9 +355,10 @@ def plan_variants(toc, plugin):
             bases.append((pid, target.rsplit("/Model/", 1)[0],
                           (o["name"] or "").strip()))
 
+    roots = (plugin, *extra_roots)
     base_union = set().union(*closures) if closures else set()
     toggles, blob_only = plan_toggles(
-        toc, plugin, packages, by_name, deps, closure, base_union,
+        toc, roots, packages, by_name, deps, closure, base_union,
         set(preview_users), toggle_rows, registration, bases)
 
     # Cargo that IMPORTS the Dresscode-only machinery -- or anything only
@@ -329,24 +437,27 @@ def plan_variants(toc, plugin):
                 objects[name.lower()] = {e: stock_object for e in info["exports"]
                                          if "/" not in e and e != stock_object
                                          and e == mesh.rsplit("/", 1)[-1]}
-            elif name.lower().startswith(f"/{plugin.lower()}/"):
-                renames[name.lower()] = \
-                    f"{costume_root}/{plugin}{name[len(plugin) + 1:]}"
             else:
-                renames[name.lower()] = name
+                renames[name.lower()] = converted_name(name, roots,
+                                                       costume_root)
         plans.append((outfit, target, renames, objects, drop))
     if not plans:
         raise RuntimeError("none of this mod's outfits can be converted")
     # The survey rides along so the round-trip recorder does not pay for a
     # second full read of every package.
     return plans, toggles, dict(packages=packages, assets=assets,
-                                outfits=outfits, blob_only=blob_only)
+                                outfits=outfits, blob_only=blob_only,
+                                roots=roots)
 
 
 def converted_name(name, plugin, costume_root):
-    """Where a mod package lands in the loose layout; stock names stay put."""
-    if name.lower().startswith(f"/{plugin.lower()}/"):
-        return f"{costume_root}/{plugin}{name[len(plugin) + 1:]}"
+    """Where a mod package lands in the loose layout; stock names stay put.
+    `plugin` may be one root or several -- a mod's undeclared library
+    dependencies relocate right beside it, each under its own subfolder."""
+    roots = (plugin,) if isinstance(plugin, str) else plugin
+    for r in roots:
+        if name.lower().startswith(f"/{r.lower()}/"):
+            return f"{costume_root}/{r}{name[len(r) + 1:]}"
     return name
 
 
@@ -380,8 +491,16 @@ def plan_toggles(toc, plugin, packages, by_name, deps, closure, base_union,
              and matpack.is_material_pack(toc.read(packages[p]["chunk"]))),
             None)
         if pack_pid is None:
-            print(f"      note: {row['name'] or bp_pkg} does something no "
-                  "loose pak can (not a material swap) -- Dresscode only")
+            own_mesh = (row["skeletal_mesh"] or "").split(".")[0]
+            own_pid = by_name.get(own_mesh.lower()) if own_mesh else None
+            if own_pid is not None and any(b[0] == own_pid for b in bases):
+                # The actor only equips a mesh that already converts as a
+                # base outfit -- nothing here needs an Optional pak.
+                continue
+            print(f"      note: the \"{row['name'] or bp_pkg}\" menu item "
+                  "runs blueprint logic, not a material swap. There is no "
+                  "loose-pak form of that; it is kept in the record and "
+                  "returns when this folder converts back to Dresscode.")
             continue
         blob_only.add(pack_pid)
         if resolver is None:
@@ -872,8 +991,102 @@ def restore_matches(rt, meta, outfits):
     return md5_of(meta.get("icon")) == rt.get("icon_md5")
 
 
+def library_record(root, lib_utoc, lib_uplugin, variants, optionals,
+                   carried):
+    """
+    A restore record for a library mod whose packages were inlined into a
+    dependent's loose conversion -- the same shape as the dependent's own
+    record, sharing the loose paks as the package source. Its uncarried
+    packages (registration assets, helpers nothing referenced) ride as
+    verbatim bytes.
+    """
+    toc = iostore.Toc(lib_utoc)
+    packages = rename.read_packages(toc)
+    name_of = {pid: p["name"] for pid, p in packages.items()}
+    hdr_chunk = next(i for i in range(toc.n) if toc.chunk_ids[i][11] == 10)
+    hdr = toc.read(hdr_chunk)
+    info = conheader.parse(hdr)
+    ids = conheader.package_ids(hdr, info)
+    entry_of = {}
+    for j, pid in enumerate(ids):
+        _sz, exp, bun, lo, pad = struct.unpack_from(
+            "<Qiiii", hdr, info["store_off"] + j * 32)
+        entry_of[pid] = dict(
+            exp=exp, bun=bun, lo=lo, pad=pad, order=j,
+            deps=[str(d) for d in
+                  conheader.imported_packages(hdr, info, j)])
+    chunk_order, dir_paths = [], []
+    for i in range(toc.n):
+        t = toc.chunk_ids[i][11]
+        pid = int.from_bytes(toc.chunk_ids[i][:8], "little")
+        chunk_order.append(["" if t == 10 else name_of.get(pid, ""), t])
+        dir_paths.append(toc.paths.get(i, ""))
+    neg_arcs, stored_chunks, stored_bulks = {}, {}, {}
+    for pid, p in packages.items():
+        data = toc.read(p["chunk"])
+        bad = [k for k, pos in enumerate(mkdc.arc_positions(data))
+               if struct.unpack_from("<i", data, pos)[0] == -1]
+        if bad:
+            neg_arcs[p["name"]] = bad
+        if p["name"].lower() in carried:
+            continue
+        stored_chunks[p["name"]] = base64.b64encode(
+            zlib.compress(data, 9)).decode("ascii")
+        blobs = []
+        for i in range(toc.n):
+            cid = toc.chunk_ids[i]
+            if cid[11] in (3, 4) and \
+                    int.from_bytes(cid[:8], "little") == pid:
+                blobs.append([bytes(cid).hex(), base64.b64encode(
+                    zlib.compress(toc.read(i), 9)).decode("ascii")])
+        if blobs:
+            stored_bulks[p["name"]] = blobs
+    with open(os.path.splitext(lib_utoc)[0] + ".pak", "rb") as f:
+        pak_mount, pak_seed, pak_files = pakfile.read_entries(
+            f.read(), iostore.oodle_decompress)
+    try:
+        with open(lib_uplugin, "rb") as f:
+            uplugin_raw = f.read()
+    except OSError:
+        uplugin_raw = b""
+    icon_b64 = None
+    icon_file = os.path.join(os.path.dirname(lib_uplugin), "Resources",
+                             "Icon128.png")
+    if os.path.exists(icon_file):
+        with open(icon_file, "rb") as f:
+            icon_b64 = base64.b64encode(f.read()).decode("ascii")
+    record = dict(
+        plugin=root,
+        mount=toc.mount,
+        cid=str(toc.container_id),
+        hdr_len=len(hdr),
+        uplugin=base64.b64encode(uplugin_raw).decode("ascii"),
+        icon_md5=None,
+        icon_b64=icon_b64,
+        id_order=[name_of.get(pid, "") for pid in ids],
+        entries={name_of[pid]: [e["lo"], e["pad"], e["exp"], e["bun"],
+                                e["deps"]]
+                 for pid, e in entry_of.items() if pid in name_of},
+        chunk_order=chunk_order,
+        dir_paths=dir_paths,
+        neg_arcs=neg_arcs,
+        stored_chunks=stored_chunks,
+        stored_bulks=stored_bulks,
+        pak_mount=pak_mount,
+        pak_seed=str(pak_seed),
+        pak_files=[[p, base64.b64encode(zlib.compress(b, 9)).decode("ascii")]
+                   for p, b in pak_files],
+        variants=variants,
+        optionals=optionals,
+        pngs={},
+        visible={},
+    )
+    toc.close()
+    return record
+
+
 def record_roundtrip(toc, uplugin, plugin, plans, ctx, mod_out, layout,
-                     opt_layout=()):
+                     opt_layout=(), orig=None, libraries=()):
     """
     Leave everything beside the written loose paks that converting BACK will
     need: a prefilled dresscode.json, each outfit's preview as a PNG a person
@@ -881,8 +1094,17 @@ def record_roundtrip(toc, uplugin, plugin, plans, ctx, mod_out, layout,
 
     `layout` is [(rel_folder, plan)], "." meaning the mod's root folder;
     `opt_layout` is [(label, toggle)] for the generated Optional paks.
+
+    When library mods were inlined, `toc` is the MERGED container the plans
+    were made against, `orig` the dependent's own, and `libraries` is
+    [(root, utoc, uplugin)] per library. The main record then takes its
+    container SHAPE from the original and covers only its own packages;
+    each library gets a sibling record of the same form, so the way back
+    can rebuild every mod exactly as downloaded.
     """
+    shape_toc = orig or toc
     packages = ctx["packages"]
+    roots = ctx.get("roots", (plugin,))
     by_name = {p["name"].lower(): pid for pid, p in packages.items()}
     md = moddata.read_mod_metadata(toc.read(ctx["assets"]["metadata"])) \
         if "metadata" in ctx["assets"] else {}
@@ -935,11 +1157,14 @@ def record_roundtrip(toc, uplugin, plugin, plans, ctx, mod_out, layout,
             f.write(icon_data)
         icon_md5 = hashlib.md5(icon_data).hexdigest()
 
-    # --- the original container's shape ---
-    hdr_chunk = next(i for i in range(toc.n) if toc.chunk_ids[i][11] == 10)
-    hdr = toc.read(hdr_chunk)
+    # --- the original container's shape (the dependent's own when plans
+    # were made against a merged container) ---
+    hdr_chunk = next(i for i in range(shape_toc.n)
+                     if shape_toc.chunk_ids[i][11] == 10)
+    hdr = shape_toc.read(hdr_chunk)
     info = conheader.parse(hdr)
     ids = conheader.package_ids(hdr, info)
+    main_pids = set(ids)
     entry_of = {}
     for j, pid in enumerate(ids):
         _sz, exp, bun, lo, pad = struct.unpack_from(
@@ -951,21 +1176,23 @@ def record_roundtrip(toc, uplugin, plugin, plans, ctx, mod_out, layout,
 
     name_of = {pid: p["name"] for pid, p in packages.items()}
     chunk_order = []
-    for i in range(toc.n):
-        t = toc.chunk_ids[i][11]
-        pid = int.from_bytes(toc.chunk_ids[i][:8], "little")
+    for i in range(shape_toc.n):
+        t = shape_toc.chunk_ids[i][11]
+        pid = int.from_bytes(shape_toc.chunk_ids[i][:8], "little")
         chunk_order.append(["" if t == 10 else name_of.get(pid, ""), t])
     # The directory index VERBATIM, aligned with chunk_order. Deriving
     # paths from package names loses the cooker's file-name casing (a
     # package whose name table says "pink" can sit in the index as
     # "Pink.uasset"), and a restore must not.
-    dir_paths = [toc.paths.get(i, "") for i in range(toc.n)]
+    dir_paths = [shape_toc.paths.get(i, "") for i in range(shape_toc.n)]
 
     # Which graph arcs are -1 in the ORIGINAL. The loose conversion must
     # flatten them to 0 (the ~mods loader refuses them); converting back
     # puts them back by ordinal.
     neg_arcs = {}
     for pid, p in packages.items():
+        if pid not in main_pids:
+            continue                    # a library's; its own record covers it
         data = toc.read(p["chunk"])
         bad = [k for k, pos in enumerate(mkdc.arc_positions(data))
                if struct.unpack_from("<i", data, pos)[0] == -1]
@@ -989,7 +1216,7 @@ def record_roundtrip(toc, uplugin, plugin, plans, ctx, mod_out, layout,
     stored_chunks = {
         name_of[pid]: base64.b64encode(
             zlib.compress(toc.read(packages[pid]["chunk"]), 9)).decode("ascii")
-        for pid in stored_pids if pid in packages}
+        for pid in stored_pids if pid in packages and pid in main_pids}
 
     # The completeness net: anything neither carried by a loose pak nor
     # stored above would be unrecoverable. Seen in the wild: alternative
@@ -1001,7 +1228,8 @@ def record_roundtrip(toc, uplugin, plugin, plans, ctx, mod_out, layout,
         carried |= {p["name"].lower() for p in packages.values()} - dropped
     stored_bulks = {}
     for pid, p in packages.items():
-        if p["name"].lower() in carried or name_of[pid] in stored_chunks:
+        if pid not in main_pids or p["name"].lower() in carried \
+                or name_of[pid] in stored_chunks:
             continue
         stored_chunks[name_of[pid]] = base64.b64encode(
             zlib.compress(toc.read(p["chunk"]), 9)).decode("ascii")
@@ -1016,7 +1244,7 @@ def record_roundtrip(toc, uplugin, plugin, plans, ctx, mod_out, layout,
             stored_bulks[name_of[pid]] = blobs
 
     # --- the original pak, entry by entry, decompressed ---
-    pak_path = os.path.splitext(toc.path)[0] + ".pak"
+    pak_path = os.path.splitext(shape_toc.path)[0] + ".pak"
     with open(pak_path, "rb") as f:
         pak_mount, pak_seed, pak_files = pakfile.read_entries(
             f.read(), iostore.oodle_decompress)
@@ -1068,7 +1296,7 @@ def record_roundtrip(toc, uplugin, plugin, plans, ctx, mod_out, layout,
             for base_pkg, repl_pkg in t["overrides"].items():
                 new = plan_renames.get(
                     base_pkg.lower(),
-                    converted_name(base_pkg, plugin, t["costume_root"]))
+                    converted_name(base_pkg, roots, t["costume_root"]))
                 back[new.lower()] = repl_pkg
             for repl_low, m in t["objects"].items():
                 new_pkg = next((k for k, vv in back.items()
@@ -1079,11 +1307,11 @@ def record_roundtrip(toc, uplugin, plugin, plans, ctx, mod_out, layout,
             optionals[opt_rel] = dict(pak=stem, renames_back=back,
                                       objects_back=objects_back)
             continue
-        back = {converted_name(p["name"], plugin,
+        back = {converted_name(p["name"], roots,
                                t["costume_root"]).lower(): p["name"]
                 for p in packages.values()}
         for base_pkg, repl_pkg in t["overrides"].items():
-            back[converted_name(base_pkg, plugin,
+            back[converted_name(base_pkg, roots,
                                 t["costume_root"]).lower()] = repl_pkg
         back = {k: v for k, v in back.items() if k != v.lower()}
         objects_back = {}
@@ -1109,10 +1337,13 @@ def record_roundtrip(toc, uplugin, plugin, plans, ctx, mod_out, layout,
                  for rel, (o, *_r) in layout},
     )
 
+    lib_records = [library_record(root, lib_utoc, lib_up, variants,
+                                  optionals, carried)
+                   for root, lib_utoc, lib_up in libraries]
     record = dict(
         plugin=plugin,
-        mount=toc.mount,
-        cid=str(toc.container_id),
+        mount=shape_toc.mount,
+        cid=str(shape_toc.container_id),
         hdr_len=len(hdr),
         uplugin=base64.b64encode(uplugin_raw).decode("ascii"),
         icon_md5=icon_md5,
@@ -1133,6 +1364,7 @@ def record_roundtrip(toc, uplugin, plugin, plans, ctx, mod_out, layout,
         optionals=optionals,
         pngs=pngs,
         visible=visible,
+        libraries=lib_records,
     )
 
     parts = [(rel, None) for rel, _plan in layout]
@@ -1290,10 +1522,12 @@ def merge_loose(utocs, out_dir, base):
     paths = []
     for pid in order:
         rec = merged[pid]
-        if not rec["name"].lower().startswith("/game/"):
-            raise RuntimeError(
-                f"cannot merge {rec['name']} -- not under /Game/")
-        rel = rec["name"][len("/Game/"):]
+        # Plugin-rooted names occur when merging Dresscode containers with
+        # their libraries; the merged container is a conversion INPUT only,
+        # so the index path just has to be self-consistent.
+        rel = rec["name"][len("/Game/"):] \
+            if rec["name"].lower().startswith("/game/") \
+            else rec["name"].lstrip("/")
         chunks.append(dict(id=pid.to_bytes(8, "little") + b"\0\0\0\x02",
                            blocks=blocks_of(rec["data"]),
                            size=len(rec["data"])))
@@ -1468,8 +1702,13 @@ def loose_to_dresscode(source, mods, assume_yes=False):
                   for u, _up in mods}
         opt = {rel: by_pak.get(str(v.get("pak", "")).lower())
                for rel, v in (rt.get("optionals") or {}).items()}
-        roots = [mkdc.restore(rt, {o["folder"]: o["utoc"] for o in outfits},
-                              out_root, optionals=opt)]
+        parts_by_folder = {o["folder"]: o["utoc"] for o in outfits}
+        roots = [mkdc.restore(rt, parts_by_folder, out_root, optionals=opt)]
+        # Library mods inlined on the way out come back as themselves --
+        # every mod exactly as downloaded, from the same loose paks.
+        for lib in rt.get("libraries") or []:
+            roots.append(mkdc.restore(lib, parts_by_folder, out_root,
+                                      optionals=opt))
     else:
         if companions:
             # The outfit cannot render without them, so from here on the
@@ -1571,7 +1810,39 @@ def prepare_to_loose(toc, uplugin, out_base=None):
     folder, so its output belongs beside the archive instead.
     """
     plugin = os.path.splitext(os.path.basename(uplugin))[0]
-    plans, toggles, ctx = plan_variants(toc, plugin)
+
+    # Undeclared library dependencies (a shared skin mod): inline their
+    # packages by planning over a MERGED container, so cross-plugin imports
+    # become internal and every rewrite fixes them like any other.
+    libraries, merged_toc, merge_tmp = [], None, None
+    lib_roots = foreign_roots(toc, plugin)
+    found = {}
+    if lib_roots:
+        found, missing = locate_libraries(lib_roots, uplugin)
+        # A missing library is how the mod ITSELF behaves when the other
+        # mod is not installed -- convert what is here, say what is not.
+        for root in missing:
+            print(f"  note: {plugin} references {root}, which is not here "
+                  "-- converting without it, as the game would run it")
+    if found:
+        print(f"  {plugin} needs "
+              f"{'these mods' if len(found) > 1 else 'another mod'}, and "
+              f"{'they ride' if len(found) > 1 else 'it rides'} along:")
+        for root, (_utoc, _up, where) in found.items():
+            print(f"      + {root}   ({where})")
+        merge_tmp = tempfile.mkdtemp(prefix="dcdep-")
+        merged_utoc = merge_loose(
+            [toc.path] + [utoc for utoc, _up, _w in found.values()],
+            merge_tmp, f"{plugin}Merged_P")
+        merged_toc = iostore.Toc(merged_utoc)
+        libraries = [(root, utoc, up)
+                     for root, (utoc, up, _w) in found.items()]
+        orig_toc, toc = toc, merged_toc
+    else:
+        orig_toc = toc
+
+    plans, toggles, ctx = plan_variants(
+        toc, plugin, extra_roots=tuple(r for r, _u, _p in libraries))
 
     source_root = os.path.abspath(os.path.dirname(uplugin)).rstrip("\\/")
     mod_out = (os.path.join(out_base, os.path.basename(source_root) + " (loose pak)")
@@ -1701,7 +1972,8 @@ def prepare_to_loose(toc, uplugin, out_base=None):
             for base_pkg, repl_pkg in t["overrides"].items():
                 renames[repl_pkg.lower()] = renames.get(
                     base_pkg.lower(),
-                    converted_name(base_pkg, plugin, t["costume_root"]))
+                    converted_name(base_pkg, ctx["roots"],
+                                   t["costume_root"]))
             for k2, v in t["objects"].items():
                 objects.setdefault(k2, {}).update(v)
 
@@ -1719,11 +1991,12 @@ def prepare_to_loose(toc, uplugin, out_base=None):
             # records point where the base pak actually serves them.
             # Override sources then land on the package they replace.
             renames = {p["name"].lower():
-                       converted_name(p["name"], plugin, t["costume_root"])
+                       converted_name(p["name"], ctx["roots"],
+                                      t["costume_root"])
                        for p in packages.values()}
             for base_pkg, repl_pkg in t["overrides"].items():
                 renames[repl_pkg.lower()] = converted_name(
-                    base_pkg, plugin, t["costume_root"])
+                    base_pkg, ctx["roots"], t["costume_root"])
             objects = dict(t["objects"])
             post_edit = None
             extra_deps = None
@@ -1769,8 +2042,13 @@ def prepare_to_loose(toc, uplugin, out_base=None):
               "extras from its Optional folder go in alongside")
 
     def record():
-        return record_roundtrip(toc, uplugin, plugin, plans, ctx, mod_out,
-                                layout, opt_layout)
+        code = record_roundtrip(toc, uplugin, plugin, plans, ctx, mod_out,
+                                layout, opt_layout, orig=orig_toc,
+                                libraries=libraries)
+        if merged_toc is not None:
+            merged_toc.close()
+            shutil.rmtree(merge_tmp, ignore_errors=True)
+        return code
 
     runners.append(record)
     return runners

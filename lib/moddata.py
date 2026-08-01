@@ -119,19 +119,23 @@ def read_outfits(data):
     return out
 
 
-def find_data_assets(toc):
+def find_data_assets(toc, prefer=None):
     """
     Locate the mod's two registration assets by the class they instantiate.
 
     Matching on the class -- via the global import ID of FF7RML's own asset --
     rather than on a filename, because authors put them wherever they like:
     MetaData/, Metadata/ and Assets/ all occur in the wild.
+
+    `prefer` is a lowercase package-name prefix: a container merged with a
+    library mod holds TWO sets of registration assets, and the ones under
+    the mod's own root are the ones that define it.
     """
     want = {
         cityhash.object_id(METADATA_CLASS, "PDA_ModMetaData_C"): "metadata",
         cityhash.object_id(CHARACTER_CLASS, "PDA_ModData_Character_C"): "character",
     }
-    found = {}
+    found, fallback = {}, {}
     for i in range(toc.n):
         if toc.chunk_ids[i][11] != 2:
             continue
@@ -139,8 +143,13 @@ def find_data_assets(toc):
             pkg = ZenPackage(toc.read(i))
         except Exception:
             continue
+        own = pkg.names[pkg.name & 0x3FFFFFFF] if pkg.names else ""
         for e in pkg.exports:
             kind = want.get(e["cls"])
-            if kind:
+            if not kind:
+                continue
+            if prefer and own.lower().startswith(prefer):
                 found[kind] = i
-    return found
+            else:
+                fallback[kind] = i
+    return {**fallback, **found}
