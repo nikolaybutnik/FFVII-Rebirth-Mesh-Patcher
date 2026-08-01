@@ -52,6 +52,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "lib
 
 import cityhash                                                 # noqa: E402
 import conheader                                                # noqa: E402
+import dirindex                                                 # noqa: E402
 import drops                                                    # noqa: E402
 import iostore                                                  # noqa: E402
 import matpack                                                  # noqa: E402
@@ -62,6 +63,7 @@ import pngfile                                                  # noqa: E402
 import rename                                                   # noqa: E402
 import texread                                                  # noqa: E402
 import toggles                                                  # noqa: E402
+import writer                                                   # noqa: E402
 import zen                                                      # noqa: E402
 
 # Diagnostic switch (--keep-registration): convert without dropping the two
@@ -565,24 +567,30 @@ def carries_outfit(utoc):
 
 def loose_layout(source, mods):
     """
-    (mod_name, [(relative folder, utoc)], [extra utoc]) when `source` is the
-    root of a loose pak mod in a shape the template supports -- else None.
+    (mod_name, [(relative folder, utoc)], [extra utoc], [companion utoc])
+    when `source` is the root of a loose pak mod in a shape the template
+    supports -- else None.
 
-    Outfits are the paks carrying a costume; everything else is an extra, so
-    the old modular standard's Optional and Textures trees are understood
-    wherever an author happened to put them. A generated Optional tree is
-    taken on its folder name alone: those paks DO carry their outfit's mesh.
+    Outfits are the paks carrying a costume. Everything else under an
+    Optional folder is an extra (a variant, opt-in); everything else
+    ELSEWHERE is a companion -- a REQUIRED pak the outfit cannot render
+    without (authors routinely ship the mesh in one pak and its materials
+    and textures in another). Companions merge into every outfit.
     """
     if not mods or any(uplugin for _utoc, uplugin in mods):
         return None
     root = os.path.normcase(os.path.abspath(source))
-    outfits, extras = [], []
+    outfits, extras, companions = [], [], []
     for utoc, _ in mods:
         folders = os.path.relpath(utoc, source).lower().split(os.sep)[:-1]
-        if "optional" in folders or not carries_outfit(utoc):
+        # An Optional folder wins over content: a generated Optional tree's
+        # paks DO carry their outfit's mesh, and stay extras.
+        if "optional" in folders:
             extras.append(utoc)
-        else:
+        elif carries_outfit(utoc):
             outfits.append(utoc)
+        else:
+            companions.append(utoc)
     if not outfits:
         return None
 
@@ -608,7 +616,7 @@ def loose_layout(source, mods):
     name = os.path.basename(os.path.abspath(source).rstrip("\\/"))
     if name.lower().endswith(" (loose pak)"):
         name = name[:-len(" (loose pak)")]
-    return name, sorted(parts), sorted(extras)
+    return name, sorted(parts), sorted(extras), sorted(companions)
 
 
 def images_in(folder):
@@ -1176,6 +1184,114 @@ def write_masks_pak(outfit_utoc, ext, out_dir, base_name):
     return written
 
 
+def merge_loose(utocs, out_dir, base):
+    """
+    One loose container carrying every package of `utocs` -- an outfit that
+    ships as several REQUIRED paks (the mesh in one, its materials and
+    textures in another) becomes a single container the conversion treats
+    as THE outfit. Package bytes, names, arcs and bulk data are carried
+    unchanged; only the container header and directory are new. The first
+    pak wins a package two of them carry. Returns the merged .utoc path.
+    """
+    tocs = [iostore.Toc(u) for u in utocs]
+    template = tocs[0]
+    merged, order = {}, []
+    for toc in tocs:
+        packages = rename.read_packages(toc)
+        hdr = next(toc.read(i) for i in range(toc.n)
+                   if toc.chunk_ids[i][11] == 10)
+        info = conheader.parse(hdr)
+        entry_meta = {}
+        for j, pid in enumerate(conheader.package_ids(hdr, info)):
+            _sz, exp, bun = struct.unpack_from(
+                "<Qii", hdr, info["store_off"] + j * 32)[:3]
+            entry_meta[pid] = (exp, bun,
+                               conheader.imported_packages(hdr, info, j))
+        bulks = {}
+        for i in range(toc.n):
+            if toc.chunk_ids[i][11] in (3, 4):
+                pid = int.from_bytes(toc.chunk_ids[i][:8], "little")
+                bulks.setdefault(pid, []).append(i)
+        for pid, pkg in packages.items():
+            if pid in merged:
+                continue
+            exp, bun, deps = entry_meta.get(pid, (1, 1, []))
+            merged[pid] = dict(name=pkg["name"], toc=toc, data=toc.read(
+                pkg["chunk"]), exp=exp, bun=bun, deps=list(deps),
+                bulks=bulks.get(pid, []))
+            order.append(pid)
+
+    cid = cityhash.package_id(base)
+    hdr_out = struct.pack("<QIIIIQ", cid, len(order), 0, 0, 8, 0xC1640000)
+    hdr_out += struct.pack("<I", len(order))
+    hdr_out += b"".join(p.to_bytes(8, "little") for p in order)
+    store = bytearray()
+    for j, pid in enumerate(order):
+        rec = merged[pid]
+        store += struct.pack("<QiiII", len(rec["data"]), rec["exp"],
+                             rec["bun"], j, 0xFFFFFFFF)
+        store += struct.pack("<II", 0, 0)
+    for j, pid in enumerate(order):
+        rec = merged[pid]
+        view = j * 32 + 24
+        if rec["deps"]:
+            struct.pack_into("<II", store, view, len(rec["deps"]),
+                             len(store) - view)
+            store += struct.pack(f"<{len(rec['deps'])}Q", *rec["deps"])
+    hdr_out += struct.pack("<I", len(store)) + store
+    if len(hdr_out) % 65536:
+        hdr_out += b"\0" * (65536 - len(hdr_out) % 65536)
+
+    comp = next((m for m, n in enumerate(template.methods)
+                 if n.lower() == "oodle"), None)
+
+    def blocks_of(payload):
+        return rename.pack_blocks(payload, template.block_size, comp)
+
+    chunks = [dict(id=cid.to_bytes(8, "little") + b"\0\0\0\x0a",
+                   blocks=blocks_of(hdr_out), size=len(hdr_out))]
+    payloads = [hdr_out]
+    paths = []
+    for pid in order:
+        rec = merged[pid]
+        if not rec["name"].lower().startswith("/game/"):
+            raise RuntimeError(
+                f"cannot merge {rec['name']} -- not under /Game/")
+        rel = rec["name"][len("/Game/"):]
+        chunks.append(dict(id=pid.to_bytes(8, "little") + b"\0\0\0\x02",
+                           blocks=blocks_of(rec["data"]),
+                           size=len(rec["data"])))
+        payloads.append(rec["data"])
+        paths.append((rel + ".uasset", len(chunks) - 1))
+        for i in rec["bulks"]:
+            data = rec["toc"].read(i)
+            chunks.append(dict(id=bytes(rec["toc"].chunk_ids[i]),
+                               blocks=blocks_of(data), size=len(data)))
+            payloads.append(data)
+            ext = ".uptnl" if rec["toc"].chunk_ids[i][11] == 4 else ".ubulk"
+            paths.append((rel + ext, len(chunks) - 1))
+
+    directory = dirindex.build_dir_index("../../../End/Content/", paths)
+    body, ucas, _offlen, block_table = writer.build_container(
+        template, chunks, template.block_size)
+    head = bytearray(writer.build_toc_header(
+        template, len(chunks), len(block_table), len(directory),
+        template.block_size))
+    struct.pack_into("<Q", head, 0x38, cid)
+    metas = b"".join(hashlib.sha1(p).digest() + b"\0" * 12 + b"\x01"
+                     for p in payloads)
+    os.makedirs(out_dir, exist_ok=True)
+    with open(os.path.join(out_dir, base + ".utoc"), "wb") as f:
+        f.write(bytes(head) + bytes(body) + directory + metas)
+    with open(os.path.join(out_dir, base + ".ucas"), "wb") as f:
+        f.write(ucas)
+    with open(os.path.join(out_dir, base + ".pak"), "wb") as f:
+        f.write(pakfile.build(pakfile.LOOSE_MOUNT))
+    for toc in tocs:
+        toc.close()
+    return os.path.join(out_dir, base + ".utoc")
+
+
 def resolve_variants(meta, extras):
     """
     [(row name, [utoc, ...])] from the template's "variants" section --
@@ -1229,7 +1345,7 @@ def loose_to_dresscode(source, mods, assume_yes=False):
     layout = loose_layout(source, mods)
     if layout is None:
         return None
-    mod_name, parts, extras = layout
+    mod_name, parts, extras, companions = layout
 
     if not os.path.exists(os.path.join(source, TEMPLATE)):
         path = write_template(
@@ -1282,6 +1398,10 @@ def loose_to_dresscode(source, mods, assume_yes=False):
                else "no picture (optional)")
         print(f"      {k + 1}. {o['name']}   [{pic}]")
     stackable = meta["stackable"] and bool(extras) and not exact
+    if companions and not exact:
+        print(f"      + {len(companions)} required companion pak"
+              f"{'s' if len(companions) != 1 else ''} merged into every "
+              "outfit")
     if extras and not exact:
         if stackable:
             print(f"      + {len(extras)} extra paks stay COMBINABLE: the "
@@ -1303,6 +1423,7 @@ def loose_to_dresscode(source, mods, assume_yes=False):
     # existing copy of the mod -- roundtrips make that collision routine. The
     # folder INSIDE keeps the exact plugin name Dresscode requires.
     out_root = os.path.join(os.path.dirname(source), f"{plugin} (Dresscode)")
+    merge_tmp = None
     if exact:
         # Extras are found by their pak's name, wherever the folder ended up.
         by_pak = {os.path.splitext(os.path.basename(u))[0].lower(): u
@@ -1312,6 +1433,13 @@ def loose_to_dresscode(source, mods, assume_yes=False):
         roots = [mkdc.restore(rt, {o["folder"]: o["utoc"] for o in outfits},
                               out_root, optionals=opt)]
     else:
+        if companions:
+            # The outfit cannot render without them, so from here on the
+            # merged container IS the outfit.
+            merge_tmp = os.path.join(out_root, "_merge_tmp")
+            for k, o in enumerate(outfits):
+                o["utoc"] = merge_loose([o["utoc"]] + list(companions),
+                                        merge_tmp, f"Merged{k + 1}_P")
         ex = [] if stackable else variants
         ext = stack_tree(outfits, extras) if stackable else ()
         used, roots = set(), []
@@ -1349,6 +1477,8 @@ def loose_to_dresscode(source, mods, assume_yes=False):
                 if os.path.exists(stem + suffix):
                     shutil.copy2(stem + suffix, mods_dir)
         print(f"    copied   {len(extras)} original Optional paks beside it")
+    if merge_tmp:
+        shutil.rmtree(merge_tmp, ignore_errors=True)
     for root in roots:
         name = os.path.basename(root)
         written = os.path.join(root, "Content", "Paks", "WindowsNoEditor",
