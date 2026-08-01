@@ -61,6 +61,7 @@ import pakfile                                                  # noqa: E402
 import pngfile                                                  # noqa: E402
 import rename                                                   # noqa: E402
 import texread                                                  # noqa: E402
+import toggles                                                  # noqa: E402
 import zen                                                      # noqa: E402
 
 # Diagnostic switch (--keep-registration): convert without dropping the two
@@ -546,39 +547,68 @@ TEMPLATE = "dresscode.json"
 IMAGE_EXTS = (".png", ".jpg", ".jpeg")
 
 
+def carries_outfit(utoc):
+    """Whether a pak replaces a character's standard costume -- an outfit.
+    Anything else is an extra: the modular standard's optional paks override
+    a material or the mask a material samples, and never the mesh."""
+    try:
+        toc = iostore.Toc(utoc)
+    except Exception:
+        return False
+    try:
+        return bool(mkdc.find_stock_mesh(rename.read_packages(toc))[0])
+    except Exception:
+        return False
+    finally:
+        toc.close()
+
+
 def loose_layout(source, mods):
     """
-    (mod_name, [(relative folder, utoc)]) when `source` is the root of a loose
-    pak mod in the shape the template supports -- otherwise None.
+    (mod_name, [(relative folder, utoc)], [extra utoc]) when `source` is the
+    root of a loose pak mod in a shape the template supports -- else None.
+
+    Outfits are the paks carrying a costume; everything else is an extra, so
+    the old modular standard's Optional and Textures trees are understood
+    wherever an author happened to put them. A generated Optional tree is
+    taken on its folder name alone: those paks DO carry their outfit's mesh.
     """
     if not mods or any(uplugin for _utoc, uplugin in mods):
         return None
     root = os.path.normcase(os.path.abspath(source))
-    # The Optional tree holds generated override paks, not outfits; the
-    # restore record knows how to use them, the layout must not see them.
-    mods = [(u, up) for u, up in mods
-            if "optional" not in
-            os.path.relpath(u, source).lower().split(os.sep)[:-1]]
-    if not mods:
-        return None
-    parts = []
+    outfits, extras = [], []
     for utoc, _ in mods:
-        d = os.path.dirname(os.path.abspath(utoc))
-        if os.path.normcase(d) == root:
-            parts.append((".", utoc))
-        elif os.path.normcase(os.path.dirname(d)) == root:
-            parts.append((os.path.basename(d), utoc))
+        folders = os.path.relpath(utoc, source).lower().split(os.sep)[:-1]
+        if "optional" in folders or not carries_outfit(utoc):
+            extras.append(utoc)
         else:
+            outfits.append(utoc)
+    if not outfits:
+        return None
+
+    parts, by_folder = [], {}
+    for utoc in outfits:
+        d = os.path.dirname(os.path.abspath(utoc))
+        if os.path.normcase(d) != root \
+                and os.path.normcase(os.path.dirname(d)) != root:
             return None                 # deeper nesting; not a shape we know
-    kinds = {p == "." for p, _ in parts}
-    if kinds == {True} and len(parts) > 1:
-        return None                     # several paks loose in one folder
-    if len(kinds) > 1:
+        by_folder.setdefault(os.path.normcase(d), []).append(utoc)
+    for utoc in outfits:
+        d = os.path.dirname(os.path.abspath(utoc))
+        at_root = os.path.normcase(d) == root
+        if at_root and len(outfits) > 1:
+            return None                 # several outfits loose in one folder
+        # Several outfits sharing a folder are named for their own paks.
+        if len(by_folder[os.path.normcase(d)]) > 1:
+            parts.append((os.path.splitext(os.path.basename(utoc))[0], utoc))
+        else:
+            parts.append(("." if at_root else os.path.basename(d), utoc))
+    if len({p == "." for p, _ in parts}) > 1:
         return None                     # a pak both at the root and in subs
     name = os.path.basename(os.path.abspath(source).rstrip("\\/"))
     if name.lower().endswith(" (loose pak)"):
         name = name[:-len(" (loose pak)")]
-    return name, sorted(parts)
+    return name, sorted(parts), sorted(extras)
 
 
 def images_in(folder):
@@ -627,6 +657,9 @@ def write_template(source, mod_name, parts, prefill=None, restore=None):
             "  \"name\" in an outfit     what THAT outfit is called in",
             "                          Dresscode's outfit menu",
             "  \"author\", descriptions  shown on the mod's page",
+            "",
+            "Several outfits build several Dresscode mods, one per outfit",
+            "(named \"mod - outfit\"), each with its own toggles.",
             "",
             "Pictures (optional). Two different pictures exist:",
             "  the THUMBNAIL, one per mod, shown in Dresscode's mod list",
@@ -723,6 +756,18 @@ def plugin_id(name):
     """
     cleaned = "".join(c for c in name if c.isalnum() or c == "_")
     return cleaned or "Mod"
+
+
+def safe_plugin_id(name, used):
+    """plugin_id, kept unique across one drop -- two outfits whose names
+    differ only in punctuation would otherwise collide."""
+    base = plugin_id(name)
+    out, n = base, 1
+    while out.lower() in used:
+        n += 1
+        out = f"{base}{n}"
+    used.add(out.lower())
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -1045,7 +1090,7 @@ def loose_to_dresscode(source, mods, assume_yes=False):
     layout = loose_layout(source, mods)
     if layout is None:
         return None
-    mod_name, parts = layout
+    mod_name, parts, extras = layout
 
     if not os.path.exists(os.path.join(source, TEMPLATE)):
         path = write_template(source, mod_name, parts)
@@ -1062,6 +1107,11 @@ def loose_to_dresscode(source, mods, assume_yes=False):
     rt = unpack_restore(meta.get("restore"))
     exact = rt is not None and restore_matches(rt, meta, outfits)
     plugin = rt["plugin"] if exact else plugin_id(meta["name"])
+    # Several outfits, each with its own toggles, in one mod make a menu
+    # where nothing says which toggle belongs to which outfit -- so each
+    # outfit becomes a Dresscode mod of its own. A restore is exempt: it
+    # reproduces the original mod, whatever shape that was.
+    split = not exact and len(outfits) > 1
     print()
     print(f"  {meta['name']}  (loose pak -> Dresscode"
           + (f", {len(outfits)} outfits" if len(outfits) > 1 else "") + ")")
@@ -1076,12 +1126,19 @@ def loose_to_dresscode(source, mods, assume_yes=False):
     icon = (os.path.basename(meta["icon"]) if meta["icon"]
             else "none (optional -- a picture next to dresscode.json)")
     print(f"      thumbnail: {icon}")
-    print(f"      -> {os.path.join(os.path.dirname(source), f'{plugin} (Dresscode)', plugin)}{os.sep}"
-          f"   (goes into End\\Mods)")
+    if split:
+        print(f"      -> {os.path.join(os.path.dirname(source), f'{plugin} (Dresscode)')}{os.sep}"
+              f"   ({len(outfits)} separate mods, one per outfit)")
+    else:
+        print(f"      -> {os.path.join(os.path.dirname(source), f'{plugin} (Dresscode)', plugin)}{os.sep}"
+              f"   (goes into End\\Mods)")
     for k, o in enumerate(outfits):
         pic = (os.path.basename(o["preview"]) if o["preview"]
                else "no picture (optional)")
         print(f"      {k + 1}. {o['name']}   [{pic}]")
+    if extras and not exact:
+        print(f"      + {len(extras)} extra pak"
+              f"{'s' if len(extras) != 1 else ''} to turn into toggles")
     print()
     if not confirm(assume_yes, len(outfits)):
         print("  Nothing converted.")
@@ -1097,23 +1154,43 @@ def loose_to_dresscode(source, mods, assume_yes=False):
                   for u, _up in mods}
         opt = {rel: by_pak.get(str(v.get("pak", "")).lower())
                for rel, v in (rt.get("optionals") or {}).items()}
-        root = mkdc.restore(rt, {o["folder"]: o["utoc"] for o in outfits},
-                            out_root, optionals=opt)
+        roots = [mkdc.restore(rt, {o["folder"]: o["utoc"] for o in outfits},
+                              out_root, optionals=opt)]
     else:
-        root = mkdc.build(meta, outfits, plugin, out_root)
-    written = os.path.join(root, "Content", "Paks", "WindowsNoEditor",
-                           f"{plugin}End-WindowsNoEditor.utoc")
-    problems = rename.verify(written)
-    if problems:
-        print()
-        print("  PROBLEM -- the converted mod is not sound, do not install it:")
-        for p in problems[:8]:
-            print(f"    {p}")
-        return 1
-    print(f"    checked  {os.path.basename(written)} is internally consistent")
+        ex = [(toggles.label_of(u), u) for u in extras]
+        used, roots = set(), []
+        for o in (outfits if split else [None]):
+            if split:
+                sub_name = f"{meta['name']} - {o['name']}"
+                sub = safe_plugin_id(sub_name, used)
+                roots.append(mkdc.build(dict(meta, name=sub_name), [o],
+                                        sub, out_root, extras=ex))
+            else:
+                roots.append(mkdc.build(meta, outfits, plugin, out_root,
+                                        extras=ex))
+    for root in roots:
+        name = os.path.basename(root)
+        written = os.path.join(root, "Content", "Paks", "WindowsNoEditor",
+                               f"{name}End-WindowsNoEditor.utoc")
+        problems = rename.verify(written)
+        if problems:
+            print()
+            print("  PROBLEM -- the converted mod is not sound, "
+                  "do not install it:")
+            for p in problems[:8]:
+                print(f"    {p}")
+            return 1
+        print(f"    checked  {os.path.basename(written)} is internally "
+              "consistent")
     print()
-    print(f"  Done. Copy the \"{plugin}\" folder from inside "
-          f"\"{os.path.basename(out_root)}\" into End\\Mods.")
+    if len(roots) > 1:
+        print(f"  Done. Copy the {len(roots)} folders from inside "
+              f"\"{os.path.basename(out_root)}\" into End\\Mods:")
+        for root in roots:
+            print(f"    {os.path.basename(root)}")
+    else:
+        print(f"  Done. Copy the \"{os.path.basename(roots[0])}\" folder "
+              f"from inside \"{os.path.basename(out_root)}\" into End\\Mods.")
     return 0
 
 

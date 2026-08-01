@@ -74,6 +74,8 @@ def build(assets):
         package_name   /Mod/Folder/Asset
         asset_name     Asset
         tags           [(key, value), ...] -- plain strings
+        flags          optional package flags -- real registries carry
+                       0x40000 on Blueprint assets
     """
     names, index = [], {}
 
@@ -94,7 +96,7 @@ def build(assets):
         body += struct.pack("<i", len(a["tags"]))
         for key, value in a["tags"]:
             body += fname(key) + _fstring(value)
-        body += struct.pack("<iiI", 1, 0, 0)      # chunk ids [0], flags
+        body += struct.pack("<iiI", 1, 0, a.get("flags", 0))  # chunk ids [0]
     body += TAIL
 
     table = struct.pack("<i", len(names))

@@ -142,6 +142,7 @@ def _read_array(r, inner, end):
 # [(name, spec), ...] where spec is one of:
 #
 #     ("str", text)                        StrProperty
+#     ("name", text)                       NameProperty
 #     ("obj", package_index)               ObjectProperty (FPackageIndex)
 #     ("enum", enum_type, value_name)      EnumProperty
 #     ("bool", value)                      BoolProperty (value in the tag)
@@ -150,6 +151,7 @@ def _read_array(r, inner, end):
 #     ("struct_raw", type_name, bytes)     StructProperty, opaque value
 #     ("array_structs", type_name, guid16, [props, ...])
 #     ("map", key_type, value_type)        MapProperty, empty
+#     ("map", "NameProperty", "ObjectProperty", [(name, package_index), ...])
 #
 # Emitting needs every FName's final table index, and the table must exist
 # before anything can be emitted -- so building is two passes: collect_names
@@ -166,12 +168,15 @@ def collect_names(props, out):
         kind = spec[0]
         out.add(name)
         out.add({"str": "StrProperty", "obj": "ObjectProperty",
+                 "name": "NameProperty",
                  "enum": "EnumProperty", "bool": "BoolProperty",
                  "softpath": "StructProperty",
                  "struct": "StructProperty", "struct_raw": "StructProperty",
                  "array_structs": "ArrayProperty",
                  "map": "MapProperty"}[kind])
-        if kind == "enum":
+        if kind == "name":
+            out.add(spec[1])
+        elif kind == "enum":
             out.add(spec[1])
             out.add(spec[2])
         elif kind == "softpath":
@@ -194,6 +199,8 @@ def collect_names(props, out):
         elif kind == "map":
             out.add(spec[1])
             out.add(spec[2])
+            for key, _value in (spec[3] if len(spec) > 3 else ()):
+                out.add(key)
     out.add(TERMINATOR)
 
 
@@ -219,6 +226,8 @@ def emit_properties(props, name_of):
         kind = spec[0]
         if kind == "str":
             out += tag(name, "StrProperty", _fstring(spec[1]))
+        elif kind == "name":
+            out += tag(name, "NameProperty", fname(spec[1]))
         elif kind == "obj":
             out += tag(name, "ObjectProperty", struct.pack("<i", spec[1]))
         elif kind == "enum":
@@ -246,7 +255,11 @@ def emit_properties(props, name_of):
             value = struct.pack("<i", len(spec[3])) + inner + bodies
             out += tag(name, "ArrayProperty", value, fname("StructProperty"))
         elif kind == "map":
-            value = struct.pack("<ii", 0, 0)          # no removals, no pairs
+            # Pairs, when given, are Name -> FPackageIndex; the map's own
+            # iteration order is the caller's, as the loader rebuilds it.
+            pairs = spec[3] if len(spec) > 3 else ()
+            body = b"".join(fname(k) + struct.pack("<i", v) for k, v in pairs)
+            value = struct.pack("<ii", 0, len(pairs)) + body
             out += tag(name, "MapProperty", value,
                        fname(spec[1]) + fname(spec[2]))
         else:

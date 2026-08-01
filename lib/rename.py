@@ -432,6 +432,10 @@ def verify(utoc_path):
         finds it.
       * an export's ID must be the hash of its path, or nothing that imports it
         resolves -- which looks exactly like the mod not being installed.
+      * the header's export COUNT must equal the package's own. The loader
+        sizes its export array from the header and then fills it from the
+        package: too low and it writes past the end, which crashes the async
+        loading thread with a heap write it cannot attribute to anything.
     """
     toc = iostore.Toc(utoc_path)
     problems = []
@@ -462,8 +466,9 @@ def verify(utoc_path):
         if not info:
             break
         for k, pid in enumerate(conheader.package_ids(raw, info)):
-            size = struct.unpack_from("<Q", raw, info["store_off"] + k * 32)[0]
-            entries[pid] = size & conheader.SIZE_MASK
+            size, exports = struct.unpack_from(
+                "<Qi", raw, info["store_off"] + k * 32)
+            entries[pid] = (size & conheader.SIZE_MASK, exports)
 
     for i in range(toc.n):
         if toc.chunk_ids[i][11] != PACKAGE_CHUNK:
@@ -477,9 +482,15 @@ def verify(utoc_path):
             problems.append(f"{path}: package ID is not the hash of {name}")
         if entries and pid not in entries:
             problems.append(f"{path}: missing from the container header")
-        elif entries and entries[pid] != toc.offlen[i][1]:
-            problems.append(f"{path}: header says {entries[pid]} bytes, "
-                            f"chunk is {toc.offlen[i][1]}")
+        elif entries:
+            size, exports = entries[pid]
+            if size != toc.offlen[i][1]:
+                problems.append(f"{path}: header says {size} bytes, "
+                                f"chunk is {toc.offlen[i][1]}")
+            if exports != len(pkg.exports):
+                problems.append(f"{path}: header says {exports} export"
+                                f"{'s' if exports != 1 else ''}, package has "
+                                f"{len(pkg.exports)}")
 
         source = pkgedit.source_name_of(pkg)
         for e in pkg.exports:

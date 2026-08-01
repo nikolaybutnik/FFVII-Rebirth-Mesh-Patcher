@@ -39,9 +39,15 @@ import pakfile
 import pkgedit
 import pngfile
 import rename
+import toggles
 import tagged
 import writer
 from zen import ZenPackage
+
+# Every row of every real mod names a picture -- none is ever left empty, and
+# the loader ships this one for rows an author gave no icon of their own.
+TEMPLATE_ICON = ("/FF7RML/UI/Dresscode_TemplateIcon_Sprite"
+                 ".Dresscode_TemplateIcon_Sprite")
 
 META_PKG = "/FF7RML/ModLoaders/Structs/PDA_ModMetaData"
 CHAR_PKG = ("/FF7RML/ModLoaders/Extensions/FF7RDataLibrary/Structs/"
@@ -77,6 +83,24 @@ FIELDS = {
 }
 
 
+# Which loader struct owns which FIELDS keys. Several structs share field
+# base names -- every UDS_ModData_* carries a Name and a Description, and
+# UDS_ModData_Object an Actor of its own -- so a field may only ever be
+# refreshed from the one struct our rows are actually built against.
+# Matching on base name across all structs once put UDS_ModData_Object's
+# Actor into every toggle row: the game read no actor at all, and applying
+# a toggle dressed the character in her default outfit.
+STRUCT_FIELDS = {
+    "UDS_ModMetaData": ("FriendlyName", "Description", "Thumbnail",
+                        "Category", "CreatedBy", "CreatedByURL"),
+    "UDS_ModData_General": ("Name", "OutfitDescription", "PreviewImage"),
+    "UDS_ModData_Character": ("GeneralData", "SkeletalMeshData",
+                              "AdditionalData"),
+    "UDS_AssetType_SkeletalMesh": ("PlayerType", "SkeletalMesh", "Actor"),
+    "UDS_AssetType_Custom": ("DataAssets", "CustomData"),
+}
+
+
 def fields_from_ff7rml():
     """
     Refresh FIELDS from the installed loader's own struct definitions --
@@ -91,16 +115,19 @@ def fields_from_ff7rml():
                         "FF7RMLEnd-WindowsNoEditor.utoc")
     if not os.path.exists(utoc):
         return
-    bases = {tagged.base_field(v): k for k, v in FIELDS.items()}
     try:
         toc = iostore.Toc(utoc)
         for i, p in toc.paths.items():
-            if "/Structs/UDS_" not in "/" + p.replace("\\", "/"):
+            leaf = os.path.splitext(
+                os.path.basename(p.replace("\\", "/")))[0]
+            owned = STRUCT_FIELDS.get(leaf)
+            if not owned:
                 continue
+            bases = {tagged.base_field(FIELDS[k]): k for k in owned}
             for n in ZenPackage(toc.read(i)).names:
-                base = tagged.base_field(n)
-                if base in bases and n != base:
-                    FIELDS[bases[base]] = n
+                k = bases.get(tagged.base_field(n))
+                if k and n != tagged.base_field(n):
+                    FIELDS[k] = n
         toc.close()
     except Exception:
         pass                            # snapshot stays; build remains valid
@@ -195,6 +222,42 @@ def arc_positions(data):
             out.append(o)
             o += 8
     return out
+
+
+def mark_external_arcs(data, shipped):
+    """
+    Point every dependency arc on a package this container does NOT hold at
+    bundle -1, and return the new bytes (None when nothing changed).
+
+    The two formats are exact opposites here. A ~mods loose pak must not
+    carry -1 arcs -- the vanilla loader silently refuses any package that
+    does. A plugin must: every arc leaving a real Dresscode mod is -1, and
+    an arc of 0 naming a package the container lacks sends the loader to a
+    store entry that is not there, which it writes through anyway.
+    """
+    z = ZenPackage(data)
+    if z.graph_size < 4:
+        return None
+    buf = bytearray(data)
+    end = z.graph_off + z.graph_size
+    o = z.graph_off
+    count = struct.unpack_from("<I", buf, o)[0]
+    o += 4
+    changed = False
+    for _ in range(count):
+        if o + 12 > end:
+            break
+        pid, narcs = struct.unpack_from("<QI", buf, o)
+        o += 12
+        for _ in range(narcs):
+            if o + 8 > end:
+                break
+            if pid not in shipped and \
+                    struct.unpack_from("<I", buf, o)[0] != 0xFFFFFFFF:
+                struct.pack_into("<I", buf, o, 0xFFFFFFFF)
+                changed = True
+            o += 8
+    return bytes(buf) if changed else None
 
 
 def original_blocks(toc, index):
@@ -504,10 +567,14 @@ def restore(rt, parts, out_root, optionals=None, say=print):
     return root
 
 
-def build(meta, outfits, plugin, out_root, say=print):
+def build(meta, outfits, plugin, out_root, say=print, extras=()):
     """
     Write the plugin folder. `meta` and `outfits` come from the dresscode.json
     template (read_template's output shapes); each outfit carries its utoc.
+
+    `extras` is [(label, utoc)] for the old modular standard's optional paks:
+    each becomes a toggle row per outfit it can act on.
+
     Returns the plugin folder path.
     """
     fields_from_ff7rml()
@@ -520,7 +587,7 @@ def build(meta, outfits, plugin, out_root, say=print):
     used_names = set()
     entries_outfits = []        # per outfit: (mesh soft path, player key)
 
-    tocs = []
+    tocs, wearers = [], []
     for k, outfit in enumerate(outfits):
         toc = iostore.Toc(outfit["utoc"])
         tocs.append(toc)
@@ -589,19 +656,96 @@ def build(meta, outfits, plugin, out_root, say=print):
 
         obj = mesh_object_name(toc, packages[old_mesh_pid]["chunk"])
         entries_outfits.append((outfit, f"{mesh_new}.{obj}", player))
+        wearers.append(dict(toc=toc, packages=packages, renames=renames,
+                            mesh_chunk=packages[old_mesh_pid]["chunk"],
+                            mesh_package=mesh_new, mesh_object=obj,
+                            safe=safe, player=player, outfit=outfit))
+
+    # ---- toggles from the modular standard's optional paks ---------------
+    entries_toggles = []
+    for label, utoc in extras:
+        extra_toc = iostore.Toc(utoc)
+        tocs.append(extra_toc)
+        extra_packages = rename.read_packages(extra_toc)
+        for w in wearers:
+            slots, _overridden = toggles.plan(
+                w["toc"], w["packages"], w["mesh_chunk"], extra_toc,
+                extra_packages, refs=w.setdefault(
+                    "refs", toggles.references(w["toc"], w["packages"])))
+            if not slots:
+                say(f"      note: {label} changes nothing on "
+                    f"{w['outfit']['name']} -- skipped")
+                continue
+            safe = safe_id(f"{label}", used_names, f"Extra{len(used_names)}")
+            made, actor = toggles.emit(
+                w["toc"], w["packages"], extra_toc, extra_packages, slots,
+                w["renames"], plugin, w["safe"], safe, w["mesh_package"],
+                w["mesh_object"],
+                index=w.setdefault("exports", toggles.export_index(
+                    w["toc"], w["packages"])))
+            for item in made:
+                pid = cityhash.package_id(item["name"])
+                if pid in merged:
+                    continue
+                # The header's export count is what the loader sizes its
+                # export array from -- a blueprint has eight, not one.
+                merged[pid] = dict(
+                    name=item["name"], data=item["data"], deps=item["deps"],
+                    exp=len(ZenPackage(item["data"]).exports), bun=1,
+                    bulks=item["bulks"])
+            entries_toggles.append((w, label, actor, len(slots)))
+            say(f"      toggle  {w['outfit']['name']}: {label}   "
+                f"({len(slots)} slot{'s' if len(slots) != 1 else ''})")
 
     # ---- synthesized packages ------------------------------------------
     def add(name, data, deps):
         pid = cityhash.package_id(name)
-        merged[pid] = dict(name=name, data=data, deps=deps, exp=1, bun=1,
-                           bulks=[])
+        merged[pid] = dict(name=name, data=data, deps=deps,
+                           exp=len(ZenPackage(data).exports), bun=1, bulks=[])
         return pid
 
+    # Real mods register their content in AssetRegistry.bin -- toggle
+    # blueprints with the full Blueprint tag set (and packages flagged
+    # 0x40000), packs as EndMaterialPack, meshes as SkeletalMesh. Ours
+    # registered only previews and metadata, and its toggle actors never
+    # loaded in game while a real mod's did.
     registry_assets = []
+    for w, label, actor, _n in entries_toggles:
+        bp_pkg, bp_obj = actor.rsplit(".", 1)
+        folder = bp_pkg.rsplit("/", 1)[0]
+        registry_assets.append(dict(
+            object_path=actor, package_path=folder, class_name="Blueprint",
+            package_name=bp_pkg, asset_name=bp_obj, flags=0x40000,
+            tags=[
+                ("GeneratedClass",
+                 f"BlueprintGeneratedClass'{bp_pkg}.{bp_obj}_C'"),
+                ("ParentClass", "Class'/Script/EndGame.EndPlayerCharacter'"),
+                ("NativeParentClass",
+                 "Class'/Script/EndGame.EndPlayerCharacter'"),
+                ("ClassFlags", "12847124"),
+                ("BlueprintType", "BPTYPE_Normal"),
+                ("IsDataOnly", "True"),
+                ("NumReplicatedProperties", "0"),
+                ("NativeComponents", "4"),
+                ("BlueprintComponents", "0"),
+                ("BlueprintPath", bp_obj),
+            ]))
+        pack_pkg = f"{bp_pkg}_MP"
+        registry_assets.append(dict(
+            object_path=f"{pack_pkg}.{bp_obj}_MP", package_path=folder,
+            class_name="EndMaterialPack", package_name=pack_pkg,
+            asset_name=f"{bp_obj}_MP", tags=[]))
+    for _outfit, mesh_path, _player in entries_outfits:
+        mesh_pkg, mesh_obj = mesh_path.rsplit(".", 1)
+        registry_assets.append(dict(
+            object_path=mesh_path,
+            package_path=mesh_pkg.rsplit("/", 1)[0],
+            class_name="SkeletalMesh", package_name=mesh_pkg,
+            asset_name=mesh_obj, tags=[]))
     previews = []
     for k, (outfit, _mesh, _player) in enumerate(entries_outfits):
         if not outfit.get("preview"):
-            previews.append(None)
+            previews.append(TEMPLATE_ICON)
             continue
         w, h, bgra = pngfile.decode(outfit["preview"])
         name = f"/{plugin}/Previews/Preview{k + 1}"
@@ -667,12 +811,42 @@ def build(meta, outfits, plugin, out_root, say=print):
         tags=data_asset_tags("PDA_ModMetaData_C", META_PKG,
                              "DA_ModMetaData")))
 
+    def toggle_body(w, label, actor):
+        """A toggle row: no mesh of its own, just the actor that applies a
+        material pack to the outfit already worn."""
+        # Alone with its outfit (the split builds one mod per outfit), a
+        # toggle needs no outfit prefix on its menu row.
+        row_name = label if len(entries_outfits) == 1 \
+            else f"{w['outfit']['name']} - {label}"
+        return [
+            (F["GeneralData"], ("struct", "UDS_ModData_General", GUID_GENERAL, [
+                (F["Name"], ("str", row_name)),
+                # The menu shows the DESCRIPTION under a tile, not the name
+                # -- real mods put their row labels there.
+                (F["OutfitDescription"], ("str", row_name)),
+                (F["PreviewImage"], ("softpath", TEMPLATE_ICON)),
+            ])),
+            (F["SkeletalMeshData"],
+             ("struct", "UDS_AssetType_SkeletalMesh", GUID_SKM, [
+                 (F["PlayerType"],
+                  ("enum", "EPlayerType", f"EPlayerType::{w['player']}")),
+                 (F["SkeletalMesh"], ("softpath", None)),
+                 (F["Actor"], ("softpath", actor)),
+             ])),
+            (F["AdditionalData"], ("struct", "UDS_AssetType_Custom",
+                                   GUID_CUSTOM, [
+                (F["DataAssets"], ("map", "NameProperty", "ObjectProperty")),
+                (F["CustomData"], ("map", "NameProperty", "StructProperty")),
+            ])),
+        ]
+
     bodies = []
     for k, (outfit, mesh_path, player) in enumerate(entries_outfits):
         bodies.append([
             (F["GeneralData"], ("struct", "UDS_ModData_General", GUID_GENERAL, [
                 (F["Name"], ("str", outfit["name"])),
-                (F["OutfitDescription"], ("str", outfit["description"])),
+                (F["OutfitDescription"],
+                 ("str", outfit["description"] or outfit["name"])),
                 (F["PreviewImage"], ("softpath", previews[k])),
             ])),
             (F["SkeletalMeshData"],
@@ -688,6 +862,13 @@ def build(meta, outfits, plugin, out_root, say=print):
                 (F["CustomData"], ("map", "NameProperty", "StructProperty")),
             ])),
         ])
+        # Its own toggles follow it: every mod observed groups them that
+        # way, and a toggle names no outfit, so its position is the only
+        # thing tying it to one.
+        for w, label, actor, _n in entries_toggles:
+            if w["outfit"] is outfit:
+                bodies.append(toggle_body(w, label, actor))
+
     char_props = [
         ("Character Data",
          ("array_structs", "UDS_ModData_Character", GUID_CHAR, bodies)),
@@ -710,6 +891,14 @@ def build(meta, outfits, plugin, out_root, say=print):
         asset_name="CharacterData",
         tags=data_asset_tags("PDA_ModData_Character_C", CHAR_PKG,
                              "CharacterData")))
+
+    # Now that the whole container is known, every reference leaving it has
+    # to say so -- see mark_external_arcs.
+    shipped = set(merged)
+    for rec in merged.values():
+        patched = mark_external_arcs(rec["data"], shipped)
+        if patched is not None:
+            rec["data"] = patched
 
     # ---- container header chunk ----------------------------------------
     order = sorted(merged)
