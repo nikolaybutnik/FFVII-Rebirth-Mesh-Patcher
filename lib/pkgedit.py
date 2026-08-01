@@ -118,7 +118,8 @@ def source_name_of(pkg):
 
 def rewrite(data, names=None, import_map=None, pkgid_map=None,
             new_package_name=None, new_source_name=None, export_names=None,
-            fix_arcs=False, allow_shrink=False):
+            fix_arcs=False, allow_shrink=False, extra_imports=(),
+            extra_graph=()):
     """
     Rebuild one package's header.
 
@@ -175,47 +176,11 @@ def rewrite(data, names=None, import_map=None, pkgid_map=None,
             names.append(new_name)
         renamed[idx] = (names.index(new_name), new_name)
 
-    strings, hashes = build_name_batch(names)
-    nm_off = SUMMARY_SIZE
-    nh_off = (nm_off + len(strings) + 7) & ~7          # the blob is 8-aligned
-    imp_off = nh_off + len(hashes)
-
-    shift = imp_off - pkg.imp_off                      # everything after moves
-    exp_off = pkg.exp_off + shift
-    bundles_off = pkg.bundles_off + shift
-    graph_off = pkg.graph_off + shift
-
-    out = bytearray()
-    out += struct.pack(
-        ZenPackage.HEADER,
-        pkg.name, pkg.srcname, pkg.pkg_flags, pkg.cooked_hdr_size,
-        nm_off, len(strings), nh_off, len(hashes),
-        imp_off, exp_off, bundles_off, graph_off, pkg.graph_size, pkg.pad)
-    out += strings
-    out += b"\0" * (nh_off - nm_off - len(strings))
-    out += hashes
-
-    # -- imports: values change, count does not --------------------------
-    for imp in pkg.imports:
-        out += struct.pack("<Q", (import_map or {}).get(imp, imp))
-
-    # -- exports: only the ID others import this one BY is recomputed -----
-    owner = new_source_name or source_name_of(pkg)
-    final_name = {i: n for i, (_slot, n) in renamed.items()}
-    for e in pkg.exports:
-        entry = bytearray(data[pkg.exp_off + e["idx"] * 72:
-                               pkg.exp_off + e["idx"] * 72 + 72])
-        if e["idx"] in renamed:
-            slot, _n = renamed[e["idx"]]
-            struct.pack_into("<II", entry, 16, slot, 0)
-        if e["gimp"] != cityhash.NULL_INDEX:
-            path = export_object_path(pkg, e, final_name)
-            struct.pack_into("<Q", entry, 56, cityhash.object_id(owner, path))
-        out += entry
-
-    out += data[pkg.bundles_off:pkg.graph_off]
-
-    # -- graph data: a count, then that many (package ID, arc list) ------
+    # -- graph data first, its size goes in the summary ------------------
+    # A count, then that many (package ID, arc list). extra_graph appends
+    # entries: a package that GAINED an import needs the exporting package
+    # sequenced here, or the loader never brings it in -- an unlisted
+    # import quietly resolves to nothing (grey checkers, not an error).
     graph = bytearray(data[pkg.graph_off:pkg.graph_off + pkg.graph_size])
     if (pkgid_map or fix_arcs) and len(graph) >= 4:
         count = struct.unpack_from("<I", graph, 0)[0]
@@ -233,7 +198,59 @@ def rewrite(data, names=None, import_map=None, pkgid_map=None,
                 if fix_arcs and struct.unpack_from("<I", graph, o)[0] == 0xFFFFFFFF:
                     struct.pack_into("<I", graph, o, 0)
                 o += 8
-    out += graph
+    if extra_graph:
+        if len(graph) < 4:
+            graph = bytearray(struct.pack("<I", 0))
+        count = struct.unpack_from("<I", graph, 0)[0]
+        struct.pack_into("<I", graph, 0, count + len(extra_graph))
+        for pid, arcs in extra_graph:
+            graph += struct.pack("<QI", pid, len(arcs))
+            for arc_from, arc_to in arcs:
+                graph += struct.pack("<ii", arc_from, arc_to)
 
+    strings, hashes = build_name_batch(names)
+    nm_off = SUMMARY_SIZE
+    nh_off = (nm_off + len(strings) + 7) & ~7          # the blob is 8-aligned
+    imp_off = nh_off + len(hashes)
+
+    shift = imp_off - pkg.imp_off                      # everything after moves
+    shift += 8 * len(extra_imports)                    # the table may grow
+    exp_off = pkg.exp_off + shift
+    bundles_off = pkg.bundles_off + shift
+    graph_off = pkg.graph_off + shift
+
+    out = bytearray()
+    out += struct.pack(
+        ZenPackage.HEADER,
+        pkg.name, pkg.srcname, pkg.pkg_flags, pkg.cooked_hdr_size,
+        nm_off, len(strings), nh_off, len(hashes),
+        imp_off, exp_off, bundles_off, graph_off, len(graph), pkg.pad)
+    out += strings
+    out += b"\0" * (nh_off - nm_off - len(strings))
+    out += hashes
+
+    # -- imports: values change; extra_imports appends, keeping existing
+    #    positions (and so every FPackageIndex in the object data) valid --
+    for imp in pkg.imports:
+        out += struct.pack("<Q", (import_map or {}).get(imp, imp))
+    for imp in extra_imports:
+        out += struct.pack("<Q", imp)
+
+    # -- exports: only the ID others import this one BY is recomputed -----
+    owner = new_source_name or source_name_of(pkg)
+    final_name = {i: n for i, (_slot, n) in renamed.items()}
+    for e in pkg.exports:
+        entry = bytearray(data[pkg.exp_off + e["idx"] * 72:
+                               pkg.exp_off + e["idx"] * 72 + 72])
+        if e["idx"] in renamed:
+            slot, _n = renamed[e["idx"]]
+            struct.pack_into("<II", entry, 16, slot, 0)
+        if e["gimp"] != cityhash.NULL_INDEX:
+            path = export_object_path(pkg, e, final_name)
+            struct.pack_into("<Q", entry, 56, cityhash.object_id(owner, path))
+        out += entry
+
+    out += data[pkg.bundles_off:pkg.graph_off]
+    out += graph
     out += data[pkg.export_data_start():]
     return bytes(out)

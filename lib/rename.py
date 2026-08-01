@@ -90,16 +90,29 @@ def read_packages(toc):
     return found
 
 
-def build_maps(packages, renames, object_renames=None):
+def build_maps(packages, renames, object_renames=None, extra_imports=None):
     """
     Turn a name mapping into the ID mappings the rewrite needs.
 
     Returns (pkgid_map, import_map, string_map). Only renamed packages
     contribute, so anything pointing at the game itself is left exactly as it
     was. object_renames is {lowercased package name: {old object: new object}}.
+
+    `extra_imports` supplies object-ID mappings for packages that are NOT in
+    this container -- an overlay pak names objects its base pak serves, and
+    only the caller knows what those are called on the other side.
     """
     object_renames = object_renames or {}
     pkgid_map, import_map, string_map = {}, {}, {}
+    # Package IDs can be mapped from the names alone -- graph data and
+    # header dependencies may reference packages this container dropped.
+    for old_low, new_name in renames.items():
+        old_pid, new_pid = (cityhash.package_id(old_low),
+                            cityhash.package_id(new_name))
+        if old_pid != new_pid:
+            pkgid_map[old_pid] = new_pid
+    if extra_imports:
+        import_map.update(extra_imports)
     for pid, info in packages.items():
         old_name = info["name"]
         new_name = renames.get(old_name.lower())
@@ -125,7 +138,8 @@ def _chunk_id_with(chunk_id, package_id):
 
 
 def rewrite_chunks(toc, packages, renames, object_renames=None, dropped=None,
-                   progress=None, fix_arcs=False):
+                   progress=None, fix_arcs=False, keep_deps=False,
+                   extra_imports=None, post_edit=None, extra_deps=None):
     """
     Produce {chunk index -> new bytes} and {chunk index -> new 12-byte ID}.
 
@@ -136,7 +150,9 @@ def rewrite_chunks(toc, packages, renames, object_renames=None, dropped=None,
     """
     object_renames = object_renames or {}
     dropped = dropped or set()
-    pkgid_map, import_map, string_map = build_maps(packages, renames, object_renames)
+    pkgid_map, import_map, string_map = build_maps(packages, renames,
+                                                   object_renames,
+                                                   extra_imports)
     new_data, new_ids = {}, {}
 
     for pid, info in packages.items():
@@ -168,6 +184,9 @@ def rewrite_chunks(toc, packages, renames, object_renames=None, dropped=None,
             new_package_name=new_name,
             new_source_name=renames.get(source.lower(), source),
             export_names=export_names, fix_arcs=fix_arcs)
+        edit = (post_edit or {}).get(info["name"].lower())
+        if edit:
+            out = edit(out)
         if out != data:
             new_data[i] = out
 
@@ -198,7 +217,9 @@ def rewrite_chunks(toc, packages, renames, object_renames=None, dropped=None,
         except Exception:
             continue
         if len(keep) != len(packages):
-            out = conheader.rebuild(header, keep, pkgid_map, sizes)
+            out = conheader.rebuild(header, keep, pkgid_map, sizes,
+                                    keep_deps=keep_deps,
+                                    extra_deps=extra_deps)
             if out is None:
                 raise RuntimeError("this container's header cannot be rebuilt, "
                                    "so packages cannot be dropped from it")
@@ -212,7 +233,8 @@ def rewrite_chunks(toc, packages, renames, object_renames=None, dropped=None,
 
 def rename_container(toc, renames, mount, path_for, out_dir, base,
                      container_name=None, object_renames=None, drop=None,
-                     quiet=False, fix_arcs=False):
+                     quiet=False, fix_arcs=False, cross_pak=False,
+                     post_edit=None, extra_deps=None):
     """
     Write a renamed copy of `toc` as out_dir/base.utoc + .ucas.
 
@@ -223,6 +245,10 @@ def rename_container(toc, renames, mount, path_for, out_dir, base,
         container_name  gives the output a fresh container ID; without it the
                         source's ID is kept, which two installed mods must not
                         share
+        cross_pak       the output is an OVERLAY that always rides beside
+                        another pak serving the packages dropped here, so a
+                        kept package importing a dropped one is by design,
+                        not a dangling reference
 
     The .pak is NOT written here -- it belongs to the target format, not to the
     rename, and the two conversions need different ones.
@@ -234,11 +260,15 @@ def rename_container(toc, renames, mount, path_for, out_dir, base,
     gone = {pid for pid, info in packages.items()
             if info["name"].lower() in dropped}
     if gone:
-        _refuse_if_needed(toc, packages, gone)
+        if not cross_pak:
+            _refuse_if_needed(toc, packages, gone)
         say(f"    dropping {len(gone)} package(s) this form does not use")
     say(f"    rewriting {len(packages) - len(gone)} packages")
     new_data, new_ids = rewrite_chunks(toc, packages, renames, object_renames,
-                                       dropped, fix_arcs=fix_arcs)
+                                       dropped, fix_arcs=fix_arcs,
+                                       keep_deps=cross_pak,
+                                       post_edit=post_edit,
+                                       extra_deps=extra_deps)
 
     # The container ID is recorded THREE times and all copies must agree: at
     # 0x38 of the .utoc header, in the first 8 bytes of the header chunk's
@@ -314,7 +344,8 @@ def rename_container(toc, renames, mount, path_for, out_dir, base,
     say(f"    written {base}.utoc/.ucas ({len(ucas) / (1024 * 1024):,.1f} MB)")
 
     written = os.path.join(out_dir, base + ".utoc")
-    lost = _dependencies_lost(toc, iostore.Toc(written), gone)
+    lost = 0 if cross_pak else \
+        _dependencies_lost(toc, iostore.Toc(written), gone)
     if lost:
         raise RuntimeError(
             f"the rebuilt header lost {lost} package dependencies -- the mod "

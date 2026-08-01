@@ -50,9 +50,11 @@ import zlib
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "lib"))
 
+import cityhash                                                 # noqa: E402
 import conheader                                                # noqa: E402
 import drops                                                    # noqa: E402
 import iostore                                                  # noqa: E402
+import matpack                                                  # noqa: E402
 import mkdc                                                     # noqa: E402
 import moddata                                                  # noqa: E402
 import pakfile                                                  # noqa: E402
@@ -148,14 +150,38 @@ def plan_variants(toc, plugin):
     assets and the like, wired up in ways a dependency walk cannot see) ride
     along in every variant -- a few wasted megabytes beat a missing feature.
 
-    Returns [(outfit, target, renames, objects, drop)], one entry per variant.
+    Outfit rows with an ACTOR are Dresscode toggles (hide the jacket, recolor
+    the wings): a blueprint applying an EndMaterialPack that swaps mesh
+    material slots. Those become OPTIONAL paks in the pre-Dresscode modular
+    style -- a tiny pak overriding the swapped material outright, dropped in
+    ~mods next to the base at the user's choice. The blueprint and pack
+    themselves are meaningless outside Dresscode and travel only in the
+    round-trip record.
+
+    Returns (plans, toggles, ctx): plans is [(outfit, target, renames,
+    objects, drop)] per variant, toggles one dict per optional pak.
     """
     assets = moddata.find_data_assets(toc)
     if "character" not in assets:
         raise RuntimeError("no Dresscode outfit data in this mod")
     outfits = moddata.read_outfits(toc.read(assets["character"]))
-    wearable = [o for o in outfits
-                if o["skeletal_mesh"] and not o["skeletal_mesh"].startswith("/Game/")]
+    meshed = [o for o in outfits
+              if o["skeletal_mesh"]
+              and not o["skeletal_mesh"].startswith("/Game/")]
+    # Rows with an actor are Dresscode toggles. Their mesh is usually None
+    # ("apply to whatever is worn"); one with a mesh of its own is promoted
+    # to a base outfit too, so its look still ships.
+    toggle_rows = [o for o in outfits if o.get("actor")]
+    base_meshes = {o["skeletal_mesh"].split(".")[0].lower()
+                   for o in meshed if not o.get("actor")}
+    wearable = []
+    for o in meshed:
+        mesh_low = o["skeletal_mesh"].split(".")[0].lower()
+        if not o.get("actor"):
+            wearable.append(o)
+        elif mesh_low not in base_meshes:
+            base_meshes.add(mesh_low)
+            wearable.append(o)
     if not wearable:
         raise RuntimeError("this mod registers no mesh of its own to convert")
 
@@ -201,12 +227,57 @@ def plan_variants(toc, plugin):
                 preview_users.setdefault(p, set()).add(j)
     orphan_previews = set()
     for o in outfits:
-        if o in wearable or not o["preview_image"]:
+        if o in wearable or o in toggle_rows or not o["preview_image"]:
             continue
         p = by_name.get(o["preview_image"].split(".")[0].lower())
         if p is not None and p not in preview_users \
                 and not any(p in c for c in closures):
             orphan_previews.add(p)
+
+    # The base outfits a mesh-less toggle may apply to. Slot names repeat
+    # across meshes (every outfit has a hair slot), so a toggle sharing its
+    # NAME with a base row belongs to that row alone.
+    bases = []
+    for o in wearable:
+        pid = by_name.get(o["skeletal_mesh"].split(".")[0].lower())
+        target = moddata.default_costume_package(o["player_type"])
+        if pid is not None and target:
+            bases.append((pid, target.rsplit("/Model/", 1)[0],
+                          (o["name"] or "").strip()))
+
+    base_union = set().union(*closures) if closures else set()
+    toggles, blob_only = plan_toggles(
+        toc, plugin, packages, by_name, deps, closure, base_union,
+        set(preview_users), toggle_rows, registration, bases)
+
+    # Cargo that IMPORTS the Dresscode-only machinery -- or anything only
+    # SOME variants carry -- is Dresscode-only machinery itself: parent
+    # blueprints, helper assets. It would dangle in every variant missing
+    # its target, and it does nothing in a loose pak anyway. Walk until no
+    # unclaimed package still references anything unsafe.
+    reg_pids = {pid for pid, p in packages.items()
+                if p["chunk"] in registration}
+    toggle_keep = set().union(*(t["keep"] for t in toggles)) \
+        if toggles else set()
+    common = set.intersection(*closures) if closures else set()
+    variant_specific = (base_union - common) | set(preview_users)
+    removed = reg_pids | blob_only | toggle_keep
+    changed = True
+    while changed:
+        changed = False
+        doomed = {cityhash.object_id(packages[pid]["name"], path)
+                  for pid in removed | variant_specific if pid in packages
+                  for path in packages[pid]["exports"]}
+        for pid, info in packages.items():
+            if pid in removed or pid in base_union:
+                continue
+            z = zen.ZenPackage(toc.read(info["chunk"]))
+            if any(imp in doomed for imp in z.imports):
+                blob_only.add(pid)
+                removed.add(pid)
+                changed = True
+
+    toggle_owned = toggle_keep | blob_only
 
     plans = []
     for k, outfit in enumerate(wearable):
@@ -225,7 +296,7 @@ def plan_variants(toc, plugin):
             if len(closures) > 1 else set()
         not_mine = {p for p, users in preview_users.items() if k not in users}
         exclusive_elsewhere = (others - closures[k]) | not_mine \
-            | orphan_previews
+            | orphan_previews | (toggle_owned - closures[k])
 
         # ".../PC0002_00_Tifa_Standard" -- the costume folder the mesh lives in.
         costume_root = target.rsplit("/Model/", 1)[0]
@@ -265,7 +336,163 @@ def plan_variants(toc, plugin):
         raise RuntimeError("none of this mod's outfits can be converted")
     # The survey rides along so the round-trip recorder does not pay for a
     # second full read of every package.
-    return plans, dict(packages=packages, assets=assets, outfits=outfits)
+    return plans, toggles, dict(packages=packages, assets=assets,
+                                outfits=outfits, blob_only=blob_only)
+
+
+def converted_name(name, plugin, costume_root):
+    """Where a mod package lands in the loose layout; stock names stay put."""
+    if name.lower().startswith(f"/{plugin.lower()}/"):
+        return f"{costume_root}/{plugin}{name[len(plugin) + 1:]}"
+    return name
+
+
+def plan_toggles(toc, plugin, packages, by_name, deps, closure, base_union,
+                 base_previews, toggle_rows, registration, bases):
+    """
+    One optional-pak plan per distinct material swap.
+
+    Follows actor -> blueprint -> EndMaterialPack -> {slot: replacement},
+    reads a mesh's slot->material table, and turns each swap into a package
+    override: the replacement material renamed onto the material package the
+    base pak serves for that slot. A toggle row usually names no mesh
+    ("apply to whatever is worn"), so its pack is tried against every base
+    outfit and lands where its slot names match. A slot whose material
+    package is SHARED with slots the pack does not touch cannot be
+    overridden without side effects and is skipped with a note.
+    """
+    reg_pids = {pid for pid, p in packages.items()
+                if p["chunk"] in registration}
+    toggles, blob_only = [], set()
+    resolver = None
+    slots_cache = {}
+    for row in toggle_rows:
+        bp_pkg = row["actor"].split(".")[0]
+        bp_pid = by_name.get(bp_pkg.lower())
+        if bp_pid is None:
+            continue
+        blob_only.add(bp_pid)
+        pack_pid = next(
+            (p for p in deps.get(bp_pid, []) if p in packages
+             and matpack.is_material_pack(toc.read(packages[p]["chunk"]))),
+            None)
+        if pack_pid is None:
+            print(f"      note: {row['name'] or bp_pkg} does something no "
+                  "loose pak can (not a material swap) -- Dresscode only")
+            continue
+        blob_only.add(pack_pid)
+        if resolver is None:
+            resolver = matpack.object_resolver(toc)
+        pack = matpack.read_material_pack(toc.read(packages[pack_pid]["chunk"]))
+
+        own_mesh = (row["skeletal_mesh"] or "").split(".")[0]
+        own_pid = by_name.get(own_mesh.lower()) if own_mesh else None
+        if own_pid is not None:
+            candidates = [b for b in bases if b[0] == own_pid]
+        else:
+            row_name = (row["name"] or "").strip()
+            named = [b for b in bases if row_name and b[2] == row_name]
+            candidates = named or bases
+
+        matched = False
+        for mesh_pid, costume_root, _bname in candidates:
+            if mesh_pid not in slots_cache:
+                slots_cache[mesh_pid] = matpack.material_slots(
+                    toc.read(packages[mesh_pid]["chunk"]))
+            slots = slots_cache[mesh_pid]
+            slot_to_base = {s: imp for s, imp, _o in slots}
+
+            # swaps: {slot: (base (pkg, obj), repl (pkg, obj), shared)}. A
+            # slot whose base material package also serves slots the pack
+            # does not touch cannot be swapped by overriding the package --
+            # the pack's OTHER slots usually give an anchor: repoint the
+            # shared slot at a clean slot's material import (a 4-byte mesh
+            # patch to an EXISTING import) and let that slot's package
+            # override do the rest. Only a shared slot with no anchor needs
+            # the mesh to learn a brand-new import.
+            swaps, skipped = {}, []
+            for slot, repl_imp in pack.items():
+                base_imp = slot_to_base.get(slot)
+                base = resolver.get(base_imp) if base_imp else None
+                repl = resolver.get(repl_imp)
+                if not base or not repl:
+                    skipped.append(slot)
+                    continue
+                if base[0].lower() == repl[0].lower():
+                    continue
+                shared = any(s != slot and s not in pack and imp == base_imp
+                             for s, imp, _o in slots)
+                swaps[slot] = (base, repl, shared)
+            if not swaps:
+                continue
+            matched = True
+
+            overrides, objects, repoint, loose = {}, {}, {}, {}
+            for slot, (base, repl, shared) in swaps.items():
+                if shared:
+                    continue
+                overrides[base[0]] = repl[0]
+                if base[1] != repl[1]:      # must answer as the base object
+                    objects[repl[0].lower()] = {repl[1]: base[1]}
+            for slot, (base, repl, shared) in swaps.items():
+                if not shared:
+                    continue
+                anchor = next(
+                    (b2 for _s2, (b2, r2, sh2) in swaps.items()
+                     if not sh2 and r2[0].lower() == repl[0].lower()), None)
+                if anchor is not None:
+                    repoint[slot] = anchor      # base (pkg, obj) to reuse
+                else:
+                    # Would need the mesh to learn a brand-new import --
+                    # probed in game and the loader never resolves it, so
+                    # be honest instead of shipping a grey part.
+                    loose[slot] = repl
+            if loose:
+                print(f"      note: {row['name'] or bp_pkg}: "
+                      f"{', '.join(sorted(loose))} cannot swap in a loose "
+                      "pak -- those parts keep their normal look")
+            if not overrides and not repoint:
+                continue
+            kind = "mesh" if repoint else "swap"
+
+            keep = set()
+            repl_pids = {by_name[r[0].lower()]
+                         for _b, r, _sh in swaps.values()
+                         if r[0].lower() in by_name}
+            for pid in repl_pids:
+                keep |= closure(pid)
+            if row["preview_image"]:
+                p = by_name.get(row["preview_image"].split(".")[0].lower())
+                if p is not None:
+                    keep |= closure(p)
+            # Shared things stay with the base pak (an optional always
+            # rides beside it) -- except the replacements themselves, which
+            # the optional must carry regardless, and the mesh when the
+            # swap is baked into it.
+            keep -= base_union | base_previews | reg_pids | blob_only
+            keep |= repl_pids
+            if kind == "mesh":
+                keep.add(mesh_pid)
+
+            dup = next((t for t in toggles
+                        if t["swaps"] == swaps and t["kind"] == kind
+                        and (kind == "swap"
+                             or t["mesh_pid"] == mesh_pid)), None)
+            if dup is not None:
+                dup["keep"] |= keep
+                dup["bases"].add(mesh_pid)
+                continue
+            # `bases` is every outfit this one swap works on -- one means it
+            # belongs inside that outfit's folder, several mean it is general.
+            toggles.append(dict(
+                row=row, bp=bp_pkg, kind=kind, swaps=swaps,
+                overrides=overrides, objects=objects, repoint=repoint,
+                loose=loose, skipped=skipped, keep=keep, mesh_pid=mesh_pid,
+                bases={mesh_pid}, costume_root=costume_root))
+        if not matched:
+            print(f"      note: {row['name'] or bp_pkg}: its material swap "
+                  "has no effect a loose pak can carry -- Dresscode only")
+    return toggles, blob_only
 
 
 def header_deps(toc):
@@ -327,6 +554,13 @@ def loose_layout(source, mods):
     if not mods or any(uplugin for _utoc, uplugin in mods):
         return None
     root = os.path.normcase(os.path.abspath(source))
+    # The Optional tree holds generated override paks, not outfits; the
+    # restore record knows how to use them, the layout must not see them.
+    mods = [(u, up) for u, up in mods
+            if "optional" not in
+            os.path.relpath(u, source).lower().split(os.sep)[:-1]]
+    if not mods:
+        return None
     parts = []
     for utoc, _ in mods:
         d = os.path.dirname(os.path.abspath(utoc))
@@ -556,13 +790,15 @@ def restore_matches(rt, meta, outfits):
     return md5_of(meta.get("icon")) == rt.get("icon_md5")
 
 
-def record_roundtrip(toc, uplugin, plugin, plans, ctx, mod_out, layout):
+def record_roundtrip(toc, uplugin, plugin, plans, ctx, mod_out, layout,
+                     opt_layout=()):
     """
     Leave everything beside the written loose paks that converting BACK will
     need: a prefilled dresscode.json, each outfit's preview as a PNG a person
     can see and swap, the plugin icon -- and the opaque restore record.
 
-    `layout` is [(rel_folder, plan)], "." meaning the mod's root folder.
+    `layout` is [(rel_folder, plan)], "." meaning the mod's root folder;
+    `opt_layout` is [(label, toggle)] for the generated Optional paks.
     """
     packages = ctx["packages"]
     by_name = {p["name"].lower(): pid for pid, p in packages.items()}
@@ -600,6 +836,12 @@ def record_roundtrip(toc, uplugin, plugin, plans, ctx, mod_out, layout):
         if chunk is not None:
             put_png(mod_out if rel == "." else os.path.join(mod_out, rel),
                     "preview", chunk)
+    for rel, _stem, t in opt_layout:
+        ref = t["row"].get("preview_image")
+        pid = by_name.get(ref.split(".")[0].lower()) if ref else None
+        if pid in packages:
+            put_png(os.path.join(mod_out, *rel.split("/")), "preview",
+                    packages[pid]["chunk"])
 
     icon_md5 = None
     icon_file = os.path.join(os.path.dirname(uplugin), "Resources",
@@ -620,7 +862,10 @@ def record_roundtrip(toc, uplugin, plugin, plans, ctx, mod_out, layout):
     for j, pid in enumerate(ids):
         _sz, exp, bun, lo, pad = struct.unpack_from(
             "<Qiiii", hdr, info["store_off"] + j * 32)
-        entry_of[pid] = dict(exp=exp, bun=bun, lo=lo, pad=pad, order=j)
+        entry_of[pid] = dict(
+            exp=exp, bun=bun, lo=lo, pad=pad, order=j,
+            deps=[str(d) for d in
+                  conheader.imported_packages(hdr, info, j)])
 
     name_of = {pid: p["name"] for pid, p in packages.items()}
     chunk_order = []
@@ -640,17 +885,24 @@ def record_roundtrip(toc, uplugin, plugin, plans, ctx, mod_out, layout):
         if bad:
             neg_arcs[p["name"]] = bad
 
-    reg_chunks = {}
-    for kind, chunk in ctx["assets"].items():
-        pid = int.from_bytes(toc.chunk_ids[chunk][:8], "little")
-        e = entry_of.get(pid, {})
-        reg_chunks[name_of[pid]] = dict(
-            data=base64.b64encode(
-                zlib.compress(toc.read(chunk), 9)).decode("ascii"),
-            exp=e.get("exp", 1), bun=e.get("bun", 1),
-            deps=[str(d) for d in
-                  conheader.imported_packages(hdr, info, e["order"])]
-            if e else [])
+    # The registration assets plus the toggle blueprints and material packs
+    # travel as verbatim bytes -- they are Dresscode-only machinery no loose
+    # pak may carry. So does any Optional-pak package whose name table
+    # mentions an overridden base package: the override collapses two names
+    # into one, and no inverse map can pull them apart again.
+    stored_pids = {int.from_bytes(toc.chunk_ids[c][:8], "little")
+                   for c in ctx["assets"].values()}
+    stored_pids |= ctx.get("blob_only", set())
+    for _rel, _stem, t in opt_layout:
+        overridden = {b.lower() for b in t["overrides"]}
+        for pid in t["keep"]:
+            z = zen.ZenPackage(toc.read(packages[pid]["chunk"]))
+            if any(n.lower() in overridden for n in z.names):
+                stored_pids.add(pid)
+    stored_chunks = {
+        name_of[pid]: base64.b64encode(
+            zlib.compress(toc.read(packages[pid]["chunk"]), 9)).decode("ascii")
+        for pid in stored_pids if pid in packages}
 
     # --- the original pak, entry by entry, decompressed ---
     pak_path = os.path.splitext(toc.path)[0] + ".pak"
@@ -680,13 +932,69 @@ def record_roundtrip(toc, uplugin, plugin, plans, ctx, mod_out, layout):
             objects_back[new_pkg.lower()] = {v: k for k, v in m.items()}
         variants[rel] = dict(renames_back=back, objects_back=objects_back)
 
+    # The Optional paks hold packages under their OVERRIDE names; the way
+    # back needs each one's true name again -- and the full inverse map,
+    # because kept materials also NAME dropped packages in their strings.
+    # A mesh-carrying optional used its base variant's renames wholesale,
+    # so its inverse is that variant's inverse.
+    rel_of_mesh = {}
+    for rel, (o, *_r) in layout:
+        pid = by_name.get(o["skeletal_mesh"].split(".")[0].lower())
+        if pid is not None:
+            rel_of_mesh[pid] = rel
+    # Keyed by folder so a person reading the record can tell what is what,
+    # but the pak's own name is what finds it again: folders get renamed and
+    # moved, generated file names do not.
+    optionals = {}
+    for opt_rel, stem, t in opt_layout:
+        if t["kind"] == "mesh":
+            v = variants[rel_of_mesh[t["mesh_pid"]]]
+            back = dict(v["renames_back"])
+            objects_back = {k: dict(m) for k, m in v["objects_back"].items()}
+            # Overridden paths hold the REPLACEMENT in this pak.
+            rel_v = rel_of_mesh[t["mesh_pid"]]
+            plan_renames = next(p[2] for r, p in layout if r == rel_v)
+            for base_pkg, repl_pkg in t["overrides"].items():
+                new = plan_renames.get(
+                    base_pkg.lower(),
+                    converted_name(base_pkg, plugin, t["costume_root"]))
+                back[new.lower()] = repl_pkg
+            for repl_low, m in t["objects"].items():
+                new_pkg = next((k for k, vv in back.items()
+                                if vv.lower() == repl_low), None)
+                if new_pkg:
+                    objects_back.setdefault(new_pkg, {}).update(
+                        {v2: k2 for k2, v2 in m.items()})
+            optionals[opt_rel] = dict(pak=stem, renames_back=back,
+                                      objects_back=objects_back)
+            continue
+        back = {converted_name(p["name"], plugin,
+                               t["costume_root"]).lower(): p["name"]
+                for p in packages.values()}
+        for base_pkg, repl_pkg in t["overrides"].items():
+            back[converted_name(base_pkg, plugin,
+                                t["costume_root"]).lower()] = repl_pkg
+        back = {k: v for k, v in back.items() if k != v.lower()}
+        objects_back = {}
+        for repl_low, m in t["objects"].items():
+            new_pkg = next((k for k, v in back.items()
+                            if v.lower() == repl_low), None)
+            if new_pkg:
+                objects_back[new_pkg] = {v: k for k, v in m.items()}
+        optionals[opt_rel] = dict(pak=stem, renames_back=back,
+                                  objects_back=objects_back)
+
+    # Snapshot what the template will SHOW (empty names fall back to the
+    # folder), or the untouched-template check can never match.
+    mod_name = md.get("friendly_name") or plugin
     visible = dict(
-        name=md.get("friendly_name") or plugin,
+        name=mod_name,
         author=md.get("created_by", ""),
         description=md.get("description", ""),
         category=md.get("category") or "Outfit",
         version=up.get("VersionName") or "1.0.0",
-        outfits={rel: [o["name"], o["description"]]
+        outfits={rel: [o["name"] or (mod_name if rel == "." else rel),
+                       o["description"]]
                  for rel, (o, *_r) in layout},
     )
 
@@ -698,16 +1006,18 @@ def record_roundtrip(toc, uplugin, plugin, plans, ctx, mod_out, layout):
         uplugin=base64.b64encode(uplugin_raw).decode("ascii"),
         icon_md5=icon_md5,
         id_order=[name_of.get(pid, "") for pid in ids],
-        entries={name_of[pid]: [e["lo"], e["pad"]]
+        entries={name_of[pid]: [e["lo"], e["pad"], e["exp"], e["bun"],
+                                e["deps"]]
                  for pid, e in entry_of.items() if pid in name_of},
         chunk_order=chunk_order,
         neg_arcs=neg_arcs,
-        reg_chunks=reg_chunks,
+        stored_chunks=stored_chunks,
         pak_mount=pak_mount,
         pak_seed=str(pak_seed),
         pak_files=[[p, base64.b64encode(zlib.compress(b, 9)).decode("ascii")]
                    for p, b in pak_files],
         variants=variants,
+        optionals=optionals,
         pngs=pngs,
         visible=visible,
     )
@@ -782,8 +1092,13 @@ def loose_to_dresscode(source, mods, assume_yes=False):
     # folder INSIDE keeps the exact plugin name Dresscode requires.
     out_root = os.path.join(os.path.dirname(source), f"{plugin} (Dresscode)")
     if exact:
+        # Extras are found by their pak's name, wherever the folder ended up.
+        by_pak = {os.path.splitext(os.path.basename(u))[0].lower(): u
+                  for u, _up in mods}
+        opt = {rel: by_pak.get(str(v.get("pak", "")).lower())
+               for rel, v in (rt.get("optionals") or {}).items()}
         root = mkdc.restore(rt, {o["folder"]: o["utoc"] for o in outfits},
-                            out_root)
+                            out_root, optionals=opt)
     else:
         root = mkdc.build(meta, outfits, plugin, out_root)
     written = os.path.join(root, "Content", "Paks", "WindowsNoEditor",
@@ -825,7 +1140,7 @@ def prepare_to_loose(toc, uplugin, out_base=None):
     folder, so its output belongs beside the archive instead.
     """
     plugin = os.path.splitext(os.path.basename(uplugin))[0]
-    plans, ctx = plan_variants(toc, plugin)
+    plans, toggles, ctx = plan_variants(toc, plugin)
 
     source_root = os.path.abspath(os.path.dirname(uplugin)).rstrip("\\/")
     mod_out = (os.path.join(out_base, os.path.basename(source_root) + " (loose pak)")
@@ -892,12 +1207,140 @@ def prepare_to_loose(toc, uplugin, out_base=None):
 
         runners.append(run)
 
+    # ---- optional paks, the pre-Dresscode modular style ------------------
+    packages = ctx["packages"]
+    by_low = {p["name"].lower(): pid for pid, p in packages.items()}
+    mesh_rel = {}                       # mesh pid -> variant folder label
+    for rel, (o, *_r) in layout:
+        pid = by_low.get(o["skeletal_mesh"].split(".")[0].lower())
+        if pid is not None:
+            mesh_rel[pid] = rel
+    opt_layout, taken = [], {}
+    for k, t in enumerate(toggles):
+        # An extra sits next to what it applies to: inside an outfit's own
+        # folder when it belongs to that outfit alone -- a mesh-carrying one
+        # always does -- and at the top when it fits any of them.
+        home = (mesh_rel.get(t["mesh_pid"], ".")
+                if len(t["bases"]) == 1 and len(layout) > 1 else ".")
+        label = folder_name(t["row"]["name"]) or \
+            folder_name(t["bp"].rsplit("/", 1)[-1].replace("_", " ")) or "extra"
+        here = taken.setdefault(home, set())
+        stem, dup = label, 1
+        while label.lower() in here:
+            dup += 1
+            label = f"{stem} {dup}"
+        here.add(label.lower())
+        parent = mod_out if home == "." else os.path.join(mod_out, home)
+        out_dir = os.path.join(parent, "Optional", label)
+        rel = "/".join(([] if home == "." else [home]) + ["Optional", label])
+        # A digit prefix sorts before the base pak's name, which is the
+        # load order the modular standard relies on for overrides to win.
+        opt_base = f"0{chr(65 + (k % 26))}_{plugin_id(label)}_P"
+        print(f"      + optional: {label}"
+              + (f"   (for {home})" if home != "." else "")
+              + f"   ({len(t['swaps'])} material "
+              f"swap{'s' if len(t['swaps']) != 1 else ''}"
+              + (", carries the outfit mesh" if t["kind"] == "mesh" else "")
+              + ")")
+
+        if t["kind"] == "mesh":
+            # Clean slots swap by PACKAGE OVERRIDE (proven in game); a
+            # shared slot repoints at a clean slot's EXISTING material
+            # import -- a 4-byte patch in the mesh's material table, which
+            # then picks up the same override. Renames are the BASE
+            # variant's own plus the overrides, so the mesh overrides the
+            # base's and everything else lines up.
+            plan = next((p for rel, p in layout
+                         if by_low.get(p[0]["skeletal_mesh"].split(".")[0]
+                                       .lower()) == t["mesh_pid"]), None)
+            if plan is None:
+                print(f"          skipped: {label}: no base outfit carries "
+                      "its mesh")
+                continue
+            _o, _target, renames, objects, _drop = plan
+            renames = dict(renames)
+            objects = {k2: dict(v) for k2, v in objects.items()}
+            for base_pkg, repl_pkg in t["overrides"].items():
+                renames[repl_pkg.lower()] = renames.get(
+                    base_pkg.lower(),
+                    converted_name(base_pkg, plugin, t["costume_root"]))
+            for k2, v in t["objects"].items():
+                objects.setdefault(k2, {}).update(v)
+
+            mesh_low = packages[t["mesh_pid"]]["name"].lower()
+            repoint = {}
+            for slot, anchor in t["repoint"].items():
+                new_pkg = renames.get(anchor[0].lower(), anchor[0])
+                repoint[slot] = cityhash.object_id(new_pkg, anchor[1])
+            post_edit = {mesh_low:
+                         (lambda d, r=repoint: matpack.repoint_slots(d, r))}
+            extra_deps = None
+        else:
+            # EVERY package gets its base-conversion name -- dropped ones
+            # too, so the kept materials' texture references and dependency
+            # records point where the base pak actually serves them.
+            # Override sources then land on the package they replace.
+            renames = {p["name"].lower():
+                       converted_name(p["name"], plugin, t["costume_root"])
+                       for p in packages.values()}
+            for base_pkg, repl_pkg in t["overrides"].items():
+                renames[repl_pkg.lower()] = converted_name(
+                    base_pkg, plugin, t["costume_root"])
+            objects = dict(t["objects"])
+            post_edit = None
+            extra_deps = None
+
+        keep_names = {packages[pid]["name"] for pid in t["keep"]}
+        drop = {p["name"] for p in packages.values()
+                if p["name"] not in keep_names}
+        new_names = list(renames[n.lower()] for n in keep_names)
+        common = os.path.commonprefix([n + "/" for n in new_names])
+        common = common[:common.rfind("/") + 1]
+        if not common.startswith("/Game/"):
+            print(f"          skipped: {label} touches paths outside /Game/")
+            continue
+
+        def opt_run(renames=renames, objects=objects, drop=drop,
+                    out_dir=out_dir, opt_base=opt_base, label=label,
+                    common=common, post_edit=post_edit,
+                    extra_deps=extra_deps):
+            written = rename.rename_container(
+                toc, renames, mount_of_common(common), lambda n,
+                c=common: n[len(c):], out_dir, opt_base,
+                container_name=opt_base, object_renames=objects,
+                drop=drop, fix_arcs=True, quiet=True, cross_pak=True,
+                post_edit=post_edit, extra_deps=extra_deps)
+            with open(os.path.join(out_dir, opt_base + ".pak"), "wb") as f:
+                f.write(pakfile.build(pakfile.LOOSE_MOUNT))
+            problems = rename.verify(written)
+            if problems:
+                print(f"  PROBLEM -- optional {label} is not sound:")
+                for p in problems[:6]:
+                    print(f"    {p}")
+                return 1
+            mb = os.path.getsize(os.path.splitext(written)[0] + ".ucas") \
+                / (1024 * 1024)
+            print(f"    optional   {label}   ({mb:,.2f} MB, verified)")
+            return 0
+
+        runners.append(opt_run)
+        opt_layout.append((rel, opt_base, t))
+
+    if len(plans) > 1 or opt_layout:
+        print("      install: one outfit folder's three files go in ~mods; "
+              "extras from its Optional folder go in alongside")
+
     def record():
         return record_roundtrip(toc, uplugin, plugin, plans, ctx, mod_out,
-                                layout)
+                                layout, opt_layout)
 
     runners.append(record)
     return runners
+
+
+def mount_of_common(common):
+    """The container mount for a common /Game/ folder prefix."""
+    return "../../../End/Content/" + common[len("/Game/"):]
 
 
 # Set once a prompt has handled the final keypress, so the end-of-run pause
@@ -1013,7 +1456,8 @@ def main(argv):
         for run in runners:
             code = max(code, run())
         print()
-        print("  Done. Copy each mod's three files into End\\Content\\Paks\\~mods.")
+        print("  Done. Copy the three files from the folder you want into "
+              "End\\Content\\Paks\\~mods.")
         return code
     finally:
         for toc in tocs:                # open handles block temp deletion

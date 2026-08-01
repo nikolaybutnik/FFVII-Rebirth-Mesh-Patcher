@@ -173,17 +173,25 @@ def arc_positions(data):
     Ordinals over this list identify an arc independent of the name table's
     size, which is what lets the round trip put back the -1 arcs the loose
     conversion had to flatten (the ~mods loader rejects them; a plugin
-    container carries them fine)."""
+    container carries them fine). Bounded EXACTLY like pkgedit's fix-arcs
+    walk, so ordinal K here is the arc that walk would have touched."""
     z = ZenPackage(data)
+    end = z.graph_off + z.graph_size
     out = []
+    if z.graph_size < 4:
+        return out
     o = z.graph_off
     count = struct.unpack_from("<I", data, o)[0]
     o += 4
     for _ in range(count):
+        if o + 12 > end:
+            break
         o += 8
         narcs = struct.unpack_from("<I", data, o)[0]
         o += 4
         for _ in range(narcs):
+            if o + 8 > end:
+                break
             out.append(o)
             o += 8
     return out
@@ -204,29 +212,53 @@ def original_blocks(toc, index):
     return out
 
 
-def restore(rt, parts, out_root, say=print):
+def restore(rt, parts, out_root, optionals=None, say=print):
     """
     Rebuild the ORIGINAL Dresscode mod these loose paks came from, from the
     record their dresscode.json carries. Every package returns to its
-    original name and bytes, the registration assets and registry drop in
-    verbatim, and the container keeps the original chunk order, load order
-    and header shape. Only recompressed streams can differ from the original
+    original name and bytes, the registration assets, toggle blueprints and
+    material packs drop in verbatim, Optional paks give their overrides
+    back, and the container keeps the original chunk order, load order and
+    header shape. Only recompressed streams can differ from the original
     files -- same content, same checksums, different Oodle output.
 
-    `parts`: {outfit folder ("." for the root): its .utoc path}.
+    `parts`: {outfit folder ("." for the root): its .utoc path};
+    `optionals`: {folder: .utoc path} for the extras in the Optional folders.
     """
     plugin = rt["plugin"]
     cid = int(rt["cid"])
     mount = rt["mount"]
+    ent = rt.get("entries", {})
 
-    merged = {}         # original pid -> record
-    tocs = []
-    template_toc = None
+    def recorded(name):
+        """(exp, bun, deps) from the record, or None on a legacy record."""
+        e = ent.get(name)
+        if e and len(e) >= 5:
+            return e[2], e[3], [int(d) for d in e[4]]
+        return None
+
+    sources = []
     for rel, vinfo in rt["variants"].items():
         utoc = parts.get(rel)
         if not utoc:
             raise RuntimeError(f"an outfit folder is missing: {rel!r} -- "
                                "delete dresscode.json to rebuild fresh")
+        sources.append((rel, vinfo, utoc, False))
+    for rel, vinfo in (rt.get("optionals") or {}).items():
+        utoc = (optionals or {}).get(rel)
+        if not utoc:
+            raise RuntimeError(
+                f"an extra's paks are missing: {rel!r} -- "
+                "delete dresscode.json to rebuild fresh (without toggles)")
+        sources.append((rel, vinfo, utoc, True))
+
+    merged = {}         # original pid -> record
+    tocs = []
+    template_toc = None
+    # Optional paks name objects their base pak serves; the variants know
+    # what those are called on the way back, the optionals do not.
+    extra_imports = {}
+    for rel, vinfo, utoc, is_optional in sources:
         toc = iostore.Toc(utoc)
         tocs.append(toc)
         if template_toc is None:
@@ -234,8 +266,17 @@ def restore(rt, parts, out_root, say=print):
         packages = rename.read_packages(toc)
         renames = {k: v for k, v in vinfo["renames_back"].items()}
         objects = {k: dict(v) for k, v in vinfo["objects_back"].items()}
-        new_data, _new_ids = rename.rewrite_chunks(toc, packages, renames,
-                                                   object_renames=objects)
+        new_data, _new_ids = rename.rewrite_chunks(
+            toc, packages, renames, object_renames=objects,
+            extra_imports=extra_imports if is_optional else None)
+        if not is_optional:
+            for pid, p in packages.items():
+                old = p["name"]
+                new = renames.get(old.lower())
+                if new and new != old:
+                    for path in p["exports"]:
+                        extra_imports[cityhash.object_id(old, path)] = \
+                            cityhash.object_id(new, path)
         pid_map = {pid: cityhash.package_id(renames[p["name"].lower()])
                    for pid, p in packages.items()
                    if p["name"].lower() in renames}
@@ -298,23 +339,40 @@ def restore(rt, parts, out_root, say=print):
                 payload, changed = bytes(buf), True
             have = merged.get(new_pid)
             if have is not None:
+                # Optional paks carry derived copies; the variants (and the
+                # stored bytes, which land last and always win) are the
+                # authority.
+                if is_optional:
+                    continue
                 if have["payload"] != payload:
                     raise RuntimeError(
                         f"outfits disagree about {name} -- the folders were "
                         "not converted from the same mod")
                 continue
-            exp, bun, pdeps = entry_meta.get(pid, (1, 1, []))
+            # The ORIGINAL header entry when the record has it; harvesting
+            # from the loose header is only for older records, and loses
+            # dependencies on dropped packages.
+            rec = recorded(name)
+            exp, bun, pdeps = rec if rec else entry_meta.get(pid, (1, 1, []))
             merged[new_pid] = dict(
                 name=name, payload=payload,
                 src=None if changed else (toc, i),
                 deps=pdeps, exp=exp, bun=bun, bulks=bulks.get(new_pid, []))
 
-    for name, rec in rt["reg_chunks"].items():
-        data = zlib.decompress(base64.b64decode(rec["data"]))
+    stored = rt.get("stored_chunks")
+    legacy = rt.get("reg_chunks", {})
+    if stored is None:
+        stored = {k: v["data"] for k, v in legacy.items()}
+    for name, blob in stored.items():
+        data = zlib.decompress(base64.b64decode(blob))
+        rec = recorded(name)
+        if rec is None and name in legacy:
+            rec = (legacy[name]["exp"], legacy[name]["bun"],
+                   [int(d) for d in legacy[name]["deps"]])
+        exp, bun, pdeps = rec if rec else (1, 1, [])
         merged[cityhash.package_id(name)] = dict(
             name=name, payload=data, src=None,
-            deps=[int(d) for d in rec["deps"]],
-            exp=rec["exp"], bun=rec["bun"], bulks=[])
+            deps=pdeps, exp=exp, bun=bun, bulks=[])
 
     # ---- header chunk in the original's exact shape ----
     id_order = rt["id_order"]
@@ -327,7 +385,6 @@ def restore(rt, parts, out_root, say=print):
             "paks: " + ", ".join(missing[:4])
             + " -- delete dresscode.json to rebuild fresh")
 
-    entries = rt["entries"]
     hdr_out = struct.pack("<QIIIIQ", cid, len(id_order), 0, 0, 8, 0xC1640000)
     hdr_out += struct.pack("<I", len(id_order))
     hdr_out += b"".join(cityhash.package_id(n).to_bytes(8, "little")
@@ -335,9 +392,9 @@ def restore(rt, parts, out_root, say=print):
     store = bytearray()
     for j, n in enumerate(id_order):
         rec = merged[cityhash.package_id(n)]
-        lo, pad = entries.get(n, [j, -1])
+        e = ent.get(n) or [j, -1]
         store += struct.pack("<QiiiI", len(rec["payload"]), rec["exp"],
-                             rec["bun"], lo, pad & 0xFFFFFFFF)
+                             rec["bun"], e[0], e[1] & 0xFFFFFFFF)
         store += struct.pack("<II", 0, 0)
     for j, n in enumerate(id_order):
         rec = merged[cityhash.package_id(n)]

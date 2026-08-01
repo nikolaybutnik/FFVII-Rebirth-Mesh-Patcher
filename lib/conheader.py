@@ -146,7 +146,8 @@ def remap(data, pkgid_map, sizes=None):
     return bytes(out)
 
 
-def rebuild(data, keep, pkgid_map=None, sizes=None):
+def rebuild(data, keep, pkgid_map=None, sizes=None, keep_deps=False,
+            extra_deps=None):
     """
     Emit a header listing only the packages in `keep` (a set of OLD package IDs),
     with IDs remapped through `pkgid_map` and lengths taken from `sizes`.
@@ -155,6 +156,16 @@ def rebuild(data, keep, pkgid_map=None, sizes=None):
     header too, and stop being named in any other package's imported-package
     list -- a dependency on a package that is no longer there is exactly the
     kind of dangling reference the loader follows straight into a null.
+
+    `keep_deps` is for OVERLAY containers that always ride beside a pak
+    serving the dropped packages: dependency entries stay (remapped through
+    `pkgid_map` to where that pak serves them) even though the package
+    itself leaves this container.
+
+    `extra_deps` ({old package ID -> [NEW dependency IDs]}) appends to a
+    package's list. A rewritten package that gained an import needs its new
+    target listed here too -- the loader preloads imports from THIS list,
+    and one it never heard of simply fails to resolve: grey checkers.
 
     Returns None if this header is not a shape we can rebuild.
     """
@@ -186,9 +197,13 @@ def rebuild(data, keep, pkgid_map=None, sizes=None):
             struct.pack_into("<Q", entry, 0, (old & ~SIZE_MASK) | sizes[pid])
         kept.append(pkgid_map.get(pid, pid))
         entries.append(entry)
-        imports.append([pkgid_map.get(p, p)
-                        for p in imported_packages(data, info, i)
-                        if p not in removed])
+        deps = [pkgid_map.get(p, p)
+                for p in imported_packages(data, info, i)
+                if keep_deps or p not in removed]
+        for extra in (extra_deps or {}).get(pid, ()):
+            if extra not in deps:
+                deps.append(extra)
+        imports.append(deps)
 
     # Entries first, then every imported-package array, each addressed from its
     # own view field rather than from the start of the blob.

@@ -88,12 +88,17 @@ def to_bgra(width, height, pixel_format, mip):
 
 
 def extract(data):
-    """(width, height, BGRA) straight from a texture package, or None."""
-    tex = read_texture(data)
-    if not tex:
+    """(width, height, BGRA) straight from a texture package, or None --
+    including for texture layouts this parser does not know. Extraction is
+    a courtesy; a picture that cannot be read is simply not written."""
+    try:
+        tex = read_texture(data)
+        if not tex:
+            return None
+        bgra = to_bgra(tex["width"], tex["height"], tex["pixel_format"],
+                       tex["mip"])
+    except Exception:
         return None
-    bgra = to_bgra(tex["width"], tex["height"], tex["pixel_format"],
-                   tex["mip"])
     if bgra is None:
         return None
     return tex["width"], tex["height"], bgra

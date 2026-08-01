@@ -120,12 +120,30 @@ def read_entries(data, decompressor=None):
     p += 4
     encoded, offsets = data[p:p + esize], []
     o = 0
-    while o < len(encoded):
+    while o + 4 <= len(encoded):
+        # FPakFile::DecodePakEntry. Bits 31/30/29 say whether offset,
+        # uncompressed size and size fit in 32 bits; 23-28 the compression
+        # method; 22 encryption; 6-21 the block count. Entries with more
+        # than one block append their block sizes.
+        enc_off = o
         value = struct.unpack_from("<I", encoded, o)[0]
+        o += 4
+        if value >> 31 & 1:
+            data_off = struct.unpack_from("<I", encoded, o)[0]
+            o += 4
+        else:
+            data_off = struct.unpack_from("<Q", encoded, o)[0]
+            o += 8
+        o += 4 if value >> 30 & 1 else 8            # uncompressed size
+        method = (value >> 23) & 0x3F
+        if method:
+            o += 4 if value >> 29 & 1 else 8        # compressed size
+        count = (value >> 6) & 0xFFFF
+        if method and count and (count > 1 or value >> 22 & 1):
+            o += 4 * count
         # Keyed by the entry's offset WITHIN the encoded array -- that, not
         # the data offset, is what the directory index points at.
-        offsets.append((o, struct.unpack_from("<I", encoded, o + 4)[0]))
-        o += 12 + (4 if (value >> 23) & 0x3F else 0)
+        offsets.append((enc_off, data_off))
 
     # Paths come from the full directory index, keyed by entry offset.
     fd_off = struct.unpack_from("<q", data,
