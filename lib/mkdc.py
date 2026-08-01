@@ -25,6 +25,7 @@ import base64
 import hashlib
 import json
 import os
+import re
 import struct
 import zlib
 
@@ -163,15 +164,23 @@ SETTINGS_INI = (b"[StageSettings]\r\n"
 SKELETAL_MESH = cityhash.object_id("/Script/Engine", "SkeletalMesh", 1)
 
 
+# Any costume slot of a playable character: PC0003_07_Aerith_CostaClothing/
+# Model/PC0003_07 as much as the _00 standard -- authors cook the same
+# outfit over several slots, and which slot it came from stops mattering
+# the moment it becomes a Dresscode costume.
+_STOCK_SLOT = re.compile(
+    r"^/game/character/player/(pc\d{4})_(\d{2})[^/]*/model/\1_\2$")
+
+
 def find_stock_mesh(packages):
     """(package name, player key) of the stock costume mesh this loose pak
-    overrides -- the package sitting on a known character's default slot."""
+    overrides -- the package sitting on any known character's costume slot."""
+    prefixes = {prefix.lower(): key
+                for key, (prefix, _folder) in moddata.PLAYER_TYPES.items()}
     for info in packages.values():
-        low = info["name"].lower()
-        for key, (prefix, folder) in moddata.PLAYER_TYPES.items():
-            stock = f"/game/character/player/{folder.lower()}/model/{prefix.lower()}_00"
-            if low == stock:
-                return info["name"], key
+        m = _STOCK_SLOT.match(info["name"].lower())
+        if m and m.group(1) in prefixes:
+            return info["name"], prefixes[m.group(1)]
     return None, None
 
 
@@ -567,13 +576,21 @@ def restore(rt, parts, out_root, optionals=None, say=print):
     return root
 
 
-def build(meta, outfits, plugin, out_root, say=print, extras=()):
+def build(meta, outfits, plugin, out_root, say=print, extras=(),
+          external=()):
     """
     Write the plugin folder. `meta` and `outfits` come from the dresscode.json
     template (read_template's output shapes); each outfit carries its utoc.
 
     `extras` is [(label, utoc)] for the old modular standard's optional paks:
     each becomes a toggle row per outfit it can act on.
+
+    `external` is lowercase package names to leave at their original /Game/
+    paths and NOT ship: the stackable-masks design serves them from ~mods
+    paks instead, so the old standard's drop-in override workflow keeps
+    working while the outfit itself rides Dresscode. The plugin's materials
+    import them across the container boundary (arcs -1, like any stock
+    import).
 
     Returns the plugin folder path.
     """
@@ -605,7 +622,8 @@ def build(meta, outfits, plugin, out_root, say=print, extras=()):
         renames = {mesh_name.lower(): mesh_new}
         for pkg in packages.values():
             low = pkg["name"].lower()
-            if low in renames or low.startswith(f"/{plugin.lower()}/"):
+            if low in renames or low in external \
+                    or low.startswith(f"/{plugin.lower()}/"):
                 continue
             tail = pkg["name"][6:] if low.startswith("/game/") \
                 else pkg["name"].lstrip("/")
@@ -638,6 +656,8 @@ def build(meta, outfits, plugin, out_root, say=print, extras=()):
                         (cid12, new_data.get(i) or toc.read(i)))
 
         for pid, pkg in packages.items():
+            if pkg["name"].lower() in external:
+                continue                # a ~mods pak serves it, not us
             i = pkg["chunk"]
             new_pid = pid_map.get(pid, pid)
             data = new_data.get(i) or toc.read(i)
@@ -661,16 +681,30 @@ def build(meta, outfits, plugin, out_root, say=print, extras=()):
                             mesh_package=mesh_new, mesh_object=obj,
                             safe=safe, player=player, outfit=outfit))
 
-    # ---- toggles from the modular standard's optional paks ---------------
+    # ---- variants from the modular standard's optional paks --------------
+    # An entry is (label, [utoc, ...]): one pak is a plain toggle, several
+    # are a user-composed combination applied as one row.
     entries_toggles = []
-    for label, utoc in extras:
-        extra_toc = iostore.Toc(utoc)
-        tocs.append(extra_toc)
-        extra_packages = rename.read_packages(extra_toc)
+    opened = {}
+    for label, utocs in extras:
+        parts, parts_index = [], {}
+        for utoc in utocs:
+            key = os.path.normcase(os.path.abspath(utoc))
+            if key not in opened:
+                etoc = iostore.Toc(utoc)
+                tocs.append(etoc)
+                epkgs = rename.read_packages(etoc)
+                # Indexing decompresses the whole pak (a recolor can be a
+                # 100 MB texture); once per pak, not once per outfit.
+                opened[key] = (etoc, epkgs,
+                               toggles.export_index(etoc, epkgs))
+            etoc, epkgs, eindex = opened[key]
+            parts.append((etoc, epkgs))
+            parts_index.update(eindex)
         for w in wearers:
             slots, _overridden = toggles.plan(
-                w["toc"], w["packages"], w["mesh_chunk"], extra_toc,
-                extra_packages, refs=w.setdefault(
+                w["toc"], w["packages"], w["mesh_chunk"], parts,
+                refs=w.setdefault(
                     "refs", toggles.references(w["toc"], w["packages"])))
             if not slots:
                 say(f"      note: {label} changes nothing on "
@@ -678,11 +712,12 @@ def build(meta, outfits, plugin, out_root, say=print, extras=()):
                 continue
             safe = safe_id(f"{label}", used_names, f"Extra{len(used_names)}")
             made, actor = toggles.emit(
-                w["toc"], w["packages"], extra_toc, extra_packages, slots,
+                w["toc"], w["packages"], parts, slots,
                 w["renames"], plugin, w["safe"], safe, w["mesh_package"],
                 w["mesh_object"],
                 index=w.setdefault("exports", toggles.export_index(
-                    w["toc"], w["packages"])))
+                    w["toc"], w["packages"])),
+                parts_index=parts_index)
             for item in made:
                 pid = cityhash.package_id(item["name"])
                 if pid in merged:

@@ -633,13 +633,16 @@ def find_image(folder, preferred):
     return os.path.join(folder, pics[0]) if pics else None
 
 
-def write_template(source, mod_name, parts, prefill=None, restore=None):
+def write_template(source, mod_name, parts, prefill=None, restore=None,
+                   extras=()):
     """Prefill dresscode.json with the little a build needs. Pictures are on
     purpose NOT in here -- they are picked up by where they sit.
 
     `prefill` carries real values when the loose mod was itself converted
     from a Dresscode mod; `restore` is that conversion's opaque record of the
-    original, which makes converting back exact."""
+    original, which makes converting back exact. `extras` is [(label, pak
+    stem)] for the mod's optional paks: each starts as one variant, and the
+    person can compose their own from several."""
     prefill = prefill or {}
     pre_outfits = prefill.get("outfits", {})
     outfits = [{"folder": rel,
@@ -661,6 +664,13 @@ def write_template(source, mod_name, parts, prefill=None, restore=None):
             "Several outfits build several Dresscode mods, one per outfit",
             "(named \"mod - outfit\"), each with its own toggles.",
             "",
+            "\"stackable\": true builds the COMBINABLE form instead. The",
+            "extras do not become menu toggles; the mod's shared masks stay",
+            "at their original paths, served from ~mods -- so the original",
+            "Optional paks keep working and can be combined freely, while",
+            "the outfit itself is picked in Dresscode. The build writes a",
+            "\"Put in ~mods\" folder with everything that goes there.",
+            "",
             "Pictures (optional). Two different pictures exist:",
             "  the THUMBNAIL, one per mod, shown in Dresscode's mod list",
             "     -> put a picture next to this file",
@@ -677,8 +687,20 @@ def write_template(source, mod_name, parts, prefill=None, restore=None):
         "description": prefill.get("description", ""),
         "category": prefill.get("category") or "Outfit",
         "version": prefill.get("version") or "1.0.0",
+        "stackable": False,
         "outfits": outfits,
     }
+    if extras:
+        template["_how_this_works"] += [
+            "",
+            "\"variants\" is the menu below each outfit. One entry = one",
+            "menu item; its \"parts\" list the extra paks it applies, BY",
+            "FILE NAME. Compose your own by listing several parts in one",
+            "entry -- when two parts change the same thing, the later one",
+            "wins. Rename, reorder, or delete entries freely.",
+        ]
+        template["variants"] = [{"name": label, "parts": [stem]}
+                                for label, stem in extras]
     if restore:
         template["_how_this_works"] += [
             "",
@@ -741,6 +763,8 @@ def read_template(source, parts):
         version=str(data.get("version", "")) or "1.0.0",
         icon=find_image(source, "icon"),
         restore=data.get("restore"),
+        stackable=bool(data.get("stackable")),
+        variants=data.get("variants"),
     )
     return meta, outfits
 
@@ -1076,10 +1100,125 @@ def record_roundtrip(toc, uplugin, plugin, plans, ctx, mod_out, layout,
                                 version=visible["version"],
                                 outfits={rel: tuple(v) for rel, v in
                                          visible["outfits"].items()}),
-                   restore=pack_restore(record))
+                   restore=pack_restore(record),
+                   extras=[(rel.split("/")[-1], str(v.get("pak", "")))
+                           for rel, v in optionals.items()])
     print("    recorded  dresscode.json + pictures -- converting the folder "
           "back restores this mod exactly")
     return 0
+
+
+def stack_tree(outfits, extras):
+    """
+    The shared override tree a stackable build leaves at /Game/ paths: every
+    package an extra pak overrides, closed over what those packages import
+    from the mod itself (an extra served from ~mods keeps its original
+    imports, so whatever it names must stay at /Game/ too). Lowercase names.
+    """
+    ext, frontier = set(), []
+    for utoc in extras:
+        toc = iostore.Toc(utoc)
+        for p in rename.read_packages(toc).values():
+            ext.add(p["name"].lower())
+            frontier += [n.lower() for n in
+                         zen.ZenPackage(toc.read(p["chunk"])).names
+                         if n.startswith("/")]
+        toc.close()
+    tocs, base = [], {}
+    for o in outfits:
+        toc = iostore.Toc(o["utoc"])
+        tocs.append(toc)
+        for p in rename.read_packages(toc).values():
+            base.setdefault(p["name"].lower(), (toc, p))
+    for n in sorted(ext):               # the base copies' imports count too
+        if n in base:
+            toc, p = base[n]
+            frontier += [m.lower() for m in
+                         zen.ZenPackage(toc.read(p["chunk"])).names
+                         if m.startswith("/")]
+    while frontier:
+        n = frontier.pop()
+        if n in ext or n not in base:   # not ours -> a stock import, fine
+            continue
+        ext.add(n)
+        toc, p = base[n]
+        frontier += [m.lower() for m in
+                     zen.ZenPackage(toc.read(p["chunk"])).names
+                     if m.startswith("/")]
+    for toc in tocs:
+        toc.close()
+    return ext
+
+
+def write_masks_pak(outfit_utoc, ext, out_dir, base_name):
+    """The ~mods pak serving a stackable build's override tree: the base
+    pak's copies of `ext`, names untouched. Mounted at the content root --
+    the tree may reach outside Character/Player (a mod overriding a common
+    skin detail does). Returns the .utoc path."""
+    def content_path(package_name):
+        if not package_name.lower().startswith("/game/"):
+            raise RuntimeError(
+                f"cannot place {package_name} in a loose pak")
+        return package_name[len("/Game/"):]
+
+    toc = iostore.Toc(outfit_utoc)
+    packages = rename.read_packages(toc)
+    drop = [p["name"] for p in packages.values()
+            if p["name"].lower() not in ext]
+    os.makedirs(out_dir, exist_ok=True)
+    written = rename.rename_container(
+        toc, {}, "../../../End/Content/", content_path, out_dir, base_name,
+        container_name=base_name, drop=drop, fix_arcs=True, cross_pak=True,
+        quiet=True)
+    with open(os.path.join(out_dir, base_name + ".pak"), "wb") as f:
+        f.write(pakfile.build(pakfile.LOOSE_MOUNT))
+    toc.close()
+    return written
+
+
+def resolve_variants(meta, extras):
+    """
+    [(row name, [utoc, ...])] from the template's "variants" section --
+    or one row per extra when the section is absent. Also says whether the
+    person edited the section away from the generated default, which must
+    override an exact-restore record: an edit means they WANT the change.
+    """
+    def stem(u):
+        return os.path.splitext(os.path.basename(u))[0]
+
+    by_stem = {stem(u).lower(): u for u in extras}
+    cfg = meta.get("variants")
+    default = [(toggles.label_of(u), [u]) for u in extras]
+    if cfg is None:
+        return default, False
+    if not isinstance(cfg, list):
+        raise RuntimeError(f'{TEMPLATE}: "variants" must be a list')
+    out = []
+    for k, entry in enumerate(cfg):
+        if not isinstance(entry, dict):
+            raise RuntimeError(f'{TEMPLATE}: variant {k + 1} must be an '
+                               'object with "name" and "parts"')
+        utocs = []
+        for s in entry.get("parts") or []:
+            key = os.path.splitext(str(s))[0].lower()
+            u = by_stem.get(key)
+            if not u:
+                raise RuntimeError(
+                    f'{TEMPLATE}: variant {k + 1} names a pak that is not '
+                    f'there: "{s}". The paks are: '
+                    + ", ".join(sorted(by_stem)) + ".")
+            utocs.append(u)
+        if not utocs:
+            continue                    # an empty entry is just skipped
+        name = str(entry.get("name") or "").strip() \
+            or " + ".join(toggles.label_of(u) for u in utocs)
+        out.append((name, utocs))
+    # Structural comparison only -- the default's display names differ by
+    # which conversion wrote the template, and a restore reproduces the
+    # original's names anyway. Composition or order changed = they mean it.
+    edited = [[u.lower() for u in us] for _n, us in out] != \
+             [[u.lower() for u in us] for _n, us in default]
+    return out, edited
 
 
 def loose_to_dresscode(source, mods, assume_yes=False):
@@ -1093,7 +1232,11 @@ def loose_to_dresscode(source, mods, assume_yes=False):
     mod_name, parts, extras = layout
 
     if not os.path.exists(os.path.join(source, TEMPLATE)):
-        path = write_template(source, mod_name, parts)
+        path = write_template(
+            source, mod_name, parts,
+            extras=[(toggles.label_of(u),
+                     os.path.splitext(os.path.basename(u))[0])
+                    for u in extras])
         print()
         print(f"  {mod_name}  (loose pak -> Dresscode)")
         print(f"      created  {os.path.basename(path)}"
@@ -1104,8 +1247,10 @@ def loose_to_dresscode(source, mods, assume_yes=False):
         return 0
 
     meta, outfits = read_template(source, parts)
+    variants, variants_edited = resolve_variants(meta, extras)
     rt = unpack_restore(meta.get("restore"))
-    exact = rt is not None and restore_matches(rt, meta, outfits)
+    exact = rt is not None and restore_matches(rt, meta, outfits) \
+        and not variants_edited
     plugin = rt["plugin"] if exact else plugin_id(meta["name"])
     # Several outfits, each with its own toggles, in one mod make a menu
     # where nothing says which toggle belongs to which outfit -- so each
@@ -1136,9 +1281,19 @@ def loose_to_dresscode(source, mods, assume_yes=False):
         pic = (os.path.basename(o["preview"]) if o["preview"]
                else "no picture (optional)")
         print(f"      {k + 1}. {o['name']}   [{pic}]")
+    stackable = meta["stackable"] and bool(extras) and not exact
     if extras and not exact:
-        print(f"      + {len(extras)} extra pak"
-              f"{'s' if len(extras) != 1 else ''} to turn into toggles")
+        if stackable:
+            print(f"      + {len(extras)} extra paks stay COMBINABLE: the "
+                  "shared masks ride in ~mods")
+            print("        and the original Optional paks keep working on "
+                  "top of the Dresscode outfit")
+        else:
+            combos = sum(1 for _n, us in variants if len(us) > 1)
+            print(f"      + {len(variants)} variant"
+                  f"{'s' if len(variants) != 1 else ''} from "
+                  f"{len(extras)} extra pak{'s' if len(extras) != 1 else ''}"
+                  + (f" ({combos} composed)" if combos else ""))
     print()
     if not confirm(assume_yes, len(outfits)):
         print("  Nothing converted.")
@@ -1157,17 +1312,43 @@ def loose_to_dresscode(source, mods, assume_yes=False):
         roots = [mkdc.restore(rt, {o["folder"]: o["utoc"] for o in outfits},
                               out_root, optionals=opt)]
     else:
-        ex = [(toggles.label_of(u), u) for u in extras]
+        ex = [] if stackable else variants
+        ext = stack_tree(outfits, extras) if stackable else ()
         used, roots = set(), []
         for o in (outfits if split else [None]):
             if split:
                 sub_name = f"{meta['name']} - {o['name']}"
                 sub = safe_plugin_id(sub_name, used)
                 roots.append(mkdc.build(dict(meta, name=sub_name), [o],
-                                        sub, out_root, extras=ex))
+                                        sub, out_root, extras=ex,
+                                        external=ext))
             else:
                 roots.append(mkdc.build(meta, outfits, plugin, out_root,
-                                        extras=ex))
+                                        extras=ex, external=ext))
+    mods_dir = None
+    if stackable:
+        # One masks pak serves every outfit -- they share the tree. The
+        # extras ride along untouched, so the folder is a complete kit.
+        mods_dir = os.path.join(out_root, "Put in ~mods")
+        masks_base = f"Z8_{plugin}_MASKS_P"
+        written = write_masks_pak(outfits[0]["utoc"], ext, mods_dir,
+                                  masks_base)
+        problems = rename.verify(written)
+        if problems:
+            print()
+            print("  PROBLEM -- the masks pak is not sound, do not "
+                  "install it:")
+            for p in problems[:8]:
+                print(f"    {p}")
+            return 1
+        print(f"    written  {masks_base}  "
+              f"({len(ext)} shared packages, verified)")
+        for utoc in extras:
+            stem = os.path.splitext(utoc)[0]
+            for suffix in (".utoc", ".ucas", ".pak"):
+                if os.path.exists(stem + suffix):
+                    shutil.copy2(stem + suffix, mods_dir)
+        print(f"    copied   {len(extras)} original Optional paks beside it")
     for root in roots:
         name = os.path.basename(root)
         written = os.path.join(root, "Content", "Paks", "WindowsNoEditor",
@@ -1191,6 +1372,11 @@ def loose_to_dresscode(source, mods, assume_yes=False):
     else:
         print(f"  Done. Copy the \"{os.path.basename(roots[0])}\" folder "
               f"from inside \"{os.path.basename(out_root)}\" into End\\Mods.")
+    if mods_dir:
+        print(f"  Then copy the FILES from \"{os.path.basename(mods_dir)}\" "
+              "into Content\\Paks\\~mods --")
+        print("  the masks pak always, plus whichever Optional paks you "
+              "want active. They combine freely.")
     return 0
 
 

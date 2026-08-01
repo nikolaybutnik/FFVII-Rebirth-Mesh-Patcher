@@ -99,6 +99,14 @@ def oodle_decompress(src, out_size):
     # these are the values Unreal itself passes.
     n = _oodle.OodleLZ_Decompress(src, len(src), out, out_size,
                                   1, 1, 0, None, 0, None, None, None, 0, 3)
+    if n <= 0 and len(src) == out_size + 2:
+        # A dialect seen in the wild (community-cooked Optional paks): a tiny
+        # chunk stored as two prefix bytes plus PLAINTEXT, its block still
+        # marked compressed. No oo2core build accepts it, under any flags,
+        # while every other block of the same containers decodes normally --
+        # and the recovered bytes are a well-formed container header, field
+        # for field. The game shrugs these off, so we read them the same way.
+        return src[2:]
     if n <= 0:
         # Oodle refused the data outright. The usual cause is a DLL too old to
         # decode this game's compression -- oo2core_5 and older do not work with
