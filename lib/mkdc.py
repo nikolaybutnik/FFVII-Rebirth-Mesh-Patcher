@@ -435,6 +435,7 @@ def restore(rt, parts, out_root, optionals=None, say=print):
     legacy = rt.get("reg_chunks", {})
     if stored is None:
         stored = {k: v["data"] for k, v in legacy.items()}
+    stored_bulks = rt.get("stored_bulks") or {}
     for name, blob in stored.items():
         data = zlib.decompress(base64.b64decode(blob))
         rec = recorded(name)
@@ -442,9 +443,14 @@ def restore(rt, parts, out_root, optionals=None, say=print):
             rec = (legacy[name]["exp"], legacy[name]["bun"],
                    [int(d) for d in legacy[name]["deps"]])
         exp, bun, pdeps = rec if rec else (1, 1, [])
+        # A stored bulk rides as (cid12, type, None, payload) -- no source
+        # container to reread it from.
+        bulks = [(bytes.fromhex(cid_hex), bytes.fromhex(cid_hex)[11], None,
+                  zlib.decompress(base64.b64decode(b)))
+                 for cid_hex, b in stored_bulks.get(name, [])]
         merged[cityhash.package_id(name)] = dict(
             name=name, payload=data, src=None,
-            deps=pdeps, exp=exp, bun=bun, bulks=[])
+            deps=pdeps, exp=exp, bun=bun, bulks=bulks)
 
     # ---- header chunk in the original's exact shape ----
     id_order = rt["id_order"]
@@ -491,7 +497,11 @@ def restore(rt, parts, out_root, optionals=None, say=print):
     chunks, payloads, paths = [], [], []
     pending_bulks = {pid: list(rec["bulks"]) for pid, rec in merged.items()}
     prefix = f"/{plugin}/"
-    for name, t in rt["chunk_order"]:
+    dir_paths = rt.get("dir_paths") or []
+    for k_ord, (name, t) in enumerate(rt["chunk_order"]):
+        # The recorded index path keeps the cooker's file-name casing,
+        # which a package's own name table may not share.
+        path_rec = dir_paths[k_ord] if k_ord < len(dir_paths) else ""
         if t == 10:
             chunks.append(dict(id=cid.to_bytes(8, "little") + b"\0\0\0\x0a",
                                blocks=fresh_blocks(hdr_out),
@@ -509,7 +519,7 @@ def restore(rt, parts, out_root, optionals=None, say=print):
             chunks.append(dict(id=pid.to_bytes(8, "little") + b"\0\0\0\x02",
                                blocks=blocks, size=len(rec["payload"])))
             payloads.append(rec["payload"])
-            paths.append((rel + ".uasset", len(chunks) - 1))
+            paths.append((path_rec or rel + ".uasset", len(chunks) - 1))
         else:
             queue = pending_bulks.get(pid, [])
             k = next((x for x, (_c, bt, _t, _i) in enumerate(queue)
@@ -517,13 +527,17 @@ def restore(rt, parts, out_root, optionals=None, say=print):
             if k is None:
                 raise RuntimeError(f"restore: bulk data missing for {name}")
             cid12, _bt, btoc, bi = queue.pop(k)
-            data = btoc.read(bi)
-            chunks.append(dict(id=bytes(cid12),
-                               blocks=original_blocks(btoc, bi),
+            if btoc is None:                    # stored verbatim, bi = bytes
+                data = bi
+                blocks = fresh_blocks(data)
+            else:
+                data = btoc.read(bi)
+                blocks = original_blocks(btoc, bi)
+            chunks.append(dict(id=bytes(cid12), blocks=blocks,
                                size=len(data)))
             payloads.append(data)
-            paths.append((rel + (".uptnl" if t == 4 else ".ubulk"),
-                          len(chunks) - 1))
+            paths.append((path_rec or rel + (".uptnl" if t == 4 else
+                                             ".ubulk"), len(chunks) - 1))
 
     directory = dirindex.build_dir_index(mount, paths)
     body, ucas, _offlen, block_table = writer.build_container(

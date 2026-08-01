@@ -862,7 +862,12 @@ def restore_matches(rt, meta, outfits):
         folder = rel.rsplit("/", 1)[0] if "/" in rel else "."
         by_folder[folder] = digest
     for o in outfits:
-        if md5_of(o.get("preview")) != by_folder.get(o["folder"]):
+        got = md5_of(o.get("preview"))
+        want = by_folder.get(o["folder"])
+        # A single-outfit mod lives at the root, beside the mod's icon --
+        # with no preview of its own, the outfit picks the icon up as its
+        # folder's image. Seeing the icon twice is not an edit.
+        if got != want and not (want is None and got == rt.get("icon_md5")):
             return False
     return md5_of(meta.get("icon")) == rt.get("icon_md5")
 
@@ -950,6 +955,11 @@ def record_roundtrip(toc, uplugin, plugin, plans, ctx, mod_out, layout,
         t = toc.chunk_ids[i][11]
         pid = int.from_bytes(toc.chunk_ids[i][:8], "little")
         chunk_order.append(["" if t == 10 else name_of.get(pid, ""), t])
+    # The directory index VERBATIM, aligned with chunk_order. Deriving
+    # paths from package names loses the cooker's file-name casing (a
+    # package whose name table says "pink" can sit in the index as
+    # "Pink.uasset"), and a restore must not.
+    dir_paths = [toc.paths.get(i, "") for i in range(toc.n)]
 
     # Which graph arcs are -1 in the ORIGINAL. The loose conversion must
     # flatten them to 0 (the ~mods loader refuses them); converting back
@@ -980,6 +990,30 @@ def record_roundtrip(toc, uplugin, plugin, plans, ctx, mod_out, layout,
         name_of[pid]: base64.b64encode(
             zlib.compress(toc.read(packages[pid]["chunk"]), 9)).decode("ascii")
         for pid in stored_pids if pid in packages}
+
+    # The completeness net: anything neither carried by a loose pak nor
+    # stored above would be unrecoverable. Seen in the wild: alternative
+    # hair meshes only a toggle actor references, spare icon textures.
+    # Their bulk data rides too -- a mesh has .ubulk.
+    carried = set()
+    for _rel, (_o, _t, _ren, _obj, drop) in layout:
+        dropped = {d.lower() for d in (drop or ())}
+        carried |= {p["name"].lower() for p in packages.values()} - dropped
+    stored_bulks = {}
+    for pid, p in packages.items():
+        if p["name"].lower() in carried or name_of[pid] in stored_chunks:
+            continue
+        stored_chunks[name_of[pid]] = base64.b64encode(
+            zlib.compress(toc.read(p["chunk"]), 9)).decode("ascii")
+        blobs = []
+        for i in range(toc.n):
+            cid = toc.chunk_ids[i]
+            if cid[11] in (3, 4) and \
+                    int.from_bytes(cid[:8], "little") == pid:
+                blobs.append([bytes(cid).hex(), base64.b64encode(
+                    zlib.compress(toc.read(i), 9)).decode("ascii")])
+        if blobs:
+            stored_bulks[name_of[pid]] = blobs
 
     # --- the original pak, entry by entry, decompressed ---
     pak_path = os.path.splitext(toc.path)[0] + ".pak"
@@ -1087,8 +1121,10 @@ def record_roundtrip(toc, uplugin, plugin, plans, ctx, mod_out, layout,
                                 e["deps"]]
                  for pid, e in entry_of.items() if pid in name_of},
         chunk_order=chunk_order,
+        dir_paths=dir_paths,
         neg_arcs=neg_arcs,
         stored_chunks=stored_chunks,
+        stored_bulks=stored_bulks,
         pak_mount=pak_mount,
         pak_seed=str(pak_seed),
         pak_files=[[p, base64.b64encode(zlib.compress(b, 9)).decode("ascii")]
@@ -1329,11 +1365,13 @@ def resolve_variants(meta, extras):
         name = str(entry.get("name") or "").strip() \
             or " + ".join(toggles.label_of(u) for u in utocs)
         out.append((name, utocs))
-    # Structural comparison only -- the default's display names differ by
-    # which conversion wrote the template, and a restore reproduces the
-    # original's names anyway. Composition or order changed = they mean it.
-    edited = [[u.lower() for u in us] for _n, us in out] != \
-             [[u.lower() for u in us] for _n, us in default]
+    # Structural comparison only, as SETS -- display names differ by which
+    # conversion wrote the template, and the two writers list the same
+    # entries in different orders; a restore reproduces the original's
+    # names and order regardless. Only recomposition means they want a
+    # different mod: entries added, removed, or made of different parts.
+    edited = {tuple(sorted(u.lower() for u in us)) for _n, us in out} != \
+             {tuple(sorted(u.lower() for u in us)) for _n, us in default}
     return out, edited
 
 
@@ -1561,11 +1599,18 @@ def prepare_to_loose(toc, uplugin, out_base=None):
             out_dir, label = mod_out, os.path.basename(mod_out)
         else:
             # Named for the outfit; authors reuse display names across
-            # variants, so a clash falls back to the mesh's own name.
+            # variants, so a clash falls back to the mesh's own name -- and
+            # when even the meshes share a name (four rows all called the
+            # same, every mesh "PC0003_00"), a counter. Without it, variants
+            # silently overwrote each other's folders.
             sub = folder_name(outfit["name"])
             if not sub or sub.lower() in used:
                 mesh_leaf = outfit["skeletal_mesh"].split(".")[-1]
                 sub = folder_name(f"{outfit['name']} ({mesh_leaf})".strip())
+            stem, dup = sub, 1
+            while sub.lower() in used:
+                dup += 1
+                sub = f"{stem} {dup}"
             used.add(sub.lower())
             out_dir, label = os.path.join(mod_out, sub), sub
             print(f"      {k + 1}. {sub}"
