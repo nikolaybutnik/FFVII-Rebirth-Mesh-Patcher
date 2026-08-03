@@ -1611,6 +1611,55 @@ def merge_loose(utocs, out_dir, base):
     return os.path.join(out_dir, base + ".utoc")
 
 
+def preflight_meshes(utocs, assume_yes, source_hint):
+    """
+    Pre-V1.005 meshes crash the game the moment they load, and a conversion
+    carries meshes exactly as they are. Catch that BEFORE converting -- the
+    classic mistake is converting a mod fresh from an archive that predates
+    the patch -- and offer to run the patcher right here, backups kept,
+    same as patch.py --path. Under --yes there is nobody to ask, so it
+    warns and converts as-is: automated runs must stay byte-faithful.
+    """
+    global _INTERACTED
+    import patch as patcher
+    stale = []
+    for u in utocs:
+        try:
+            state, _n, _msg = patcher.mod_status(u)
+        except Exception:
+            continue
+        if state == "needs_fix":
+            stale.append(u)
+    if not stale:
+        return
+    n = len(stale)
+    print()
+    print(f"  !! {n} pak{'s' if n != 1 else ''} here still "
+          f"carr{'y' if n != 1 else 'ies'} PRE-V1.005 meshes. Converted "
+          "as-is, the outfit")
+    print("     crashes the game the moment it loads.")
+    if assume_yes:
+        print("     --yes given: converting as-is. To fix, run")
+        print(f'       python patch.py --path "{source_hint}" --all')
+        print("     and convert again -- or patch the converted output.")
+        return
+    _INTERACTED = True
+    try:
+        ans = input("     Patch them now, then convert? (backups are "
+                    "kept)  [Y/n] ").strip().lower()
+    except EOFError:
+        ans = "n"
+    if ans in ("", "y", "yes"):
+        backups = os.path.join(source_hint, "_patch_backups")
+        for u in stale:
+            name = os.path.splitext(os.path.basename(u))[0]
+            patcher.patch_mod(name, u, backup_dir=backups)
+        print("     patched -- converting the fixed files")
+    else:
+        print("     converting as-is -- patch before playing, or the game "
+              "will crash")
+
+
 def layout_problem(source, mods):
     """Why loose_layout said no -- in words a person can act on. None when
     this drop is not the loose flow's problem (a Dresscode mod, say)."""
@@ -1767,6 +1816,10 @@ def loose_to_dresscode(source, mods, assume_yes=False):
                   f"{'s' if len(variants) != 1 else ''} from "
                   f"{len(extras)} extra pak{'s' if len(extras) != 1 else ''}"
                   + (f" ({combos} composed)" if combos else ""))
+    # Even an exact restore rebuilds from these bytes: a 1.004-era mod
+    # restored is a 1.004-era mod, and it crashes just the same.
+    preflight_meshes([u for _rel, u in parts] + list(extras)
+                     + list(companions), assume_yes, source)
     print()
     if not confirm(assume_yes, len(outfits)):
         print("  Nothing converted.")
@@ -2228,6 +2281,9 @@ def main(argv):
                     code = max(code, 1)
                     continue
                 try:
+                    # Before the container is opened: patching rewrites it.
+                    preflight_meshes([utoc], assume_yes,
+                                     os.path.dirname(uplugin))
                     toc = iostore.Toc(utoc)
                     tocs.append(toc)
                     runners += prepare_to_loose(toc, uplugin, out_base)

@@ -291,8 +291,10 @@ The rules, in plain terms:
 - Weapon paks and other non-costume files riding in the same download are
   skipped with a note — they have no Dresscode form.
 
-If the mod's meshes are pre-V1.005, patch the folder first
-(`python patch.py --path "D:\mods\My Mod" --all`), then convert.
+Pre-V1.005 mods are caught automatically: if the meshes are the old
+format, `convert.py` says so before doing anything and offers to patch
+them right there (backups kept). Say yes and the conversion continues
+with the fixed files.
 
 ### Combine options into your own variants
 
