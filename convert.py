@@ -123,7 +123,11 @@ def find_mods(path):
         utoc = find_container(path)
         return [(utoc, find_uplugin(utoc))] if utoc else []
     found, seen = [], set()
-    for root, _dirs, files in os.walk(path):
+    for root, dirs, files in os.walk(path):
+        # The patcher's undo copies are not part of the mod -- scanned in,
+        # they double every outfit with its pre-patch self.
+        dirs[:] = [d for d in dirs
+                   if d.lower() not in ("_patch_backups", "backups")]
         for f in sorted(files):
             if not f.lower().endswith(".utoc"):
                 continue
@@ -2240,6 +2244,42 @@ def gather(source, temps):
         yield from gather(arc, temps)
 
 
+def unpack_loose_archive(source, temps, assume_yes):
+    """
+    A dropped ARCHIVE of a loose mod. The folder flow needs a real folder
+    -- dresscode.json lives there, pictures go there, the person edits
+    there -- so the archive is unpacked once BESIDE ITSELF and that folder
+    is the mod from then on. Dropping the archive again just uses it, so
+    zip-drop-twice behaves exactly like folder-drop-twice. Returns the
+    flow's exit code, or None when the archive is not a loose mod (a
+    Dresscode mod's flow reads archives directly).
+    """
+    tmp = tempfile.mkdtemp(prefix="convert-")
+    temps.append(tmp)
+    print(f"  Unpacking {os.path.basename(source)} ...")
+    drops.extract_archive(source, tmp)
+    drops.expand_archives(tmp)
+    mods = find_mods(tmp)
+    if not mods or any(up for _u, up in mods):
+        return None
+    dest = os.path.splitext(source)[0]
+    if os.path.exists(dest):
+        print(f"  Using the folder already beside it: "
+              f"{os.path.basename(dest)}{os.sep}")
+    else:
+        inner = tmp
+        entries = os.listdir(tmp)
+        if len(entries) == 1 and os.path.isdir(os.path.join(tmp, entries[0])):
+            inner = os.path.join(tmp, entries[0])
+        shutil.move(inner, dest)
+        print(f"  Unpacked beside the archive: "
+              f"{os.path.basename(dest)}{os.sep}")
+        print("  Use that folder from here on -- dresscode.json is "
+              "generated inside it.")
+    handled = loose_to_dresscode(dest, find_mods(dest), assume_yes)
+    return 1 if handled is None else handled
+
+
 def main(argv):
     global KEEP_REGISTRATION
     args = [a for a in argv if not a.startswith("-")]
@@ -2270,6 +2310,12 @@ def main(argv):
                 if handled is not None:
                     handled_any = True
                     code = max(code, handled)
+                    continue
+            elif drops.is_archive(source):
+                result = unpack_loose_archive(source, temps, assume_yes)
+                if result is not None:
+                    handled_any = True
+                    code = max(code, result)
                     continue
             found = False
             for utoc, uplugin, out_base in gather(source, temps):
@@ -2325,5 +2371,15 @@ if __name__ == "__main__":
         _code = main(sys.argv[1:])
     except RuntimeError as ex:
         print(f"  {ex}")
+    except Exception:
+        # Anything unexpected must still leave a readable window: a
+        # drag-and-drop console closes with the process, taking the
+        # traceback with it.
+        import traceback
+        print()
+        print("  Unexpected error -- nothing was harmed, but please report "
+              "this:")
+        print()
+        traceback.print_exc(file=sys.stdout)
     drops.pause_before_exit(sys.argv[1:], _INTERACTED)
     sys.exit(_code)
