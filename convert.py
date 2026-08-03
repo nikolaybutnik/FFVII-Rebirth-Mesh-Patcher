@@ -704,7 +704,8 @@ def loose_layout(source, mods):
         return None
     root = os.path.normcase(os.path.abspath(source))
     outfits, extras, companions = [], [], []
-    for utoc, _ in mods:
+    for k, (utoc, _) in enumerate(mods):
+        progress("reading paks", k, len(mods))
         folders = os.path.relpath(utoc, source).lower().split(os.sep)[:-1]
         # An Optional folder wins over content: a generated Optional tree's
         # paks DO carry their outfit's mesh, and stay extras.
@@ -714,6 +715,7 @@ def loose_layout(source, mods):
             outfits.append(utoc)
         else:
             companions.append(utoc)
+    progress("reading paks", len(mods), len(mods))
     if not outfits:
         return None
 
@@ -738,8 +740,9 @@ def loose_layout(source, mods):
     if len({p == "." for p, _ in parts}) > 1:
         return None                     # a pak both at the root and in subs
     name = os.path.basename(os.path.abspath(source).rstrip("\\/"))
-    if name.lower().endswith(" (loose pak)"):
-        name = name[:-len(" (loose pak)")]
+    for tag in (" (loose pak)", " (unpacked)"):
+        if name.lower().endswith(tag):
+            name = name[:-len(tag)]
     return name, sorted(parts), sorted(extras), sorted(companions)
 
 
@@ -1408,17 +1411,22 @@ def classify_companions(outfit_utocs, candidates):
     download -- the variant machinery skips it with a note).
     """
     own, deps = set(), set()
-    for u in outfit_utocs:
+    total = len(outfit_utocs) + len(candidates)
+    for k, u in enumerate(outfit_utocs):
+        progress("sorting companions from options", k, total)
         toc = iostore.Toc(u)
         own |= set(rename.read_packages(toc))
         for pids in header_deps(toc).values():
             deps.update(pids)
         toc.close()
     infos = []
-    for u in candidates:
+    for k, u in enumerate(candidates):
+        progress("sorting companions from options",
+                 len(outfit_utocs) + k, total)
         toc = iostore.Toc(u)
         infos.append((u, set(rename.read_packages(toc))))
         toc.close()
+    progress("sorting companions from options", total, total)
     companions, options = [], []
     referenced = [(u, pids) for u, pids in infos
                   if pids & deps and not pids & own]
@@ -1615,6 +1623,17 @@ def merge_loose(utocs, out_dir, base):
     return os.path.join(out_dir, base + ".utoc")
 
 
+def progress(label, done, total):
+    """One updating console line -- enough to show life during a scan that
+    reads hundreds of megabytes. Piped output gets none of it."""
+    if not sys.stdout.isatty():
+        return
+    if done >= total:
+        print("\r" + " " * 70 + "\r", end="", flush=True)
+    else:
+        print(f"\r      {label} ... {done + 1}/{total}", end="", flush=True)
+
+
 def preflight_meshes(utocs, assume_yes, source_hint):
     """
     Pre-V1.005 meshes crash the game the moment they load, and a conversion
@@ -1627,13 +1646,15 @@ def preflight_meshes(utocs, assume_yes, source_hint):
     global _INTERACTED
     import patch as patcher
     stale = []
-    for u in utocs:
+    for k, u in enumerate(utocs):
+        progress("checking meshes", k, len(utocs))
         try:
             state, _n, _msg = patcher.mod_status(u)
         except Exception:
             continue
         if state == "needs_fix":
             stale.append(u)
+    progress("checking meshes", len(utocs), len(utocs))
     if not stale:
         return
     n = len(stale)
@@ -2280,6 +2301,45 @@ def unpack_loose_archive(source, temps, assume_yes):
     return 1 if handled is None else handled
 
 
+def unpack_archive_folder(source, temps, assume_yes):
+    """
+    A dropped FOLDER of archives -- authors ship modular mods as one zip
+    per piece. Everything unpacks into ONE new folder beside it, each
+    archive into its own subfolder, and that folder becomes the mod --
+    the same flow as dropping a single zip. Returns the flow's exit code,
+    or None when this is not a loose mod (Dresscode archives already read
+    fine from their zips).
+    """
+    archives = drops.archives_in(source)
+    if not archives:
+        return None
+    tmp = tempfile.mkdtemp(prefix="convert-")
+    temps.append(tmp)
+    print(f"  Unpacking {len(archives)} archive"
+          f"{'s' if len(archives) != 1 else ''} from "
+          f"{os.path.basename(source)} ...")
+    for a in archives:
+        sub = os.path.join(tmp, folder_name(
+            os.path.splitext(os.path.basename(a))[0]) or "mod")
+        os.makedirs(sub, exist_ok=True)
+        drops.extract_archive(a, sub)
+    drops.expand_archives(tmp)
+    mods = find_mods(tmp)
+    if not mods or any(up for _u, up in mods):
+        return None
+    dest = source.rstrip("\\/") + " (unpacked)"
+    if os.path.exists(dest):
+        print(f"  Using the folder already beside it: "
+              f"{os.path.basename(dest)}{os.sep}")
+    else:
+        shutil.move(tmp, dest)
+        print(f"  Unpacked beside it: {os.path.basename(dest)}{os.sep}")
+        print("  Use that folder from here on -- dresscode.json is "
+              "generated inside it.")
+    handled = loose_to_dresscode(dest, find_mods(dest), assume_yes)
+    return 1 if handled is None else handled
+
+
 def main(argv):
     global KEEP_REGISTRATION
     args = [a for a in argv if not a.startswith("-")]
@@ -2310,6 +2370,11 @@ def main(argv):
                 if handled is not None:
                     handled_any = True
                     code = max(code, handled)
+                    continue
+                result = unpack_archive_folder(source, temps, assume_yes)
+                if result is not None:
+                    handled_any = True
+                    code = max(code, result)
                     continue
             elif drops.is_archive(source):
                 result = unpack_loose_archive(source, temps, assume_yes)
