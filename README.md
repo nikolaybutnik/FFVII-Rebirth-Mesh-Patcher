@@ -224,6 +224,120 @@ your installed library: you get the normal in-place patch, with backups in
 
 ---
 
+## Converting between formats (convert.py)
+
+`convert.py` turns a costume mod from one format into the other, in either
+direction: a **Dresscode** mod (picked in the Dresscode menu) into **loose
+paks** (dropped in `~mods`, always worn), or the other way around. Drop a mod
+folder or archive onto `convert.py`, or run:
+
+```
+python convert.py "D:\mods\Some Mod"
+```
+
+Originals are never touched; everything new is written beside them.
+
+### Dresscode → loose paks
+
+Nothing to organize — point it at the mod folder (the one holding the
+`.uplugin`) and every outfit becomes its own pak, menu variants become
+`Optional` paks, and a `dresscode.json` is written beside them. That file
+remembers the original, so converting the folder back later rebuilds it
+exactly. **Leave `dresscode.json` where it is** if you ever want the round
+trip.
+
+### Loose paks → Dresscode: how to organize the folder
+
+Put ONE mod in one folder and drop that folder. First drop writes
+`dresscode.json` (open it to set names, or don't); second drop builds.
+
+```
+My Mod\
+├── dresscode.json          written by the first drop
+├── icon.png                optional -- the mod's thumbnail
+├── SomeOutfit_P.utoc/.ucas/.pak     the outfit (anywhere: root or any
+│                                    subfolder, however deep)
+├── SomeTextures_P.*        a pak the outfit NEEDS (its textures or
+│                           materials in a separate download) -- put it
+│                           beside the outfit, it is detected and merged
+└── Optional\
+    ├── No Hat\No_Hat_P.*            option paks become menu variants,
+    └── Red\Red_Recolor_P.*          one tile each
+```
+
+The rules, in plain terms:
+
+- **Outfit paks** (the mod's mains) can sit anywhere — the root, `Main\`,
+  or nested download folders. Several outfits are fine; each becomes its
+  own Dresscode mod, named "mod - outfit".
+- **Option paks** — the little hide-this / recolor-that files — are
+  understood wherever they are. Under `Optional\` they always count as
+  options; anywhere else the converter reads their contents and works out
+  whether they are options (they change the outfit's look) or **required
+  companions** (the outfit's own materials point into them — those merge
+  into every outfit automatically, and the output says so).
+- **Alternate versions of the whole outfit** (a second colour scheme, a
+  different hairstyle) should sit beside the mains, NOT under `Optional\` —
+  beside the mains they become their own Dresscode mods; under `Optional\`
+  they are treated as toggles and mostly do nothing.
+- **Another Dresscode mod this one depends on** (a shared asset mod
+  its page says to install): put that mod's folder in the same parent folder
+  as the one you drop, or have it installed in `End\Mods`. The converter
+  says whether it found it — and if it did not, the conversion still
+  works, minus whatever the missing mod provides (same as in game).
+- **Pictures**: a picture next to `dresscode.json` is the mod's thumbnail;
+  a picture inside an outfit's folder is that outfit's preview. Name them
+  `icon.png` / `preview.png` if a folder has several.
+- Weapon paks and other non-costume files riding in the same download are
+  skipped with a note — they have no Dresscode form.
+
+If the mod's meshes are pre-V1.005, patch the folder first
+(`python patch.py --path "D:\mods\My Mod" --all`), then convert.
+
+### Combine options into your own variants
+
+Out of the box, each option pak becomes one tile in the menu — "No Hat" is
+a tile, "Red" is a tile. **Tiles don't stack in game**: pick "Red" and then
+"No Hat" and you get a hatless outfit in the normal colour, because the
+second tile replaces the first.
+
+You are not stuck with that. You can make your own tiles that apply
+several options at once, and it's a copy-paste job — no tools, just
+Notepad. Open `dresscode.json` and find the `"variants"` list. It looks
+like this:
+
+```json
+"variants": [
+  { "name": "No Hat", "parts": ["No_Hat_P"] },
+  { "name": "Red",    "parts": ["Red_Recolor_P"] }
+]
+```
+
+One entry = one tile. `"name"` is what the tile says in the menu,
+`"parts"` are the option paks it applies (their file names). So to get a
+red AND hatless tile, copy an entry and list both paks:
+
+```json
+"variants": [
+  { "name": "No Hat",      "parts": ["No_Hat_P"] },
+  { "name": "Red",         "parts": ["Red_Recolor_P"] },
+  { "name": "Red, no hat", "parts": ["Red_Recolor_P", "No_Hat_P"] }
+]
+```
+
+Save, drop the folder on `convert.py` again, done — "Red, no hat" is now
+its own tile. Some notes:
+
+- Combine as many parts in one entry as you want.
+- If two parts change the same thing, the one listed later wins.
+- The menu shows exactly this list: rename tiles, delete the ones you
+  never use, or replace the whole list with a few favourite combos.
+- Made a mess of the file? Delete `dresscode.json` and drop the folder
+  again for a fresh one. (Only do that if the file has no `"restore"`
+  section — that section is the mod's way back to its original form.)
+
+---
+
 ## Troubleshooting
 
 **`Could not find an Oodle library`**

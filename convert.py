@@ -716,20 +716,21 @@ def loose_layout(source, mods):
     parts, by_folder = [], {}
     for utoc in outfits:
         d = os.path.dirname(os.path.abspath(utoc))
-        if os.path.normcase(d) != root \
-                and os.path.normcase(os.path.dirname(d)) != root:
-            return None                 # deeper nesting; not a shape we know
         by_folder.setdefault(os.path.normcase(d), []).append(utoc)
     for utoc in outfits:
         d = os.path.dirname(os.path.abspath(utoc))
         at_root = os.path.normcase(d) == root
         if at_root and len(outfits) > 1:
             return None                 # several outfits loose in one folder
-        # Several outfits sharing a folder are named for their own paks.
+        # Any depth goes -- downloads nest however their author unpacked
+        # them. Several outfits sharing one folder are named for their paks
+        # ALONE, exactly as before this understood nesting: existing
+        # dresscode.json files key their outfits by those stems.
+        rel = os.path.relpath(d, source).replace("\\", "/")
         if len(by_folder[os.path.normcase(d)]) > 1:
             parts.append((os.path.splitext(os.path.basename(utoc))[0], utoc))
         else:
-            parts.append(("." if at_root else os.path.basename(d), utoc))
+            parts.append(("." if at_root else rel, utoc))
     if len({p == "." for p, _ in parts}) > 1:
         return None                     # a pak both at the root and in subs
     name = os.path.basename(os.path.abspath(source).rstrip("\\/"))
@@ -820,11 +821,18 @@ def write_template(source, mod_name, parts, prefill=None, restore=None,
     if extras:
         template["_how_this_works"] += [
             "",
-            "\"variants\" is the menu below each outfit. One entry = one",
-            "menu item; its \"parts\" list the extra paks it applies, BY",
-            "FILE NAME. Compose your own by listing several parts in one",
-            "entry -- when two parts change the same thing, the later one",
-            "wins. Rename, reorder, or delete entries freely.",
+            "\"variants\" below IS the menu: one entry = one tile. In game",
+            "tiles do NOT stack -- picking one replaces the last -- so to",
+            "wear several options at once, make a tile that applies them",
+            "together. Copy any entry, give it a \"name\", and list every",
+            "pak it should apply in \"parts\" (their file names):",
+            "",
+            "  { \"name\": \"Red, no hat\",",
+            "    \"parts\": [\"Red_Recolor_P\", \"No_Hat_P\"] }",
+            "",
+            "Combine as many as you like; when two parts change the same",
+            "thing, the later one wins. Rename or delete entries freely --",
+            "the menu shows exactly this list.",
         ]
         template["variants"] = [{"name": label, "parts": [stem]}
                                 for label, stem in extras]
@@ -1384,6 +1392,47 @@ def record_roundtrip(toc, uplugin, plugin, plans, ctx, mod_out, layout,
     return 0
 
 
+def classify_companions(outfit_utocs, candidates):
+    """
+    (companions, options) for non-outfit paks living OUTSIDE an Optional
+    folder. A REQUIRED companion is one the outfits' packages hard-import
+    from and that overrides nothing of theirs. Everything else is really
+    an option: it overrides outfit packages (an old-style mask swap), or
+    overrides a rival candidate (a choose-one set -- the first in load
+    order is the baked default, the rest convert as variants), or touches
+    nothing of the mod's at all (a weapon override riding in the same
+    download -- the variant machinery skips it with a note).
+    """
+    own, deps = set(), set()
+    for u in outfit_utocs:
+        toc = iostore.Toc(u)
+        own |= set(rename.read_packages(toc))
+        for pids in header_deps(toc).values():
+            deps.update(pids)
+        toc.close()
+    infos = []
+    for u in candidates:
+        toc = iostore.Toc(u)
+        infos.append((u, set(rename.read_packages(toc))))
+        toc.close()
+    companions, options = [], []
+    referenced = [(u, pids) for u, pids in infos
+                  if pids & deps and not pids & own]
+    options += [u for u, pids in infos
+                if pids & own or not pids & deps]
+    # Load order settled choose-one sets in ~mods; the alphabetical first
+    # is the default the others were alternatives to.
+    referenced.sort(key=lambda t: os.path.basename(t[0]).lower())
+    taken = set()
+    for u, pids in referenced:
+        if pids & taken:
+            options.append(u)
+        else:
+            companions.append(u)
+            taken |= pids
+    return companions, options
+
+
 def stack_tree(outfits, extras):
     """
     The shared override tree a stackable build leaves at /Game/ paths: every
@@ -1562,6 +1611,28 @@ def merge_loose(utocs, out_dir, base):
     return os.path.join(out_dir, base + ".utoc")
 
 
+def layout_problem(source, mods):
+    """Why loose_layout said no -- in words a person can act on. None when
+    this drop is not the loose flow's problem (a Dresscode mod, say)."""
+    if not mods or any(up for _u, up in mods):
+        return None
+    outfits = [u for u, _ in mods if carries_outfit(u)]
+    if not outfits:
+        return ("none of these paks carries a costume -- the mod's MAIN "
+                "pak is missing from the folder. Drop the whole mod: the "
+                "main pak plus its option paks. (Option paks on their own "
+                "have nothing to attach to.)")
+    root = os.path.normcase(os.path.abspath(source))
+    loose_mains = [u for u in outfits if os.path.normcase(
+        os.path.dirname(os.path.abspath(u))) == root]
+    if len(outfits) > 1 and loose_mains:
+        return ("several outfit paks sit at the top of the dropped folder "
+                "-- put them all in one subfolder (\"Main\") or give each "
+                "its own, then drop again.")
+    return ("this folder's shape is not one the converter knows -- see "
+            "the README's \"how to organize the folder\" section.")
+
+
 def resolve_variants(meta, extras):
     """
     [(row name, [utoc, ...])] from the template's "variants" section --
@@ -1616,8 +1687,18 @@ def loose_to_dresscode(source, mods, assume_yes=False):
     """
     layout = loose_layout(source, mods)
     if layout is None:
+        problem = layout_problem(source, mods)
+        if problem:
+            print()
+            print(f"  {os.path.basename(source)}: {problem}")
+            return 1
         return None
     mod_name, parts, extras, companions = layout
+    if companions:
+        # Folder names said "companion"; the packages have the last word.
+        companions, options = classify_companions(
+            [u for _rel, u in parts], companions)
+        extras = sorted(extras + options)
 
     if not os.path.exists(os.path.join(source, TEMPLATE)):
         path = write_template(
