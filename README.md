@@ -290,6 +290,12 @@ The rules, in plain terms:
   `icon.png` / `preview.png` if a folder has several.
 - Weapon paks and other non-costume files riding in the same download are
   skipped with a note — they have no Dresscode form.
+- **Retouched game textures**: some mods also ship corrected copies of the
+  game's own textures (skin shading, say) so the outfit blends cleanly.
+  The converter keeps those working on its own — the output says
+  "stock-texture retouch kept" when it happens. Parts of a mod that
+  override something the outfit itself never uses (another costume slot,
+  a weapon skin) have no Dresscode form, and the output says that too.
 
 Pre-V1.005 mods are caught automatically: if the meshes are the old
 format, `convert.py` says so before doing anything and offers to patch

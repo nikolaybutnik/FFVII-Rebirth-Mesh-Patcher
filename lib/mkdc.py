@@ -11,14 +11,13 @@ writes the plugin folder Dresscode expects:
     <Plugin>/Resources/Icon128.png                       (when a picture given)
     <Plugin>/Content/Paks/WindowsNoEditor/<Plugin>End-WindowsNoEditor.*
 
-EVERY package is renamed into the plugin's namespace -- all thirteen real
-Dresscode mods surveyed contain not one package outside their own root, and
-a container that broke that rule was fatal at startup when mounted as a
-plugin. The one thing this costs: a loose pak that deliberately overrode
-stock packages beyond its mesh (extra skin textures, say) loses those
-overrides, because an override IS its stock ID. That loss is inherent to the
-destination format; Dresscode authors ship such textures re-cooked under the
-plugin root too.
+EVERY package is renamed into the plugin's namespace -- none of 95 real
+Dresscode containers surveyed holds one package outside its own root, and a
+container that broke that rule was fatal at startup when mounted as a
+plugin. A loose pak that deliberately overrode stock packages beyond its
+mesh (retouched skin textures, say) would lose those overrides to the
+rename, because an override IS its stock ID -- stockgraft.py keeps them
+working by carrying the stock materials that sample them.
 """
 
 import base64
@@ -40,6 +39,7 @@ import pakfile
 import pkgedit
 import pngfile
 import rename
+import stockgraft
 import toggles
 import tagged
 import writer
@@ -636,6 +636,19 @@ def build(meta, outfits, plugin, out_root, say=print, extras=(),
             raise RuntimeError(
                 f"{os.path.basename(outfit['utoc'])} does not replace any "
                 "character's standard costume -- only costume mods convert")
+        old_mesh_pid = cityhash.package_id(mesh_name)
+
+        hdr = next(toc.read(i) for i in range(toc.n)
+                   if toc.chunk_ids[i][11] == 10)
+        info = conheader.parse(hdr)
+        ids = conheader.package_ids(hdr, info)
+        raw_meta = {}
+        for j, pid in enumerate(ids):
+            _sz, exp, bun = struct.unpack_from(
+                "<Qii", hdr, info["store_off"] + j * 32)[:3]
+            raw_meta[pid] = (exp, bun,
+                             conheader.imported_packages(hdr, info, j))
+        grafts = stockgraft.plan(packages, raw_meta, {old_mesh_pid}, say)
 
         safe = safe_id(outfit["name"], used_names, f"Outfit{k + 1}")
         mesh_new = f"/{plugin}/Outfits/{safe}"
@@ -648,24 +661,28 @@ def build(meta, outfits, plugin, out_root, say=print, extras=(),
             tail = pkg["name"][6:] if low.startswith("/game/") \
                 else pkg["name"].lstrip("/")
             renames[low] = f"/{plugin}/{tail}"
+        extra_imports = {}
+        for g in grafts.values():
+            renames[g["name"].lower()] = f"/{plugin}/{g['name'][6:]}"
+        for g in grafts.values():
+            new_name = renames[g["name"].lower()]
+            gp = ZenPackage(g["data"])
+            for e in gp.exports:
+                if e["gimp"] == cityhash.NULL_INDEX:
+                    continue
+                extra_imports[e["gimp"]] = cityhash.object_id(
+                    new_name, pkgedit.export_object_path(gp, e))
         new_data, new_ids = rename.rewrite_chunks(
-            toc, packages, renames, fix_arcs=True)
+            toc, packages, renames, fix_arcs=True,
+            extra_imports=extra_imports)
 
-        hdr = next(toc.read(i) for i in range(toc.n)
-                   if toc.chunk_ids[i][11] == 10)
-        info = conheader.parse(hdr)
-        ids = conheader.package_ids(hdr, info)
-        old_mesh_pid = cityhash.package_id(mesh_name)
         pid_map = {pid: cityhash.package_id(renames[pkg["name"].lower()])
                    for pid, pkg in packages.items()
                    if pkg["name"].lower() in renames}
-        entry_meta = {}
-        for j, pid in enumerate(ids):
-            _sz, exp, bun = struct.unpack_from(
-                "<Qii", hdr, info["store_off"] + j * 32)[:3]
-            entry_meta[pid] = (exp, bun, [
-                pid_map.get(p, p)
-                for p in conheader.imported_packages(hdr, info, j)])
+        for gpid, g in grafts.items():
+            pid_map[gpid] = cityhash.package_id(renames[g["name"].lower()])
+        entry_meta = {pid: (exp, bun, [pid_map.get(p, p) for p in deps])
+                      for pid, (exp, bun, deps) in raw_meta.items()}
 
         bulks = {}
         for i in range(toc.n):
@@ -693,6 +710,20 @@ def build(meta, outfits, plugin, out_root, say=print, extras=(),
             merged[new_pid] = dict(name=name, data=data, deps=pdeps,
                                    exp=exp, bun=bun,
                                    bulks=bulks.get(new_pid, []))
+
+        if grafts:
+            graft_data = stockgraft.rewrite(grafts, packages, renames,
+                                            extra_imports)
+            for gpid, g in grafts.items():
+                new_pid = pid_map[gpid]
+                if new_pid in merged:
+                    continue            # another outfit already carried it
+                merged[new_pid] = dict(
+                    name=renames[g["name"].lower()], data=graft_data[gpid],
+                    deps=[pid_map.get(p, p) for p in g["deps"]],
+                    exp=g["exp"], bun=g["bun"],
+                    bulks=[(new_pid.to_bytes(8, "little") + bytes(bid[8:]),
+                            bdata) for bid, bdata in g["bulks"]])
 
         obj = mesh_object_name(toc, packages[old_mesh_pid]["chunk"])
         entries_outfits.append((outfit, f"{mesh_new}.{obj}", player))
