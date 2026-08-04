@@ -758,7 +758,7 @@ def build(meta, outfits, plugin, out_root, say=print, extras=(),
             parts.append((etoc, epkgs))
             parts_index.update(eindex)
         for w in wearers:
-            slots, _overridden = toggles.plan(
+            slots, _overridden, retex = toggles.plan(
                 w["toc"], w["packages"], w["mesh_chunk"], parts,
                 refs=w.setdefault(
                     "refs", toggles.references(w["toc"], w["packages"])))
@@ -773,7 +773,7 @@ def build(meta, outfits, plugin, out_root, say=print, extras=(),
                 w["mesh_object"],
                 index=w.setdefault("exports", toggles.export_index(
                     w["toc"], w["packages"])),
-                parts_index=parts_index)
+                parts_index=parts_index, retex=retex)
             for item in made:
                 pid = cityhash.package_id(item["name"])
                 if pid in merged:

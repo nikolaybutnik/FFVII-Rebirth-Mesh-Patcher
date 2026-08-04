@@ -855,8 +855,8 @@ def loose_layout(source, mods):
 
 def outfit_label(rel, mod_name):
     """What an outfit folder is called in the menu before anyone renames it.
-    A variant is named for its own folder, not the path to it -- "No Skirt"
-    reads as a costume, "Variants/No Skirt" reads as a filing system."""
+    A variant is named for its own folder, not the path to it -- "No Jacket"
+    reads as a costume, "Variants/No Jacket" reads as a filing system."""
     if rel == ".":
         return mod_name
     lead = rel.split("/")[0].lower()
@@ -1991,11 +1991,7 @@ def loose_to_dresscode(source, mods, assume_yes=False):
             print()
             print(f"      This mod is MODULAR: {len(extras)} small add-on pak"
                   f"{'s' if len(extras) != 1 else ''}, each")
-            print("      changing one thing. They are NOT in the mod yet.")
-            print("      Dresscode has one menu and picking an entry replaces")
-            print(f"      the last, so {len(extras)} entries that change one "
-                  "thing each")
-            print("      would be useless.")
+            print("      changing one thing. They are not in the menu yet.")
             print()
             print(f"      Open {TEMPLATE} and pick one:")
             print()
