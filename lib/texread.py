@@ -4,7 +4,7 @@ texread.py -- reads a cooked Texture2D package back into pixels.
 The mirror of mkpkg.build_texture: that writes a preview texture from BGRA
 pixels, this recovers pixels from any cooked texture of the same family so a
 Dresscode mod's previews and thumbnail can be extracted as PNG files during
-conversion to loose paks.
+conversion to paks.
 
 Only the formats Dresscode previews actually use decode to pixels: raw BGRA
 and the two block-compressed formats (DXT1/DXT5). Anything else still parses

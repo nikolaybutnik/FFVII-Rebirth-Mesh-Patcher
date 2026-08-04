@@ -1,9 +1,9 @@
 """
-mkdc.py -- assembles a complete Dresscode plugin from loose pak mods.
+mkdc.py -- assembles a complete Dresscode plugin from pak mods.
 
-The forward conversion's mirror. Takes one loose pak per outfit, renames each
+The forward conversion's mirror. Takes one pak per outfit, renames each
 outfit's mesh out of the stock costume slot into the plugin's namespace,
-merges everything into one container, synthesizes what a loose pak never had
+merges everything into one container, synthesizes what a pak never had
 -- the two registration assets, preview textures, the AssetRegistry -- and
 writes the plugin folder Dresscode expects:
 
@@ -14,7 +14,7 @@ writes the plugin folder Dresscode expects:
 EVERY package is renamed into the plugin's namespace -- none of 95 real
 Dresscode containers surveyed holds one package outside its own root, and a
 container that broke that rule was fatal at startup when mounted as a
-plugin. A loose pak that deliberately overrode stock packages beyond its
+plugin. A pak that deliberately overrode stock packages beyond its
 mesh (retouched skin textures, say) would lose those overrides to the
 rename, because an override IS its stock ID -- stockgraft.py keeps them
 working by carrying the stock materials that sample them.
@@ -173,7 +173,7 @@ _STOCK_SLOT = re.compile(
 
 
 def find_stock_mesh(packages):
-    """(package name, player key) of the stock costume mesh this loose pak
+    """(package name, player key) of the stock costume mesh this pak
     overrides -- the package sitting on any known character's costume slot."""
     prefixes = {prefix.lower(): key
                 for key, (prefix, _folder) in moddata.PLAYER_TYPES.items()}
@@ -238,7 +238,7 @@ def mark_external_arcs(data, shipped):
     Point every dependency arc on a package this container does NOT hold at
     bundle -1, and return the new bytes (None when nothing changed).
 
-    The two formats are exact opposites here. A ~mods loose pak must not
+    The two formats are exact opposites here. A ~mods pak must not
     carry -1 arcs -- the vanilla loader silently refuses any package that
     does. A plugin must: every arc leaving a real Dresscode mod is -1, and
     an arc of 0 naming a package the container lacks sends the loader to a
@@ -286,7 +286,7 @@ def original_blocks(toc, index):
 
 def restore(rt, parts, out_root, optionals=None, say=print):
     """
-    Rebuild the ORIGINAL Dresscode mod these loose paks came from, from the
+    Rebuild the ORIGINAL Dresscode mod these paks came from, from the
     record their dresscode.json carries. Every package returns to its
     original name and bytes, the registration assets, toggle blueprints and
     material packs drop in verbatim, Optional paks give their overrides
@@ -576,10 +576,15 @@ def restore(rt, parts, out_root, optionals=None, say=print):
         with open(os.path.join(root, "Resources", "Icon128.png"), "wb") as f:
             f.write(base64.b64decode(rt["icon_b64"]))
     if rt.get("icon_md5"):
-        # icon.png beside the template IS the original Icon128.png.
+        # icon.png beside the template IS the original Icon128.png. Climb out
+        # of the outfit's folder by the DEPTH of its recorded path, not a
+        # fixed one level: outfits live under Variants\<name>\ now, and a
+        # fixed guess quietly landed one folder short and lost the thumbnail.
         rel0 = next(iter(rt["variants"]))
-        src_root = os.path.dirname(parts[rel0]) if rel0 == "." \
-            else os.path.dirname(os.path.dirname(parts[rel0]))
+        src_root = os.path.dirname(parts[rel0])
+        if rel0 != ".":
+            for _ in rel0.replace("\\", "/").split("/"):
+                src_root = os.path.dirname(src_root)
         icon = os.path.join(src_root, "icon.png")
         if os.path.exists(icon):
             os.makedirs(os.path.join(root, "Resources"), exist_ok=True)
@@ -995,7 +1000,7 @@ def build(meta, outfits, plugin, out_root, say=print, extras=(),
     for j, pid in enumerate(order):
         rec = merged[pid]
         # LoadOrder is any dense permutation; the field after it is 0xFFFFFFFF
-        # in every donor mod AND every CE-cooked loose pak -- never 0.
+        # in every donor mod AND every CE-cooked pak -- never 0.
         store += struct.pack("<QiiII", len(rec["data"]), rec["exp"],
                              rec["bun"], j, 0xFFFFFFFF)
         store += struct.pack("<II", 0, 0)            # views filled below

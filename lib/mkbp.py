@@ -7,7 +7,7 @@ EndMaterialPack asset mapping mesh material SLOT names to replacement
 materials. Dresscode spawns the actor, reads the pack, and swaps those slots
 on the worn outfit.
 
-Converting a loose modular mod the other way has no such assets to copy -- the
+Converting a modular pak mod the other way has no such assets to copy -- the
 old standard hid a part by overriding its material package outright -- so both
 are synthesized here, from nothing, exactly as the Dresscode toolchain's own
 cooker emits them (proven byte-identical against a real mod's).

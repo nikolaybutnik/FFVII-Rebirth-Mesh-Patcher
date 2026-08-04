@@ -7,7 +7,7 @@ flavors are handled -- grayscale, palette, truecolor, each with or without
 alpha, all five row filters. Interlaced and 16-bit files are rare enough to
 refuse with advice rather than support.
 
-encode() is the other direction: converting a Dresscode mod to loose paks
+encode() is the other direction: converting a Dresscode mod to paks
 extracts its preview pictures so the person can see (and later swap) them.
 """
 

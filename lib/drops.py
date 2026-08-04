@@ -180,7 +180,7 @@ def archive_summary(src):
         elif ext == ".utoc":
             # A loader mod's container sits under Content/Paks/WindowsNoEditor
             # and is named for the container, not the mod -- its .uplugin above
-            # is the real name, so only loose paks are named from the .utoc.
+            # is the real name, so only paks are named from the .utoc.
             if "content/paks/windowsnoeditor" not in path.lower():
                 mods.add(stem)
         elif is_archive(path):

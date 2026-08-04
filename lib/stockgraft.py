@@ -1,7 +1,7 @@
 """
-stockgraft.py -- keep a loose pak's stock-texture retouches working in a plugin.
+stockgraft.py -- keep a pak's stock-texture retouches working in a plugin.
 
-Some loose mods ship retouched copies of stock textures (skin colour,
+Some pak mods ship retouched copies of stock textures (skin colour,
 occlusion) beside their outfit. Nothing in the pak imports them: as a loose
 pak they work by overriding the game's own package, so the game's skin
 material picks up the retouch. A Dresscode plugin renames every package under

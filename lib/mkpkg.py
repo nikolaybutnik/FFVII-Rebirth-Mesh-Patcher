@@ -3,7 +3,7 @@ mkpkg.py -- builds a zen data-asset package from nothing.
 
 Everything else in this toolchain edits packages that a cooker made. The two
 registration assets a Dresscode mod needs (DA_ModMetaData and the
-PDA_ModData_Character outfit list) have no original to edit when a loose pak
+PDA_ModData_Character outfit list) have no original to edit when a pak
 is converted -- they are synthesized here: name table, imports, one export,
 the standard bundle block, graph, and a tagged-property payload.
 

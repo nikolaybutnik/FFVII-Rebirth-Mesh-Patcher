@@ -2,7 +2,7 @@
 roundtrip.py -- developer test rig. Not part of the user-facing tools.
 
 Drop a folder of Dresscode mods on this (unpacked folders, archives, or a
-mix). Every mod found is converted to loose paks and back inside a
+mix). Every mod found is converted to paks and back inside a
 TEMPORARY sandbox -- nothing dropped is read-modified or overwritten, and
 the sandbox is deleted as each mod finishes -- then the rebuilt plugin is
 compared with the original layer by layer:
@@ -124,7 +124,7 @@ def test_mod(utoc, uplugin, sandbox):
         return ["forward conversion failed"], log.getvalue()
 
     loose = os.path.join(sandbox,
-                         os.path.basename(orig_root) + " (loose pak)")
+                         os.path.basename(orig_root) + " (pak)")
     with contextlib.redirect_stdout(log):
         handled = convert.loose_to_dresscode(loose, convert.find_mods(loose),
                                              assume_yes=True)
@@ -162,7 +162,7 @@ def main(argv):
         print()
         print(f"  ROUND TRIP TEST -- {len(mods)} Dresscode mod"
               f"{'s' if len(mods) != 1 else ''}"
-              + (f", {skipped} loose pak(s) skipped" if skipped else ""))
+              + (f", {skipped} pak(s) skipped" if skipped else ""))
         print()
 
         passed = 0

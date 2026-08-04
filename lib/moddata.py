@@ -51,7 +51,7 @@ PLAYER_TYPES = {
 
 def default_costume_package(player_type):
     """
-    The stock package a costume replaces when converted to a loose pak.
+    The stock package a costume replaces when converted to a pak.
 
     Always the character's default outfit -- /Game/.../PC00XX_00_Name_Standard/
     Model/PC00XX_00. Restricting to the default is what lets a conversion round

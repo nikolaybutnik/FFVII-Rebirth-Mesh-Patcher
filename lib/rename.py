@@ -3,7 +3,7 @@ rename.py -- give every package in a container a new path.
 
 This is the engine underneath format conversion. A Dresscode costume and a loose
 pak mod hold the same assets; what differs is where those assets CLAIM to live.
-Dresscode's sit at /<ModName>/..., a loose pak's at /Game/..., and the game
+Dresscode's sit at /<ModName>/..., a pak's at /Game/..., and the game
 mounts each accordingly. Converting between the two is, at bottom, this module.
 
 WHAT HAS TO MOVE TOGETHER
@@ -422,8 +422,8 @@ def verify(utoc_path):
     Re-open a written container and check it against itself. Returns a list of
     problems, empty if sound.
 
-    Worth doing on every conversion, because all three of these are invisible
-    until the game loads the mod, and two of them crash it outright:
+    Worth doing on every conversion, because every one of these is invisible
+    until the game loads the mod, and most of them crash it outright:
 
       * ExportBundlesSize must equal the chunk's length. This is the byte count
         the loader reads for a package; stale by even 8 bytes it hands itself a
@@ -436,6 +436,9 @@ def verify(utoc_path):
         sizes its export array from the header and then fills it from the
         package: too low and it writes past the end, which crashes the async
         loading thread with a heap write it cannot attribute to anything.
+      * no package may list ITSELF among its imported packages. Renaming a
+        package onto one it depends on produces exactly that, and one such
+        cycle-of-one anywhere in ~mods stops the game launching at all.
     """
     toc = iostore.Toc(utoc_path)
     problems = []
@@ -469,6 +472,10 @@ def verify(utoc_path):
             size, exports = struct.unpack_from(
                 "<Qi", raw, info["store_off"] + k * 32)
             entries[pid] = (size & conheader.SIZE_MASK, exports)
+            if pid in conheader.imported_packages(raw, info, k):
+                problems.append(
+                    f"package {pid:#018x} lists itself as an imported "
+                    "package -- the game will not start with this mounted")
 
     for i in range(toc.n):
         if toc.chunk_ids[i][11] != PACKAGE_CHUNK:

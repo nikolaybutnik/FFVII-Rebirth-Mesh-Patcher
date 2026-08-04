@@ -12,7 +12,7 @@ mod built against the old layout. The symptom depends on the mod:
 
 Same underlying cause, so the same fix: this rewrites the affected models into
 the format the current game expects. One command handles them all — costume mods
-and loose pak mods, anything containing a skeletal mesh. It is not a
+and pak mods, anything containing a skeletal mesh. It is not a
 general-purpose mod fixer.
 
 **Dresscode itself now has an official V1.005 update** from its author, so this
@@ -136,7 +136,7 @@ python patch.py ModName     patch one mod, by its folder or .utoc name
 ```
 
 It scans two places: `End\Mods\` (the FF7RML mod loader) and
-`End\Content\Paks\~mods\` (loose pak mods the game loads directly). Mods in the
+`End\Content\Paks\~mods\` (pak mods the game loads directly). Mods in the
 first are named by their folder; mods in the second by their `.utoc` filename,
 shown with a `(~mods)` tag.
 
@@ -179,7 +179,7 @@ python patch.py --restore --all       put everything back
 python patch.py --restore ModName     put one mod back
 ```
 
-Only mod files are ever modified, never the game's own packages. Loose pak mods
+Only mod files are ever modified, never the game's own packages. Pak mods
 live under `End\Content\Paks\~mods\`, so those files sit inside the game folder —
 but the game's own `.pak`/`.utoc`/`.ucas` (in `Paks\` itself) are never touched.
 
@@ -237,7 +237,7 @@ python convert.py "D:\mods\Some Mod"
 
 Originals are never touched; everything new is written beside them.
 
-### Dresscode → loose paks
+### Dresscode → paks
 
 Nothing to organize — point it at the mod folder (the one holding the
 `.uplugin`) and every outfit becomes its own pak, menu variants become
@@ -246,7 +246,7 @@ remembers the original, so converting the folder back later rebuilds it
 exactly. **Leave `dresscode.json` where it is** if you ever want the round
 trip.
 
-### Loose paks → Dresscode: how to organize the folder
+### Paks → Dresscode: how to organize the folder
 
 Put ONE mod in one folder and drop that folder. First drop writes
 `dresscode.json` (open it to set names, or don't); second drop builds.
@@ -260,9 +260,12 @@ My Mod\
 ├── SomeTextures_P.*        a pak the outfit NEEDS (its textures or
 │                           materials in a separate download) -- put it
 │                           beside the outfit, it is detected and merged
+├── Variants\
+│   ├── No Jacket\SomeOutfit_P.*     a WHOLE costume of its own -- one
+│   └── Short Hair\SomeOutfit_P.*    extra outfit tile in the same mod
 └── Optional\
-    ├── No Hat\No_Hat_P.*            option paks become menu variants,
-    └── Red\Red_Recolor_P.*          one tile each
+    ├── No Hat\No_Hat_P.*            add-on paks, listed for you to
+    └── Red\Red_Recolor_P.*          combine -- see below
 ```
 
 The rules, in plain terms:
@@ -276,10 +279,43 @@ The rules, in plain terms:
   whether they are options (they change the outfit's look) or **required
   companions** (the outfit's own materials point into them — those merge
   into every outfit automatically, and the output says so).
-- **Alternate versions of the whole outfit** (a second colour scheme, a
-  different hairstyle) should sit beside the mains, NOT under `Optional\` —
-  beside the mains they become their own Dresscode mods; under `Optional\`
-  they are treated as toggles and mostly do nothing.
+- **Whole alternate costumes** — a version with a part left out, a
+  different body, a different hairstyle — go under `Variants\`, one
+  folder each. They become extra **outfit tiles inside the same Dresscode
+  mod**, named after their folder, each able to have its own
+  `preview.png`. Alternates sitting loose beside the mains instead still
+  become separate Dresscode mods, which is the older behaviour.
+- **`Optional\` is a different thing, from the modular PAK standard.**
+  Those are the little add-on paks you drag in beside a pak mod — a
+  recolour, a piece hidden by making its material invisible. They change
+  MATERIALS, so a difference that lives in the model itself (a part
+  switched off, a different body) has no add-on form and would do nothing.
+- **Add-ons are listed, not turned into menu entries.** Dresscode has one
+  menu, and picking an entry replaces the last one — so a mod with 30
+  add-ons would become 30 entries that each change one thing, which is not
+  how anyone wears them. Instead `dresscode.json` lists the parts under
+  `parts_you_can_combine` and leaves `variants` empty. Write the
+  combinations you actually want:
+
+  ```json
+  "variants": [
+    { "name": "Red, no hat", "parts": ["Red_Recolor_P", "No_Hat_P"] },
+    { "name": "Just red",    "parts": ["Red_Recolor_P"] }
+  ]
+  ```
+
+  Anything you want to wear together has to be ONE entry.
+
+  Don't want to choose? Set `"stackable": true` instead. The parts stay
+  drop-in files: the build gives you a "Put in ~mods" folder, you drop in
+  the ones you want and mix them exactly as you do today, and only the
+  costume itself is picked in Dresscode.
+- **A mod uses one shape or the other.** A folder holding both `Variants\`
+  and `Optional\` is refused, and the message says which paks it found
+  and what each shape is for. Most Dresscode mods want `Variants\`;
+  `Optional\` is there for modular pak mods, and for a mod converted
+  out of Dresscode — whose own menu entries land there and ARE kept, so
+  converting it back reproduces the mod exactly.
 - **Another Dresscode mod this one depends on** (a shared asset mod
   its page says to install): put that mod's folder in the same parent folder
   as the one you drop, or have it installed in `End\Mods`. The converter
@@ -304,15 +340,16 @@ with the fixed files.
 
 ### Combine options into your own variants
 
-Out of the box, each option pak becomes one tile in the menu — "No Hat" is
-a tile, "Red" is a tile. **Tiles don't stack in game**: pick "Red" and then
-"No Hat" and you get a hatless outfit in the normal colour, because the
-second tile replaces the first.
+A fresh conversion leaves `"variants"` empty and lists every option pak
+under `"parts_you_can_combine"` — option paks do NOT become tiles on
+their own. That's deliberate: **tiles don't stack in game**. Pick "Red"
+and then "No Hat" and you'd get a hatless outfit in the normal colour,
+because the second tile replaces the first — a tile per option would
+just be clutter that works wrong.
 
-You are not stuck with that. You can make your own tiles that apply
-several options at once, and it's a copy-paste job — no tools, just
-Notepad. Open `dresscode.json` and find the `"variants"` list. It looks
-like this:
+Making tiles is a copy-paste job — no tools, just Notepad. Open
+`dresscode.json`, find the `"variants"` list, and give each look you
+actually wear one entry:
 
 ```json
 "variants": [
@@ -345,6 +382,51 @@ its own tile. Some notes:
   section — that section is the mod's way back to its original form.)
 
 ---
+
+## Leaving parts out (devtools\parts.py)
+
+A workbench tool, separate from patching. Drag a pak mod — folder, `.utoc`
+or `.zip` — onto `devtools\parts.py` and it takes the model apart into the pieces it is
+actually made of:
+
+```
+   #  part                        triangles   material
+   1  <part name>                    28,128   <material>
+   2  <part name>                    19,814   <material>
+   ...
+  12  <part name>                     3,568   <shared material>
+  13  <part name>                     5,820   <shared material>
+  (<shared material> is shared by parts 7, 10, 11, 12, 13)
+```
+
+The names are the mod author's own, and usually say what each piece is. Answer
+with the parts to leave out — `12 13`, part of a name, or a range like `5-7` —
+and it writes a fresh copy of the mod with those switched off, into `parts out\`
+in the patcher folder. Your original is never touched.
+
+```
+python devtools\parts.py "D:\mods\MyMod"              list, then ask
+python devtools\parts.py "D:\mods\MyMod" --list       just list
+python devtools\parts.py "D:\mods\MyMod" --omit 12,13 no questions
+python devtools\parts.py "D:\mods\MyMod" --omit none  put every part back
+```
+
+Worth knowing:
+
+- **Nothing is deleted.** Each part is switched off with the flag the engine
+  itself uses for "do not draw this section", so the geometry stays in the file
+  and turning a part back on is the same edit in reverse.
+- **Your answer is the whole list, not an addition.** Run it again with a
+  different answer and that becomes the omitted set, so there is no way to paint
+  yourself into a corner.
+- Several parts often **share one material** — the line under the table says
+  which. That is why hiding by material takes five things off at once and this
+  takes exactly one.
+- If the mod still needs the V1.005 fix, it says so; run `patch.py` on
+  the result as well, in either order.
+- Output goes to `parts out\` rather than next to the mod on purpose: the game
+  loads `~mods` recursively, so a copy left beside its original would be loaded
+  alongside it.
 
 ## Troubleshooting
 

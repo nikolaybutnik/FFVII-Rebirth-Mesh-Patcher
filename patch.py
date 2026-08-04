@@ -2,10 +2,10 @@
 patch.py -- FFVII Rebirth mesh patcher.
 
 Fixes mods that were built before game patch V1.005 and no longer load. Works on
-costume mods and loose pak mods -- anything containing a skeletal mesh. (Dresscode
+costume mods and pak mods -- anything containing a skeletal mesh. (Dresscode
 itself now has an official V1.005 update, so it is no longer patched here.) Mods
 are found in End\\Mods (the FF7RML loader) and in
-End\\Content\\Paks\\~mods (loose paks the game loads directly); see find_mods.
+End\\Content\\Paks\\~mods (paks the game loads directly); see find_mods.
 
     python patch.py --list             show every mod and whether it needs fixing
     python patch.py --all              patch everything that needs it
@@ -81,12 +81,11 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "lib
 
 import config
 import deps
-import dirindex
 import drops
 import iostore
 import meshfix
+import repack
 import skm
-import writer
 import zen
 
 BACKUP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "backups")
@@ -388,29 +387,6 @@ def rebuild_header(header_bytes, size_deltas):
     return bytes(out)
 
 
-def _pack_blocks(payload, block_size, comp_method):
-    """Split `payload` into <=block_size .ucas blocks, Oodle-compressing each so a
-    patched mesh does not bloat the container (uncompressed it can double it).
-
-    Every compressed block is verified to round-trip -- decompress back to the
-    exact original -- before it is used. Anything that has no compressor, does
-    not shrink, or does not round-trip is stored raw (method 0), so the output is
-    always valid whatever the DLL does.
-    """
-    out = []
-    for k in range(0, len(payload), block_size):
-        raw = payload[k:k + block_size]
-        comp = iostore.oodle_compress(raw) if comp_method else None
-        ok = comp is not None and len(comp) < len(raw)
-        if ok:
-            try:
-                ok = iostore.oodle_decompress(comp, len(raw)) == raw
-            except Exception:
-                ok = False
-        out.append((comp, len(raw), comp_method) if ok else (raw, len(raw), 0))
-    return out
-
-
 def _mod_rel(utoc_path):
     """The mod's own on-disk wrapping (loader mods live under
     Content\\Paks\\WindowsNoEditor), mirrored into its backup so the backup
@@ -506,73 +482,16 @@ def patch_mod(name, utoc_path, out_dir=None, backup_dir=None, no_backup=False):
     new_data[header_index] = rebuild_header(toc.read(header_index), size_deltas)
 
     print(f"    rebuilding container ({toc.n} chunks)")
-    progress = sys.stdout.isatty()
-    # Oodle's index in THIS container's method table -- a wrong index would make
-    # the game misdecode our blocks. No Oodle in the table -> store raw.
-    comp_method = next((m for m, method_name in enumerate(toc.methods)
-                        if method_name.lower() == "oodle"), None)
-    if comp_method is None and len(toc.methods) > 1:
-        print(f"    note: container compresses with "
-              f"{', '.join(toc.methods[1:])}, not Oodle -- "
-              "storing patched chunks uncompressed")
-    ucas_in = open(os.path.join(src_dir, base + ".ucas"), "rb")
-    chunks = []
-    new_paths = []
-    for i in range(toc.n):
-        if progress and i % 25 == 0:
-            print(f"\r    reading chunk {i}/{toc.n}...", end="", flush=True)
-        if i in new_data:
-            payload = new_data[i]
-            blocks = _pack_blocks(payload, toc.block_size, comp_method)
-            size = len(payload)
-        else:
-            # Untouched chunk: reuse its compressed blocks as-is. build_metas_from
-            # reuses the source checksum row, so its uncompressed bytes are never
-            # needed -- skipping this decompress is the main speedup.
-            offset, length = toc.offlen[i]
-            b = offset // toc.block_size
-            remaining = length
-            blocks = []
-            while remaining > 0:
-                pos, csize, usize, method = toc.blocks[b]
-                ucas_in.seek(pos)
-                blocks.append((ucas_in.read(csize), usize, method))
-                remaining -= usize
-                b += 1
-            size = length
-        chunks.append(dict(id=toc.chunk_ids[i], blocks=blocks, size=size))
-        if i in toc.paths:
-            new_paths.append((toc.paths[i], len(chunks) - 1))
-
-    if progress:
-        print("\r" + " " * 40 + "\r", end="", flush=True)
-
-    directory = dirindex.build_dir_index(toc.mount, new_paths)
-    body, ucas, offlen, block_table = writer.build_container(
-        toc, chunks, toc.block_size)
-    head = writer.build_toc_header(toc, len(chunks), len(block_table),
-                                   len(directory), toc.block_size)
-    metas = writer.build_metas_from(toc, new_data)
-
-    print(f"    writing {len(ucas) / (1024 * 1024):,.0f} MB to disk...", flush=True)
-    with open(os.path.join(dst_dir, base + ".utoc"), "wb") as f:
-        f.write(head + bytes(body) + directory + metas)
-    with open(os.path.join(dst_dir, base + ".ucas"), "wb") as f:
-        f.write(ucas)
-    # The .pak is never rewritten, but the game loads a mod as a triple -- copy
-    # it across whenever the original is not being overwritten in place.
-    if not in_place:
-        pak_src = os.path.join(src_dir, base + ".pak")
-        if os.path.exists(pak_src):
-            shutil.copy(pak_src, os.path.join(dst_dir, base + ".pak"))
+    written = repack.write(toc, new_data, dst_dir, base, src_dir,
+                           copy_pak=not in_place)
 
     if not in_place:
         print(f"    written {base}.utoc/.ucas/.pak  in  {dst_dir}")
     elif no_backup:
-        print(f"    written; .ucas now {len(ucas):,} bytes")
+        print(f"    written; .ucas now {written:,} bytes")
     else:
         # The full backup path is stated once, in the closing summary.
-        print(f"    written; .ucas now {len(ucas):,} bytes  (original backed up)")
+        print(f"    written; .ucas now {written:,} bytes  (original backed up)")
     return True
 
 

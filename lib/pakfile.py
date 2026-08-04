@@ -5,14 +5,14 @@ WHY A CONTAINER STILL NEEDS A .pak
 ----------------------------------
 The assets live entirely in the IoStore container. The .pak next to it carries
 one thing that matters: the MOUNT POINT, the path the container's contents hang
-off. A loose pak mod mounts at "../../../" (the install root); a plugin mounts
+off. A pak mod mounts at "../../../" (the install root); a plugin mounts
 at "../../../End/Mods/<Name>/". Convert between the two formats and the mount
 has to change with them, which is why the source .pak cannot simply be copied.
 
 WHAT THIS WRITES
 ----------------
 A version 11 pak holding NO files -- just a mount point and two empty indexes.
-That is exactly what loose pak mods ship, so it is a shape the game is known to
+That is exactly what pak mods ship, so it is a shape the game is known to
 accept, and building it is verified by reproducing one byte for byte.
 
 Plugin paks additionally carry AccessTransformers.ini, PluginSettings.ini and
@@ -205,7 +205,7 @@ def mount_of(data):
 #
 # The container's mount is a path prefix for the packages inside it, and is
 # routinely deep -- ../../../End/Content/Character/Player/ is normal. The pak's
-# mount is a content root the engine registers, and every working loose pak
+# mount is a content root the engine registers, and every working pak
 # keeps it shallow: "/" alongside a deep container, "../../../" alongside a
 # root-mounted one. Setting it to the container's deep path instead registers a
 # bogus content root and the game dies on startup.
