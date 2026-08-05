@@ -222,6 +222,25 @@ your installed library: you get the normal in-place patch, with backups in
 --no-pause     never wait
 ```
 
+### Going the other way (unpatch.py)
+
+Still on game version 1.004, or rolled back to it? `unpatch.py` converts mods
+**back** to the pre-V1.005 format. It is `patch.py` in reverse and works
+exactly the same way — drag a mod folder or archive onto it and you get an
+`Unpatched Mods` copy beside the original, or use the same flags:
+
+```
+python unpatch.py --list              show every mod and whether it needs it
+python unpatch.py --all               unpatch everything that needs it
+python unpatch.py --path "D:\mods" --out "D:\send"   copies, originals kept
+```
+
+In-place runs back up to `unpatch_backups\` (folder drops to
+`_unpatch_backups\` inside the folder), and `--restore` undoes from there.
+Patching and unpatching are mutual inverses: a mod taken down to 1.004 and
+back comes out identical, apart from tangent rounding far below anything
+visible.
+
 ---
 
 ## Converting between formats (convert.py)
@@ -467,6 +486,10 @@ Three things, all inside the mod's own files:
    them, because the current shaders read them as half.
 
 Converted models match the artist's original data to within **0.1 degrees**.
+
+`unpatch.py` reverses all three: the duplicated-vertex arrays return (in the
+empty form real 1.004 mods carry), tangents expand back to the 8-byte
+standard, and half-float UVs stay — they were always legal.
 
 ---
 

@@ -228,6 +228,45 @@ def convert_tangents_8_to_4(buf):
     return words.astype("<u4").tobytes()
 
 
+def convert_tangents_4_to_8(buf):
+    """The 4-byte tangent format -> the old 8-byte FPackedNormal pair.
+
+    The byte conventions are measured from real pre-1.005 mods, not assumed:
+    signed two's-complement components, TangentX's fourth byte always 127,
+    and the handedness byte +127 for a positive frame, -127 for a mirrored
+    one (the same mapping convert_tangents_8_to_4 reads back).
+    """
+    import numpy as np
+    import shader_decode as _sd
+
+    words = np.frombuffer(bytes(buf), dtype="<u4")
+    if len(words) == 0:
+        return b""
+    N, T, _B = _sd.decode(words)
+    out = np.zeros((len(words), 8), dtype=np.int8)
+    out[:, 0:3] = np.clip(np.rint(T * 127.0), -127, 127)
+    out[:, 3] = 127
+    out[:, 4:7] = np.clip(np.rint(N * 127.0), -127, 127)
+    positive = ((words >> np.uint32(31)) & np.uint32(1)).astype(bool)
+    out[:, 7] = np.where(positive, 127, -127)
+    return out.tobytes()
+
+
+def synthesize_dup_arrays(n_vertices):
+    """A section's duplicated-vertex arrays in their EMPTY form.
+
+    The real data pre-1.005 cookers wrote is not recoverable -- and provably
+    not position-derived either (measured: a recorded "duplicate" can sit 17
+    units away, stale data inherited from the donor mesh). What matters is a
+    shape the 1.004 loader accepts, and real working 1.004 mods already
+    contain sections with no duplicates at all: DupVertData holds one dummy 0
+    (the buffer must not be empty) and every per-vertex {Length, Index} pair
+    is zero. That exact shape is synthesized here.
+    """
+    return (struct.pack("<II", 1, 0)
+            + struct.pack("<I", n_vertices) + b"\x00" * (8 * n_vertices))
+
+
 def u32(d, o):
     """Read a little-endian uint32 at offset `o`."""
     return struct.unpack_from("<I", d, o)[0]
@@ -492,6 +531,89 @@ def convert_payload(payload):
 
     report["changed"] = removed > 0
     report["bytes_removed"] = removed
+    return payload, report
+
+
+def new_format(payload, sections_at, n_sections):
+    """True if this mesh has ANY post-1.005 trait: no dup-verts arrays, or the
+    4-byte tangent buffer. unconvert_payload reverses both, so "needs
+    unpatching" must test both -- the reverse of old_format's rule."""
+    has_dup, end = detect_dup_verts(payload, sections_at, n_sections)
+    if not has_dup:
+        return True
+    buf = _walk_vertex_buffers(payload, end)
+    return buf is not None and buf["elem"] == 4
+
+
+def unconvert_payload(payload):
+    """
+    Convert one skeletal mesh export payload from the 1.005 layout BACK to the
+    pre-1.005 one, for players still on the old game version.
+
+    The reverse of convert_payload, with two asymmetries. The duplicated-vertex
+    arrays are synthesized in their empty form (see synthesize_dup_arrays) --
+    the cooked originals were stale donor data, unrecoverable and never
+    meaningful. UVs are left alone: half floats were always legal, so a
+    forward-patched mod's UVs are already valid 1.004 data.
+
+    Returns (new_payload, report); report["bytes_removed"] is negative, since
+    this direction grows the mesh.
+    """
+    report = {}
+
+    after_skeleton, info = skm.parse_head(payload, 0, len(payload),
+                                          skm.NoNames(), verbose=False)
+    lod = skm.parse_lod_header(payload, after_skeleton)
+
+    report["n_lods"] = lod["n_lods"]
+    report["n_sections"] = lod["n_sections"]
+    report["n_bones"] = info["n_bones"]
+
+    if lod["n_lods"] != 1:
+        raise NotImplementedError(
+            f"this mod's model has {lod['n_lods']} levels of detail; this tool "
+            "only handles the single-level models that costume mods use -- "
+            "please report this mod")
+
+    has_dup, sections_end = detect_dup_verts(
+        payload, lod["sections_at"], lod["n_sections"])
+    added = 0
+
+    # --- tangents first: 4 -> 8 bytes per vertex. The buffer sits after the
+    # sections, so growing it here leaves the section offsets untouched for
+    # the dup-verts insertion below.
+    loc = _walk_vertex_buffers(payload, sections_end)
+    if loc is None:
+        raise ValueError("could not locate the vertex buffers")
+    report["tangent_elem"] = loc["elem"]
+    if loc["elem"] == 4:
+        old = payload[loc["data"]:loc["data"] + 4 * loc["count"]]
+        new = convert_tangents_4_to_8(old)
+        payload = (payload[:loc["elem_off"]]
+                   + struct.pack("<II", 8, loc["count"])
+                   + new
+                   + payload[loc["data"] + len(old):])
+        added += len(new) - len(old)
+        report["tangents_converted"] = loc["count"]
+
+    # --- re-insert the duplicated-vertex arrays into every section. ---
+    if not has_dup:
+        out = bytearray()
+        o = lod["sections_at"]
+        for _ in range(lod["n_sections"]):
+            sec, layout = parse_section_bounds(payload, o, False)
+            body = bytearray(payload[layout["start"]:layout["dup_end"]])
+            body[1] &= ~CLASS_STRIP_DUPLICATED_VERTICES
+            out += body
+            dup = synthesize_dup_arrays(sec["n_vertices"])
+            out += dup
+            added += len(dup)
+            out += payload[layout["dup_end"]:layout["end"]]      # bDisabled
+            o = layout["end"]
+        payload = payload[:lod["sections_at"]] + bytes(out) + payload[o:]
+
+    report["changed"] = added > 0
+    report["bytes_removed"] = -added
     return payload, report
 
 

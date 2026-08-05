@@ -27,6 +27,10 @@ without FFVII Rebirth installed. A folder given as a bare argument (or dropped
 onto patch.py) is treated the same as --path; a dropped .zip/.7z/.rar is
 unpacked first, archives nested inside it included.
 
+unpatch.py is this tool in REVERSE -- same flows, same flags -- for players
+still on game version 1.004. It flips MODE to BACKWARD (see FORWARD/BACKWARD
+below) and keeps its own backups folder; nothing else differs.
+
 Names cut both ways. A mod's .utoc/.ucas/.pak names are never changed -- the
 loader keys off them, so a rename makes the mod undetectable. A loader mod's
 FOLDER is the opposite: Dresscode looks a mod up by folder name and ignores one
@@ -90,6 +94,36 @@ import zen
 
 BACKUP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "backups")
 
+# The two directions this tool runs in. patch.py converts 1.004 mods up to the
+# V1.005 mesh layout; unpatch.py sets MODE = BACKWARD (and its own BACKUP_DIR)
+# and converts back down, for players still on the old game version. Everything
+# else -- discovery, drops, backups, restore -- is shared and direction-blind.
+FORWARD = dict(
+    tool="patch.py", verb="Patched", menu_verb="patch",
+    wrapper="Patched Mods", local_backups="_patch_backups",
+    needs=meshfix.old_format, convert=meshfix.convert_payload,
+    needs_label="needs patching", done_label="patched",
+    already="nothing to fix (already new-format)",
+    dresscode_ok=["installed -- not patched by this tool",
+                  "If Dresscode itself crashes, get the author's official",
+                  "V1.005 release."],
+    dresscode_skip=["Dresscode has an official V1.005 update; install",
+                    "it from its author instead of patching it here."],
+)
+BACKWARD = dict(
+    tool="unpatch.py", verb="Unpatched", menu_verb="unpatch",
+    wrapper="Unpatched Mods", local_backups="_unpatch_backups",
+    needs=meshfix.new_format, convert=meshfix.unconvert_payload,
+    needs_label="needs unpatching", done_label="1.004 already",
+    already="nothing to do (already the old 1.004 format)",
+    dresscode_ok=["installed -- not touched by this tool",
+                  "For the 1.004 game, install the author's original",
+                  "release of Dresscode."],
+    dresscode_skip=["Dresscode is not converted here; for the 1.004",
+                    "game install the author's original release."],
+)
+MODE = FORWARD
+
 # Mods that are part of the loader framework, not content -- never touch these.
 SKIP = {"FF7RML", "FF7RModMenu"}
 
@@ -129,7 +163,8 @@ def _find_pak_utocs(root, max_depth=5):
     out = []
     for dirpath, dirnames, filenames in os.walk(root):
         dirnames[:] = [d for d in dirnames
-                       if d.lower() != "_patch_backups"]
+                       if d.lower() not in ("_patch_backups",
+                                            "_unpatch_backups")]
         if dirpath[len(root):].count(os.sep) >= max_depth:
             dirnames[:] = []
         for f in filenames:
@@ -296,7 +331,7 @@ def scan(utoc_path):
                     after, info = skm.parse_head(payload, 0, len(payload),
                                                  skm.NoNames(), verbose=False)
                     lod = skm.parse_lod_header(payload, after)
-                    needs = meshfix.old_format(
+                    needs = MODE["needs"](
                         payload, lod["sections_at"], lod["n_sections"])
                     found.append(dict(chunk=i, path=toc.paths[i], export=e["name"],
                                       size=e["size"], n_lods=lod["n_lods"],
@@ -339,7 +374,7 @@ def patch_package(data):
     for k, e in enumerate(pkg.exports):
         removed_before[k] = running
         if e["cls"] == skm.SKELETAL_MESH:
-            new_payload, report = meshfix.convert_payload(bytes(payloads[k]))
+            new_payload, report = MODE["convert"](bytes(payloads[k]))
             if report.get("changed"):
                 running += report["bytes_removed"]
                 payloads[k] = bytearray(new_payload)
@@ -446,14 +481,16 @@ def patch_mod(name, utoc_path, out_dir=None, backup_dir=None, no_backup=False):
             size_deltas[toc.package_id(i)] = removed
             for export_name, rep in reports:
                 if rep.get("changed"):
+                    delta = rep["bytes_removed"]
                     print(f"    {toc.paths[i]} :: {export_name}")
                     print(f"      {rep['n_sections']} sections, "
                           f"{rep['n_bones']} bones, "
-                          f"removed {rep['bytes_removed']:,} bytes "
+                          f"{'removed' if delta >= 0 else 'added'} "
+                          f"{abs(delta):,} bytes "
                           f"({len(data):,} -> {len(patched):,})")
 
     if not new_data:
-        print("    nothing to fix (already new-format)")
+        print(f"    {MODE['already']}")
         return False
 
     # Back up before writing anything (in-place only).
@@ -635,11 +672,11 @@ def show_list(mods, debug=False, sources=None):
             print("          Costume mods have no menu without it. Install Dresscode")
             print("          from its author first, then run this again.")
         else:
-            # Dresscode ships its own official V1.005 build, so this tool never
-            # patches it and makes no claim about its format.
-            print("    [ok]  installed -- not patched by this tool")
-            print("          If Dresscode itself crashes, get the author's official")
-            print("          V1.005 release.")
+            # Dresscode ships its own official builds, so this tool never
+            # converts it and makes no claim about its format.
+            print(f"    [ok]  {MODE['dresscode_ok'][0]}")
+            for line in MODE["dresscode_ok"][1:]:
+                print(f"          {line}")
 
     # ---- everything else ------------------------------------------------
     others = {k: v for k, v in results.items() if not _is_dresscode(k)}
@@ -653,7 +690,8 @@ def show_list(mods, debug=False, sources=None):
         width = max(len(k) for k in withmesh) + 2
         for name in sorted(withmesh):
             state, n, _ = withmesh[name]
-            label = "needs patching" if state == "needs_fix" else "patched"
+            label = (MODE["needs_label"] if state == "needs_fix"
+                     else MODE["done_label"])
             print(f"    {MARK[state]}  {name:<{width}} {label:<15} "
                   f"{n} mesh{_plural(n)}{src_tag(mods[name])}")
 
@@ -693,12 +731,14 @@ def show_list(mods, debug=False, sources=None):
     if need:
         s = "s" if len(need) != 1 else ""
         verb = "" if len(need) != 1 else "s"
-        print(f"  {len(need)} mod{s} need{verb} patching:  {', '.join(need)}")
+        what = MODE["needs_label"].split(" ", 1)[1]      # "patching"/"unpatching"
+        print(f"  {len(need)} mod{s} need{verb} {what}:  {', '.join(need)}")
         scope = "".join(f' --path "{os.path.abspath(s)}"' for s in sources)
-        print(f"  Run:  python patch.py{scope} --all")
+        print(f"  Run:  python {MODE['tool']}{scope} --all")
     else:
         s = "s" if len(done) != 1 else ""
-        print(f"  Nothing to do -- {len(done)} mod{s} already patched.")
+        print(f"  Nothing to do -- {len(done)} mod{s} already "
+              f"{'patched' if MODE is FORWARD else 'in the 1.004 format'}.")
     print()
 
     if debug:
@@ -760,10 +800,10 @@ def _pause_before_exit(argv):
 
 
 def _wrapper_dir(source):
-    """The "Patched Mods" folder placed beside a dropped folder (or zip) to hold
-    its patched copies."""
+    """The "Patched Mods" (or "Unpatched Mods") folder placed beside a dropped
+    folder (or zip) to hold its converted copies."""
     return os.path.join(os.path.dirname(os.path.abspath(source.rstrip("\\/"))),
-                        "Patched Mods")
+                        MODE["wrapper"])
 
 
 # Archive handling -- detection, extraction, nested unpacking -- lives in
@@ -823,9 +863,11 @@ def _folder_menu(sources):
     job. Returns an exit code."""
     global _INTERACTED
     print("  ----------------------------------------------------------------")
-    print("  This will patch every mod in what you dropped (archives are")
-    print("  extracted first) and save the patched copies -- originals")
-    print("  untouched -- to a \"Patched Mods\" folder beside "
+    print(f"  This will {MODE['menu_verb']} every mod in what you dropped"
+          " (archives are")
+    print(f"  extracted first) and save the {MODE['menu_verb']}ed copies --"
+          " originals")
+    print(f"  untouched -- to a \"{MODE['wrapper']}\" folder beside "
           + ("it:" if len(sources) == 1 else "each:"))
     for s in sources:
         print(f"      {_wrapper_dir(s)}{os.sep}")
@@ -889,7 +931,8 @@ def _confirm_game_folder(sources):
     global _INTERACTED
     print("  ----------------------------------------------------------------")
     print("  That is inside your game install -- these are your installed mods.")
-    print("  This patches the ones that need it, in place. Your originals are")
+    print(f"  This {MODE['menu_verb']}es the ones that need it, in place. "
+          "Your originals are")
     print("  backed up first, to:")
     print(f"      {os.path.abspath(BACKUP_DIR)}{os.sep}")
     try:
@@ -980,7 +1023,7 @@ def _backup_root(sources):
     root = os.path.abspath(sources[0])
     if root.lower().endswith(".utoc"):
         root = os.path.dirname(root)
-    return os.path.join(root, "_patch_backups")
+    return os.path.join(root, MODE["local_backups"])
 
 
 def main(argv):
@@ -1065,8 +1108,9 @@ def main(argv):
     for name, utoc in targets.items():
         print(name)
         if _is_dresscode(name) and not do_restore:
-            print("    skipped -- Dresscode has an official V1.005 update; install")
-            print("    it from its author instead of patching it here.")
+            print(f"    skipped -- {MODE['dresscode_skip'][0]}")
+            for line in MODE["dresscode_skip"][1:]:
+                print(f"    {line}")
             continue
         if do_restore:
             if restore(name, utoc, backup_base):
@@ -1086,7 +1130,7 @@ def main(argv):
             print(f"    FAILED: {type(ex).__name__}: {ex}")
             failed.append(name)
 
-    verb = "Restored" if do_restore else "Patched"
+    verb = "Restored" if do_restore else MODE["verb"]
     summary = []
     if failed:
         summary.append(f"  {verb} {len(changed)}, skipped {len(unchanged)}, "
@@ -1103,15 +1147,16 @@ def main(argv):
         summary.append("")
         if no_backup:
             if sources:
-                summary.append("  Patched copy is ready (your original was left"
-                               " untouched):")
+                summary.append(f"  {MODE['verb']} copy is ready (your original"
+                               " was left untouched):")
                 summary.append(f"      {os.path.abspath(sources[0])}{os.sep}")
             else:
-                summary.append("  Patched in place; no backup was taken"
+                summary.append(f"  {MODE['verb']} in place; no backup was taken"
                                " (--no-backup).")
         elif out_dir and not all(_same_path(out_dir, os.path.dirname(u))
                                  for u in targets.values()):
-            summary.append(f"  Patched copies written to  {os.path.abspath(out_dir)}")
+            summary.append(f"  {MODE['verb']} copies written to  "
+                           f"{os.path.abspath(out_dir)}")
             summary.append("  Your original files were left exactly as they were.")
         else:
             summary.append("  Your untouched originals are backed up in:")
@@ -1169,11 +1214,17 @@ def startup(require_game=True):
     return False
 
 
-if __name__ == "__main__":
+def run(argv):
+    """Full command-line entry: startup checks, the run, the exit pause.
+    Shared with unpatch.py, which flips MODE first."""
     # Folder mode (--path or dropped folders) needs only Oodle, not the game.
-    _sources = _parse_args(sys.argv[1:])[0]
+    _sources = _parse_args(argv)[0]
     code = 0 if startup(require_game=not _sources) else 1
     if code == 0:
-        code = main(sys.argv[1:])
-    _pause_before_exit(sys.argv[1:])
-    sys.exit(code)
+        code = main(argv)
+    _pause_before_exit(argv)
+    return code
+
+
+if __name__ == "__main__":
+    sys.exit(run(sys.argv[1:]))
