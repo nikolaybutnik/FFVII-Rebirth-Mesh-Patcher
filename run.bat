@@ -26,4 +26,11 @@ echo     Tip: you can also just drag mod folders -- or .zip/.7z/.rar archives,
 echo     even one containing several mods -- onto patch.py.
 echo     --path needs no game installed, only the Oodle DLL.
 echo.
+echo Also in this folder (each takes the same drag-and-drop):
+echo     python unpatch.py ...                the patcher in REVERSE: mods back to
+echo                                           game version 1.004. EVERY patch.py
+echo                                           command above works the same on it;
+echo                                           its backups live in unpatch_backups.
+echo     python convert.py                    convert mods between Dresscode and pak
+echo.
 cmd /k

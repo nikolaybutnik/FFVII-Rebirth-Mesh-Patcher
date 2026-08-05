@@ -235,8 +235,11 @@ python unpatch.py --all               unpatch everything that needs it
 python unpatch.py --path "D:\mods" --out "D:\send"   copies, originals kept
 ```
 
-In-place runs back up to `unpatch_backups\` (folder drops to
-`_unpatch_backups\` inside the folder), and `--restore` undoes from there.
+**Every `patch.py` command works on `unpatch.py` unchanged** — mod names,
+`--restore`, `--path`/`--out`, `--debug`, drag-and-drop of folders and
+archives, all of it. The only difference is where backups go: in-place runs
+back up to `unpatch_backups\` (folder drops to `_unpatch_backups\` inside
+the folder), and each tool's `--restore` undoes its own work from there.
 Patching and unpatching are mutual inverses: a mod taken down to 1.004 and
 back comes out identical, apart from tangent rounding far below anything
 visible.
