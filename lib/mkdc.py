@@ -643,13 +643,34 @@ def build(meta, outfits, plugin, out_root, say=print, extras=(),
     used_names = set()
     entries_outfits = []        # per outfit: (mesh soft path, player key)
 
+    # Variant folders share most packages and they dedupe by name -- but
+    # authors recook each variant separately, and a "shared" file whose
+    # bytes came out different (the _Condition model, typically) cannot
+    # live under one name. Find those up front; every outfit after the
+    # first gets its own private copy of them.
+    pre = []
+    for outfit in outfits:
+        ptoc = iostore.Toc(outfit["utoc"])
+        pre.append((ptoc, rename.read_packages(ptoc)))
+    shared = {}
+    for k, (_ptoc, ppkgs) in enumerate(pre):
+        for p in ppkgs.values():
+            shared.setdefault(p["name"].lower(), []).append((k, p["chunk"]))
+    diff_owner = {}
+    for low, where in shared.items():
+        if len(where) < 2:
+            continue
+        digests = {hashlib.md5(pre[k][0].read(chunk)).digest()
+                   for k, chunk in where}
+        if len(digests) > 1:
+            diff_owner[low] = where[0][0]
+
     tocs, wearers = [], []
     for k, outfit in enumerate(outfits):
-        toc = iostore.Toc(outfit["utoc"])
+        toc, packages = pre[k]
         tocs.append(toc)
         if template_toc is None:
             template_toc = toc
-        packages = rename.read_packages(toc)
         mesh_name, player = find_stock_mesh(packages)
         if not mesh_name:
             raise RuntimeError(
@@ -679,7 +700,10 @@ def build(meta, outfits, plugin, out_root, say=print, extras=(),
                 continue
             tail = pkg["name"][6:] if low.startswith("/game/") \
                 else pkg["name"].lstrip("/")
-            renames[low] = f"/{plugin}/{tail}"
+            if low in diff_owner and diff_owner[low] != k:
+                renames[low] = f"/{plugin}/{safe}/{tail}"
+            else:
+                renames[low] = f"/{plugin}/{tail}"
         extra_imports = {}
         for g in grafts.values():
             renames[g["name"].lower()] = f"/{plugin}/{g['name'][6:]}"
