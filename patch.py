@@ -155,16 +155,33 @@ def _is_skipped(name):
     return name.lower() in {s.lower() for s in SKIP} or name.lower() == _SELF.lower()
 
 
+def _central_backup_dirs():
+    """The central backup folders -- this tool's, its reverse twin's, and
+    whatever BACKUP_DIR currently points at. People unzip the tool INSIDE
+    ~mods, which puts these inside the scan: the backed-up original then
+    lists as a mod needing patching and gets patched over -- the pristine
+    copy destroyed by the very tool that made it (real 1.4.0 field report,
+    'it also tries to patch and read its own backup folder')."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    return {os.path.normcase(os.path.abspath(p))
+            for p in (BACKUP_DIR,
+                      os.path.join(here, "backups"),
+                      os.path.join(here, "unpatch_backups"))}
+
+
 def _find_pak_utocs(root, max_depth=5):
     """Every .utoc under `root`, depth-limited. The game loads paks recursively
     beneath ~mods, and some users nest each mod in its own subfolder. Skips our
-    _patch_backups folders so backed-up originals don't resurface as mods."""
+    backup folders so backed-up originals don't resurface as mods."""
     root = os.path.abspath(root)
+    central = _central_backup_dirs()
     out = []
     for dirpath, dirnames, filenames in os.walk(root):
         dirnames[:] = [d for d in dirnames
                        if d.lower() not in ("_patch_backups",
-                                            "_unpatch_backups")]
+                                            "_unpatch_backups")
+                       and os.path.normcase(os.path.join(dirpath, d))
+                       not in central]
         if dirpath[len(root):].count(os.sep) >= max_depth:
             dirnames[:] = []
         for f in filenames:
