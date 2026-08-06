@@ -235,10 +235,23 @@ def plan(packages, raw_meta, mesh_pids, say=print):
                                 for g in grafts.values()))
         say(f"      stock-texture retouch kept: {tex}")
         say(f"        (carrying {mats} from the game so it rides the outfit)")
+    # Whole costume slots get ONE plain sentence -- authors cook an outfit
+    # over every slot so it follows the character through story scenes, and
+    # a per-slot line each was seven lines of PC0002_xx jargon.
+    slots, other = [], []
     for p in sorted(real - consumed):
+        n = orphans[p].lower()
+        (slots if n.startswith("/game/character/player/")
+         and "/model/" in n else other).append(p)
+    if slots:
+        say(f"      note: the pak also replaces "
+            f"{len(slots)} more of this character's costumes (story "
+            "scenes, other slots). Worn through Dresscode, only the "
+            "outfit you pick changes -- the rest keep their normal look.")
+    for p in other:
         say(f"      note: {orphans[p].rsplit('/', 1)[-1]} overrides a stock "
-            "file nothing on this outfit uses (another costume slot or a "
-            "weapon, say) -- that part won't apply in Dresscode form")
+            "file nothing on this outfit uses -- that part won't apply in "
+            "Dresscode form")
     return grafts
 
 

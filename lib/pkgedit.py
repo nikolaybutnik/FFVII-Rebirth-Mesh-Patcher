@@ -94,18 +94,21 @@ def export_object_path(pkg, export, renamed=None):
     return "/".join(reversed(parts))
 
 
-def strip_name_number(name, number):
+def split_name_number(name):
     """
-    Undo FName numbering: ("/A/B_2", 3) -> "/A/B".
+    Encode a path the way the cook does: "/A/B_11" -> ("/A/B", 12).
 
-    A package whose name has a number stores the BASE string in its name table
-    and the number beside it, so a full path resolved through name_at cannot be
-    written straight back -- the suffix has to come off first.
+    A package whose name carries an FName number stores only the BASE string
+    in its name table, the number beside it -- name_at is the read side of
+    this, split_name_number the write side. Only a trailing _<digits> with no
+    leading zero splits: "_05" stays in the string, which is why costume slots
+    _00.._09 never carry a number but PC0002_11 does.
     """
-    if number == 0:
-        return name
-    suffix = f"_{number - 1}"
-    return name[:-len(suffix)] if name.endswith(suffix) else name
+    stem, _, digits = name.rpartition("_")
+    if not stem or not digits.isdigit() or len(digits) > 9 \
+            or (digits != "0" and digits[0] == "0"):
+        return name, 0
+    return stem, int(digits) + 1
 
 
 def package_name_of(pkg):
@@ -219,10 +222,26 @@ def rewrite(data, names=None, import_map=None, pkgid_map=None,
     bundles_off = pkg.bundles_off + shift
     graph_off = pkg.graph_off + shift
 
+    # The summary name is (table index, number) and the number survives a
+    # rename verbatim -- correct while the new leaf ends in the old suffix,
+    # stale garbage the moment it does not (".../PC0002_11" carried number 12
+    # onto "/Mod/Outfits/Foo" and the package answered as "Foo_11"). Re-encode
+    # the number from the name the caller actually wants.
+    def renumber(mapped, target):
+        idx = mapped & 0x3FFFFFFF
+        if target is None or idx >= len(names):
+            return mapped
+        base, number = split_name_number(target)
+        if names[idx] != base:
+            return mapped        # stored raw (or not this name) -- leave it
+        return (mapped & 0xFFFFFFFF) | (number << 32)
+
     out = bytearray()
     out += struct.pack(
         ZenPackage.HEADER,
-        pkg.name, pkg.srcname, pkg.pkg_flags, pkg.cooked_hdr_size,
+        renumber(pkg.name, new_package_name),
+        renumber(pkg.srcname, new_source_name),
+        pkg.pkg_flags, pkg.cooked_hdr_size,
         nm_off, len(strings), nh_off, len(hashes),
         imp_off, exp_off, bundles_off, graph_off, len(graph), pkg.pad)
     out += strings

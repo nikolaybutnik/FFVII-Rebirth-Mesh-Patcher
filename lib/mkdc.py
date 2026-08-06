@@ -42,6 +42,7 @@ import rename
 import stockgraft
 import toggles
 import tagged
+import weapons
 import writer
 from zen import ZenPackage
 
@@ -174,14 +175,23 @@ _STOCK_SLOT = re.compile(
 
 def find_stock_mesh(packages):
     """(package name, player key) of the stock costume mesh this pak
-    overrides -- the package sitting on any known character's costume slot."""
+    overrides -- the package sitting on any known character's costume slot.
+
+    A pak can cover several slots at once (a standard costume plus the
+    changing-clothes story variant, say). The LOWEST slot is the costume worn
+    in normal play, and picking by chunk order instead once handed the outfit
+    row to the story variant."""
     prefixes = {prefix.lower(): key
                 for key, (prefix, _folder) in moddata.PLAYER_TYPES.items()}
+    hits = []
     for info in packages.values():
         m = _STOCK_SLOT.match(info["name"].lower())
         if m and m.group(1) in prefixes:
-            return info["name"], prefixes[m.group(1)]
-    return None, None
+            hits.append((int(m.group(2)), info["name"], prefixes[m.group(1)]))
+    if not hits:
+        return None, None
+    _slot, name, player = min(hits)
+    return name, player
 
 
 def mesh_object_name(toc, chunk):
@@ -602,13 +612,17 @@ def restore(rt, parts, out_root, optionals=None, say=print):
 
 
 def build(meta, outfits, plugin, out_root, say=print, extras=(),
-          external=()):
+          external=(), weapon_tiles=True):
     """
     Write the plugin folder. `meta` and `outfits` come from the dresscode.json
     template (read_template's output shapes); each outfit carries its utoc.
 
     `extras` is [(label, utoc)] for the old modular standard's optional paks:
-    each becomes a toggle row per outfit it can act on.
+    each becomes a toggle row per outfit it can act on. Weapon paks among
+    them become weapons-menu tiles instead -- but only when `weapon_tiles`
+    is set: a multi-outfit mod builds one plugin per outfit from the SAME
+    extras, and only the first may carry the weapon tiles, or every plugin
+    would register an identical row.
 
     `external` is lowercase package names to leave at their original /Game/
     paths and NOT ship: the stackable-masks design serves them from ~mods
@@ -741,9 +755,11 @@ def build(meta, outfits, plugin, out_root, say=print, extras=(),
     # An entry is (label, [utoc, ...]): one pak is a plain toggle, several
     # are a user-composed combination applied as one row.
     entries_toggles = []
+    entries_weapons = []
     opened = {}
     for label, utocs in extras:
         parts, parts_index = [], {}
+        weapon_parts = []
         for utoc in utocs:
             key = os.path.normcase(os.path.abspath(utoc))
             if key not in opened:
@@ -755,16 +771,50 @@ def build(meta, outfits, plugin, out_root, say=print, extras=(),
                 opened[key] = (etoc, epkgs,
                                toggles.export_index(etoc, epkgs))
             etoc, epkgs, eindex = opened[key]
+            if weapons.is_weapon_pak(epkgs):
+                # A weapon recolour cannot ride an outfit tile -- the outfit
+                # never references the weapon -- but it CAN become a tile in
+                # Dresscode's WEAPONS menu.
+                weapon_parts.append((etoc, epkgs))
+                continue
             parts.append((etoc, epkgs))
             parts_index.update(eindex)
+        if weapon_parts and weapon_tiles:
+            wsafe = safe_id(f"{label}", used_names,
+                            f"Weapon{len(used_names)}")
+            got = weapons.build_tile(plugin, wsafe, weapon_parts, say,
+                                     label=label)
+            if got is None:
+                say(f"      note: {label} changes a weapon, which takes "
+                    "copying the weapon from the game's own files -- not "
+                    "found here. Keep that pak in ~mods instead: it works "
+                    "there alongside the Dresscode outfit.")
+            else:
+                carried, rows = got
+                for pid, rec in carried.items():
+                    merged.setdefault(pid, rec)
+                for row_label, mesh_path, player, stock_name in rows:
+                    entries_weapons.append(dict(
+                        label=row_label, mesh=mesh_path, player=player,
+                        stock=stock_name))
+        if not parts:
+            continue
         for w in wearers:
             slots, _overridden, retex = toggles.plan(
                 w["toc"], w["packages"], w["mesh_chunk"], parts,
                 refs=w.setdefault(
                     "refs", toggles.references(w["toc"], w["packages"])))
             if not slots:
-                say(f"      note: {label} changes nothing on "
-                    f"{w['outfit']['name']} -- skipped")
+                names = [p["name"] for _et, ep in parts for p in ep.values()]
+                if names and all(n.lower().startswith("/game/")
+                                 for n in names):
+                    say(f"      note: {label} only changes game files "
+                        f"{w['outfit']['name']} never uses (a weapon, say) "
+                        "-- no tile made. Keep that pak in ~mods instead: "
+                        "it works there alongside the Dresscode outfit.")
+                else:
+                    say(f"      note: {label} changes nothing on "
+                        f"{w['outfit']['name']} -- skipped")
                 continue
             safe = safe_id(f"{label}", used_names, f"Extra{len(used_names)}")
             made, actor = toggles.emit(
@@ -830,6 +880,13 @@ def build(meta, outfits, plugin, out_root, say=print, extras=(),
         mesh_pkg, mesh_obj = mesh_path.rsplit(".", 1)
         registry_assets.append(dict(
             object_path=mesh_path,
+            package_path=mesh_pkg.rsplit("/", 1)[0],
+            class_name="SkeletalMesh", package_name=mesh_pkg,
+            asset_name=mesh_obj, tags=[]))
+    for e in entries_weapons:
+        mesh_pkg, mesh_obj = e["mesh"].rsplit(".", 1)
+        registry_assets.append(dict(
+            object_path=e["mesh"],
             package_path=mesh_pkg.rsplit("/", 1)[0],
             class_name="SkeletalMesh", package_name=mesh_pkg,
             asset_name=mesh_obj, tags=[]))
@@ -982,6 +1039,60 @@ def build(meta, outfits, plugin, out_root, say=print, extras=(),
         asset_name="CharacterData",
         tags=data_asset_tags("PDA_ModData_Character_C", CHAR_PKG,
                              "CharacterData")))
+
+    if entries_weapons:
+        # A second data asset of the SAME class, told apart by "Mod Type" --
+        # exactly how Dresscode's own container splits its stock costume and
+        # stock weapon lists between two assets.
+        wbodies = []
+        for e in entries_weapons:
+            preview = weapons.stock_preview(e["stock"]) or TEMPLATE_ICON
+            wbodies.append([
+                (F["GeneralData"],
+                 ("struct", "UDS_ModData_General", GUID_GENERAL, [
+                     (F["Name"], ("str", e["label"])),
+                     (F["OutfitDescription"], ("str", e["label"])),
+                     (F["PreviewImage"], ("softpath", preview)),
+                 ])),
+                (F["SkeletalMeshData"],
+                 ("struct", "UDS_AssetType_SkeletalMesh", GUID_SKM, [
+                     (F["PlayerType"],
+                      ("enum", "EPlayerType", f"EPlayerType::{e['player']}")),
+                     (F["SkeletalMesh"], ("softpath", e["mesh"])),
+                     (F["Actor"], ("softpath", None)),
+                 ])),
+                (F["AdditionalData"], ("struct", "UDS_AssetType_Custom",
+                                       GUID_CUSTOM, [
+                    (F["DataAssets"], ("map", "NameProperty",
+                                       "ObjectProperty")),
+                    (F["CustomData"], ("map", "NameProperty",
+                                       "StructProperty")),
+                ])),
+            ])
+        weap_props = [
+            ("Character Data",
+             ("array_structs", "UDS_ModData_Character", GUID_CHAR, wbodies)),
+            ("Mod Type", ("byte_enum", "E_ModType", weapons.MOD_TYPE_WEAPON)),
+            ("NativeClass", ("obj", -1)),
+        ]
+        weap_name = f"/{plugin}/MetaData/WeaponData"
+        add(weap_name, mkpkg.build(
+            weap_name, "WeaponData", CHAR_PKG, "PDA_ModData_Character_C",
+            weap_props,
+            imports=[cityhash.object_id(CHAR_PKG,
+                                        "PDA_ModData_Character_C"),
+                     NULL,
+                     cityhash.object_id(CHAR_PKG,
+                                        "Default__PDA_ModData_Character_C")],
+            graph=[(cityhash.package_id(CHAR_PKG), [(0, 0)])]),
+            [cityhash.package_id(CHAR_PKG)])
+        registry_assets.append(dict(
+            object_path=f"{weap_name}.WeaponData",
+            package_path=f"/{plugin}/MetaData",
+            class_name="PDA_ModData_Character_C", package_name=weap_name,
+            asset_name="WeaponData",
+            tags=data_asset_tags("PDA_ModData_Character_C", CHAR_PKG,
+                                 "WeaponData")))
 
     # Now that the whole container is known, every reference leaving it has
     # to say so -- see mark_external_arcs.

@@ -169,14 +169,18 @@ def rewrite_chunks(toc, packages, renames, object_renames=None, dropped=None,
         export_names = {e["idx"]: objects[e["name"]]
                         for e in pkg.exports if e["name"] in objects}
         # A package with an FName number stores its own path unsuffixed, so the
-        # prefix rewrite above never matched it. Set that one entry directly.
+        # prefix rewrite above never matched it. Store the NEW name's base --
+        # not the old suffix stripped off the new name, which came back whole
+        # whenever the leaf changed shape (".../PC0002_11" -> "/Mod/Outfits/Foo")
+        # and left the stale number turning it into "Foo_11". pkgedit.rewrite
+        # re-encodes the number to match.
         for mapped in (pkg.name, pkg.srcname):
             idx, number = mapped & 0x3FFFFFFF, mapped >> 32
             if number and idx < len(names):
                 resolved = pkg.name_at(mapped & 0xFFFFFFFF, number)
                 moved = renames.get(resolved.lower())
                 if moved:
-                    names[idx] = pkgedit.strip_name_number(moved, number)
+                    names[idx] = pkgedit.split_name_number(moved)[0]
         source = pkgedit.source_name_of(pkg)
         out = pkgedit.rewrite(
             data, names=names,

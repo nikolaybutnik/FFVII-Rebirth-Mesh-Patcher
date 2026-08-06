@@ -145,6 +145,9 @@ def _read_array(r, inner, end):
 #     ("name", text)                       NameProperty
 #     ("obj", package_index)               ObjectProperty (FPackageIndex)
 #     ("enum", enum_type, value_name)      EnumProperty
+#     ("byte_enum", enum_type, value_name)  ByteProperty holding an enum FName
+#                                          (blueprint enum class properties,
+#                                          e.g. Dresscode's "Mod Type")
 #     ("bool", value)                      BoolProperty (value in the tag)
 #     ("softpath", "/Pkg/A.A" or None)     StructProperty<SoftObjectPath>
 #     ("struct", type_name, guid16, props) StructProperty
@@ -169,14 +172,15 @@ def collect_names(props, out):
         out.add(name)
         out.add({"str": "StrProperty", "obj": "ObjectProperty",
                  "name": "NameProperty",
-                 "enum": "EnumProperty", "bool": "BoolProperty",
+                 "enum": "EnumProperty", "byte_enum": "ByteProperty",
+                 "bool": "BoolProperty",
                  "softpath": "StructProperty",
                  "struct": "StructProperty", "struct_raw": "StructProperty",
                  "array_structs": "ArrayProperty",
                  "map": "MapProperty"}[kind])
         if kind == "name":
             out.add(spec[1])
-        elif kind == "enum":
+        elif kind in ("enum", "byte_enum"):
             out.add(spec[1])
             out.add(spec[2])
         elif kind == "softpath":
@@ -232,6 +236,8 @@ def emit_properties(props, name_of):
             out += tag(name, "ObjectProperty", struct.pack("<i", spec[1]))
         elif kind == "enum":
             out += tag(name, "EnumProperty", fname(spec[2]), fname(spec[1]))
+        elif kind == "byte_enum":
+            out += tag(name, "ByteProperty", fname(spec[2]), fname(spec[1]))
         elif kind == "bool":
             out += tag(name, "BoolProperty", b"",
                        b"\x01" if spec[1] else b"\x00")

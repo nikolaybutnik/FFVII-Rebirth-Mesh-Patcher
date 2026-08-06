@@ -1,0 +1,330 @@
+"""
+weapons.py -- convert weapon add-on paks into Dresscode WEAPON tiles.
+
+Dresscode's weapons menu is fed by the same PDA_ModData_Character class as
+costumes: its own container ships DA_ModData_CharacterDefaults (the stock
+costume tiles) and DA_ModData_WeaponDefaults (the stock weapon tiles), and
+the ONLY difference is a top-level "Mod Type" property -- a ByteProperty
+holding E_ModType::NewEnumerator2. A mod's asset carrying that value
+registers WEAPON rows; proven in game 2026-08-05 with a probe whose one row
+equipped from the weapons menu.
+
+A weapon add-on pak (a glove recolour riding a costume mod, say) overrides
+stock files under /Game/Character/Weapon/ that the OUTFIT never references,
+so it cannot ride an outfit tile -- and a plugin cannot ship /Game/ paths at
+all. What it CAN do is become a weapon tile: carry a copy of the stock
+weapon mesh into the plugin, plus private copies of just the stock materials
+that sample what the pak overrides, plus the pak's own packages -- the same
+graft-and-repoint dance stockgraft does for costume retouches. The row's
+mesh path then points at the copy, and picking the tile equips the recoloured
+weapon while the stock tile keeps the stock look.
+
+Every carried package gets a tile-private name under /<Mod>/Weapons/<Safe>/,
+so two tiles recolouring the same weapon differently never collide, and the
+mesh itself lands at /<Mod>/Weapons/<Safe> with its export renamed to match.
+That leaf is digit-free on purpose: stock weapon leaves like WE0002_15 are
+FName-numbered, and keeping our own names out of that encoding entirely is
+cheaper than being right about it everywhere.
+"""
+
+import glob
+import os
+import struct
+
+import cityhash
+import conheader
+import config
+import iostore
+import moddata
+import pkgedit
+import rename
+import stockgraft
+from zen import ZenPackage
+
+WEAPON_ROOT = "/game/character/weapon/"
+
+# The E_ModType value Dresscode's own DA_ModData_WeaponDefaults carries.
+MOD_TYPE_WEAPON = "E_ModType::NewEnumerator2"
+
+SKELETAL_MESH = cityhash.object_id("/Script/Engine", "SkeletalMesh", 1)
+
+
+def is_weapon_pak(pkgs):
+    """At least one stock weapon override and nothing touching another
+    character tree -- author signature dummies (a lone /Game/X package)
+    ride along in the wild and do not make a weapon pak an outfit."""
+    weapon = other = False
+    for p in pkgs.values():
+        n = p["name"].lower()
+        if n.startswith(WEAPON_ROOT) and n.count("/") >= 5:
+            weapon = True
+        elif n.startswith("/game/character/"):
+            other = True
+    return weapon and not other
+
+
+def player_for(folder):
+    """WE0002_15_Tifa_... -> TIFA. Weapon numbering mirrors the PC numbers."""
+    num = folder[2:6]
+    for key, (prefix, _folder) in moddata.PLAYER_TYPES.items():
+        if prefix[2:6] == num:
+            return key
+    return None
+
+
+_previews = None
+
+
+def stock_preview(mesh_name):
+    """The billboard Dresscode's own weapon list shows for this stock weapon,
+    from the installed Dresscode -- None when that is not readable here."""
+    global _previews
+    if _previews is None:
+        _previews = {}
+        pat = os.path.join(getattr(config, "MODS_DIR", "") or "", "Dresscode",
+                           "Content", "Paks", "WindowsNoEditor", "*.utoc")
+        for u in glob.glob(pat):
+            try:
+                toc = iostore.Toc(u)
+                for pid, p in rename.read_packages(toc).items():
+                    if not p["name"].endswith("DA_ModData_WeaponDefaults"):
+                        continue
+                    for row in moddata.read_outfits(toc.read(p["chunk"])):
+                        mesh = (row["skeletal_mesh"] or "").split(".")[0]
+                        if mesh and row["preview_image"]:
+                            _previews[mesh.lower()] = row["preview_image"]
+                toc.close()
+            except Exception:
+                pass
+    return _previews.get(mesh_name.lower())
+
+
+def _part_meta(toc):
+    """{pid: (exports, bundles, imported pids)} from a part pak's header."""
+    out = {}
+    hdr = next((toc.read(i) for i in range(toc.n)
+                if toc.chunk_ids[i][11] == 10), None)
+    info = conheader.parse(hdr) if hdr else None
+    if info is None:            # some packers write an unreadable header
+        return out
+    for j, pid in enumerate(conheader.package_ids(hdr, info)):
+        _sz, exp, bun = struct.unpack_from(
+            "<Qii", hdr, info["store_off"] + j * 32)[:3]
+        out[pid] = (exp, bun, conheader.imported_packages(hdr, info, j))
+    return out
+
+
+def _part_bulks(toc, pid):
+    return [(bytes(toc.chunk_ids[i]), toc.read(i)) for i in range(toc.n)
+            if toc.chunk_ids[i][11] in (3, 4)
+            and int.from_bytes(toc.chunk_ids[i][:8], "little") == pid]
+
+
+def build_tile(plugin, safe, parts, say=print, label=None):
+    """
+    Carry one weapon combination into the plugin -- recolours (stock mesh,
+    repointed materials) and model replacements (the pak's own mesh) both.
+
+    `parts` is [(toc, pkgs)] in load order (later wins a collision, like the
+    ~mods rules the paks were written for). Returns (carried, rows): carried
+    is {pid: rec} shaped like mkdc.build's merged entries; rows is one
+    (row label, mesh soft path, player key, stock mesh package) per weapon
+    touched. None when the game's own files are not installed -- there is
+    nothing to copy the weapon from.
+    """
+    if not stockgraft._utocs():
+        return None
+
+    overrides, metas = {}, {}
+    for toc, pkgs in parts:
+        pm = _part_meta(toc)
+        for pid, p in pkgs.items():
+            n = p["name"].lower()
+            if not (n.startswith(WEAPON_ROOT) and n.count("/") >= 5):
+                say(f"      note: {p['name'].rsplit('/', 1)[-1]} is not "
+                    "weapon content -- left out of the tile")
+                continue
+            overrides[pid] = (p, toc)
+            metas[pid] = pm.get(pid, (1, 1, []))
+    o_pids = set(overrides)
+    if not o_pids:
+        return {}, []
+
+    folders = sorted({ov[0]["name"].split("/")[4]
+                      for ov in overrides.values()})
+    place = stockgraft._locate(
+        {cityhash.package_id("/Game/Character/Weapon/"
+                             f"{f}/Model/{'_'.join(f.split('_')[:2])}")
+         for f in folders})
+
+    carried, rows = {}, []
+    for n_folder, folder in enumerate(folders):
+        prefix = "_".join(folder.split("_")[:2])
+        mesh_name = f"/Game/Character/Weapon/{folder}/Model/{prefix}"
+        mesh_pid = cityhash.package_id(mesh_name)
+        player = player_for(folder)
+        pl = place.get(mesh_pid)
+        if not player or not pl or not pl["pkg"]:
+            say(f"      note: {folder} is not a weapon the game knows -- "
+                "that pak is skipped")
+            continue
+        ment = stockgraft._entry(mesh_pid, pl)
+        if ment is None:
+            continue
+        # A pak replacing the weapon MODEL itself supplies the mesh; the
+        # walk below then only rounds up whatever else of the pak's it uses.
+        mod_mesh = mesh_pid in o_pids
+        if mod_mesh:
+            ment = (metas[mesh_pid][0], metas[mesh_pid][1],
+                    list(metas[mesh_pid][2]))
+
+        # Walk outward from the mesh until everything sampling an overridden
+        # package is found -- material instance chains put the texture two
+        # hops out, so this mirrors stockgraft's bounded walk.
+        frontier = list(ment[2])
+        parent = {d: None for d in frontier}
+        entries, hits, seen = {}, set(), set()
+        for _depth in range(3):
+            place.update(stockgraft._locate(
+                {d for d in frontier if d not in place and d not in o_pids}))
+            nxt = []
+            for d in frontier:
+                if d in seen:
+                    continue
+                seen.add(d)
+                if d in o_pids:
+                    hits.add(d)
+                    continue
+                dpl = place.get(d)
+                if not dpl or not dpl["pkg"]:
+                    continue
+                ent = stockgraft._entry(d, dpl)
+                if ent is None:
+                    continue
+                entries[d] = (dpl, ent)
+                ddeps = set(ent[2])
+                if ddeps & o_pids:
+                    hits.add(d)
+                else:
+                    for dd in ddeps:
+                        if dd not in seen and dd not in parent:
+                            parent[dd] = d
+                            nxt.append(dd)
+            frontier = nxt
+            if not frontier:
+                break
+        if not hits and not mod_mesh:
+            say(f"      note: nothing on {folder} uses what that pak "
+                "changes -- skipped")
+            continue
+
+        # Chains back to the mesh, the overridden packages they sample, and
+        # the mesh itself: the tile's private copy of the weapon.
+        chain = set()
+        for h in hits:
+            p = h
+            while p is not None and p not in chain:
+                chain.add(p)
+                p = parent.get(p)
+        needed = set()
+        for c in chain:
+            if c in o_pids:
+                needed.add(c)
+            else:
+                needed |= set(entries[c][1][2]) & o_pids
+
+        tsafe = safe if len(folders) == 1 else f"{safe}{n_folder + 1}"
+        root = f"/{plugin}/Weapons/{tsafe}"
+
+        def fetch(pid):
+            if pid in o_pids:
+                p, ptoc = overrides[pid]
+                exp, bun, deps = metas[pid]
+                return (p["name"], ptoc.read(p["chunk"]), exp, bun,
+                        list(deps), _part_bulks(ptoc, pid))
+            dpl, (exp, bun, deps) = entries[pid]
+            u, k = dpl["pkg"]
+            t = stockgraft._toc(u)
+            bulks = [(bytes(stockgraft._toc(bu).chunk_ids[bk]),
+                      stockgraft._toc(bu).read(bk))
+                     for bu, bk in dpl["bulks"]]
+            return (pkgedit.package_name_of(ZenPackage(t.read(k))),
+                    t.read(k), exp, bun, list(deps), bulks)
+
+        if mod_mesh:
+            p, ptoc = overrides[mesh_pid]
+            mesh_data = ptoc.read(p["chunk"])
+            mesh_bulks = _part_bulks(ptoc, mesh_pid)
+        else:
+            mesh_data = stockgraft._toc(pl["pkg"][0]).read(pl["pkg"][1])
+            mesh_bulks = [(bytes(stockgraft._toc(bu).chunk_ids[bk]),
+                           stockgraft._toc(bu).read(bk))
+                          for bu, bk in pl["bulks"]]
+        pool = {mesh_pid: (mesh_name, mesh_data, ment[0], ment[1],
+                           list(ment[2]), mesh_bulks)}
+        for pid in sorted((chain | needed) - {mesh_pid}):
+            pool[pid] = fetch(pid)
+
+        renames = {mesh_name.lower(): root}
+        for pid, (name, *_rest) in pool.items():
+            if pid != mesh_pid:
+                renames[name.lower()] = \
+                    root + "/" + name[len("/Game/Character/Weapon/"):]
+
+        mesh_pkg = ZenPackage(mesh_data)
+        obj = next((e["name"] for e in mesh_pkg.exports
+                    if e["cls"] == SKELETAL_MESH), mesh_pkg.exports[0]["name"])
+        object_renames = {mesh_name.lower(): {obj: tsafe}}
+
+        pseudo = {pid: dict(name=name,
+                            exports=[pkgedit.export_object_path(
+                                ZenPackage(data), e)
+                                for e in ZenPackage(data).exports])
+                  for pid, (name, data, *_r) in pool.items()}
+        pkgid_map, import_map, string_map = rename.build_maps(
+            pseudo, renames, object_renames)
+
+        for pid, (name, data, exp, bun, deps, bulks) in pool.items():
+            pkg = ZenPackage(data)
+            names = [rename.map_path(n, renames, string_map)
+                     for n in pkg.names]
+            for mapped in (pkg.name, pkg.srcname):
+                idx, number = mapped & 0x3FFFFFFF, mapped >> 32
+                if number and idx < len(names):
+                    resolved = pkg.name_at(mapped & 0xFFFFFFFF, number)
+                    moved = renames.get(resolved.lower())
+                    if moved:
+                        names[idx] = pkgedit.split_name_number(moved)[0]
+            source = pkgedit.source_name_of(pkg)
+            exports = {}
+            if pid == mesh_pid:
+                exports = {e["idx"]: tsafe for e in pkg.exports
+                           if e["name"] == obj}
+            new_pid = cityhash.package_id(renames[name.lower()])
+            carried[new_pid] = dict(
+                name=renames[name.lower()],
+                data=pkgedit.rewrite(
+                    data, names=names, import_map=import_map,
+                    pkgid_map=pkgid_map,
+                    new_package_name=renames[name.lower()],
+                    new_source_name=renames.get(source.lower(), source),
+                    export_names=exports),
+                deps=[pkgid_map.get(d, d) for d in deps],
+                exp=exp, bun=bun,
+                bulks=[(new_pid.to_bytes(8, "little") + bytes(bid[8:]), bd)
+                       for bid, bd in bulks])
+
+        # One pak can cover several weapons (an invisible-weapons pak does
+        # all twelve); each gets its own row, told apart by the weapon's
+        # own name.
+        row_label = label or tsafe
+        if len(folders) > 1:
+            bits = folder.split("_", 3)
+            row_label = f"{row_label} - {bits[3] if len(bits) > 3 else folder}"
+        extra = len(pool) - 1
+        say(f"      weapon tile  {row_label}: rides the WEAPONS menu"
+            + (f" (+{extra} supporting file{'s' if extra != 1 else ''})"
+               if extra else ""))
+        rows.append((row_label, f"{root}.{tsafe}", player, mesh_name))
+
+    return carried, rows

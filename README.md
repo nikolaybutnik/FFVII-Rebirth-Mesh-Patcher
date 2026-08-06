@@ -307,17 +307,15 @@ The rules, in plain terms:
   mod**, named after their folder, each able to have its own
   `preview.png`. Alternates sitting loose beside the mains instead still
   become separate Dresscode mods, which is the older behaviour.
-- **`Optional\` is a different thing, from the modular PAK standard.**
-  Those are the little add-on paks you drag in beside a pak mod — a
-  recolour, a piece hidden by making its material invisible. They change
-  MATERIALS, so a difference that lives in the model itself (a part
-  switched off, a different body) has no add-on form and would do nothing.
-- **Add-ons are listed, not turned into menu entries.** Dresscode has one
-  menu, and picking an entry replaces the last one — so a mod with 30
-  add-ons would become 30 entries that each change one thing, which is not
-  how anyone wears them. Instead `dresscode.json` lists the parts under
-  `parts_you_can_combine` and leaves `variants` empty. Write the
-  combinations you actually want:
+- **`Optional\` is for add-on paks** — the little drag-in files of the
+  modular pak standard (a recolour, a piece hidden). A difference that
+  lives in the model itself (a part switched off, a different body) is a
+  whole costume, and belongs under `Variants\`.
+- **Add-ons are listed, not turned into menu entries.** Picking a tile in
+  Dresscode replaces the last one, so 30 add-ons as 30 one-change tiles
+  is not how anyone wears them. Instead `dresscode.json` lists the parts
+  under `parts_you_can_combine`, and you write the combinations you
+  actually wear — one entry, one tile:
 
   ```json
   "variants": [
@@ -326,12 +324,12 @@ The rules, in plain terms:
   ]
   ```
 
-  Anything you want to wear together has to be ONE entry.
+  A part that changes a weapon becomes a tile in the WEAPONS menu
+  instead, automatically; the stock weapon tile switches it back off.
 
-  Don't want to choose? Set `"stackable": true` instead. The parts stay
-  drop-in files: the build gives you a "Put in ~mods" folder, you drop in
-  the ones you want and mix them exactly as you do today, and only the
-  costume itself is picked in Dresscode.
+  Don't want to choose? Set `"stackable": true` — the parts stay drop-in
+  files (you get a "Put in ~mods" folder that works like always), and
+  only the costume is picked in Dresscode.
 - **A mod uses one shape or the other.** A folder holding both `Variants\`
   and `Optional\` is refused, and the message says which paks it found
   and what each shape is for. Most Dresscode mods want `Variants\`;
@@ -346,14 +344,17 @@ The rules, in plain terms:
 - **Pictures**: a picture next to `dresscode.json` is the mod's thumbnail;
   a picture inside an outfit's folder is that outfit's preview. Name them
   `icon.png` / `preview.png` if a folder has several.
-- Weapon paks and other non-costume files riding in the same download are
-  skipped with a note — they have no Dresscode form.
+- **Weapon paks become weapon tiles.** A pak that recolours a weapon
+  turns into its own tile in Dresscode's WEAPONS menu; the stock weapon
+  tile switches it back off. (This needs the game installed while
+  converting — without it, the pak is skipped with a note and keeps
+  working from `~mods`.)
 - **Retouched game textures**: some mods also ship corrected copies of the
   game's own textures (skin shading, say) so the outfit blends cleanly.
   The converter keeps those working on its own — the output says
   "stock-texture retouch kept" when it happens. Parts of a mod that
   override something the outfit itself never uses (another costume slot,
-  a weapon skin) have no Dresscode form, and the output says that too.
+  say) have no Dresscode form, and the output says that too.
 
 Pre-V1.005 mods are caught automatically: if the meshes are the old
 format, `convert.py` says so before doing anything and offers to patch

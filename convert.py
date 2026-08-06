@@ -64,6 +64,7 @@ import pngfile                                                  # noqa: E402
 import rename                                                   # noqa: E402
 import texread                                                  # noqa: E402
 import toggles                                                  # noqa: E402
+import weapons                                                  # noqa: E402
 import writer                                                   # noqa: E402
 import zen                                                      # noqa: E402
 
@@ -308,7 +309,10 @@ def plan_variants(toc, plugin, extra_roots=()):
     # into a pak they become data assets whose CLASS lives in a plugin
     # that is not mounted when ~mods is -- and the loader still enumerates them
     # at startup. They describe a mod that, in this format, does not exist.
-    registration = set() if KEEP_REGISTRATION else set(assets.values())
+    # ALL of them go -- a weapon-tile list is one more instance of the same
+    # class, and one surviving is just as fatal as the costume data.
+    registration = set() if KEEP_REGISTRATION \
+        else moddata.registration_chunks(toc)
 
     def closure(seed_pid):
         """Everything a mesh pulls in, walking the container header's
@@ -893,8 +897,10 @@ def write_template(source, mod_name, parts, prefill=None, restore=None,
     `prefill` carries real values when the pak mod was itself converted
     from a Dresscode mod; `restore` is that conversion's opaque record of the
     original, which makes converting back exact. `extras` is [(label, pak
-    stem)] for the mod's optional paks: each starts as one variant, and the
-    person can compose their own from several."""
+    stem)] -- or (label, stem, is_weapon) triples -- for the mod's optional
+    paks. Weapon paks get a ready-made variants entry (their tile stands
+    alone in the weapons menu, there is nothing to combine); the rest are
+    listed for the person to compose."""
     prefill = prefill or {}
     pre_outfits = prefill.get("outfits", {})
     outfits = [{"folder": rel,
@@ -905,46 +911,16 @@ def write_template(source, mod_name, parts, prefill=None, restore=None,
     template = {
         "_how_this_works": [
             "convert.py made this file. Drop the folder on it again and it",
-            "builds the Dresscode mod -- changing anything below is optional.",
+            "builds the Dresscode mod. Changing anything below is optional:",
+            "the 'name' lines are what things are called in game, 'author'",
+            "and the descriptions show on the mod's page.",
             "",
-            "What you can change:",
-            "  \"name\" at the top       what the whole mod is called",
-            "  \"name\" in an outfit     what THAT outfit is called in",
-            "                          Dresscode's outfit menu",
-            "  \"author\", descriptions  shown on the mod's page",
+            "Pictures: icon.png next to this file becomes the mod's",
+            "thumbnail; preview.png inside an outfit's folder becomes that",
+            "outfit's tile picture.",
             "",
-            "Several outfits build several Dresscode mods, one per outfit",
-            "(named \"mod - outfit\"), each with its own toggles.",
-            "",
-            "EXCEPT outfits that came out of a Variants folder: those are",
-            "one mod with a tile each, because they are versions of the",
-            "same costume. Put a whole alternate costume (a part left out,",
-            "a different body) in Variants\\<name>\\.",
-            "",
-            "Optional\\ is the other shape: the modular PAK standard, where",
-            "small add-on paks are dragged in beside a pak mod, each",
-            "changing one thing. Dresscode has no separate place for those --",
-            "everything is a tile in the same menu -- so they become tiles",
-            "only where you say which COMBINATIONS you want (below). A mod",
-            "uses one shape or the other; a folder with both is refused,",
-            "with a note saying which to keep.",
-            "",
-            "\"stackable\": true keeps a modular mod's add-on paks as ADD-ON",
-            "PAKS. The build writes a \"Put in ~mods\" folder: drop in the",
-            "parts you want, mix them exactly as you do today, and pick the",
-            "costume itself in Dresscode. Nothing goes in the menu but the",
-            "costume.",
-            "",
-            "Pictures (optional). Two different pictures exist:",
-            "  the THUMBNAIL, one per mod, shown in Dresscode's mod list",
-            "     -> put a picture next to this file",
-            "  the PREVIEW, one per outfit, shown when picking outfits",
-            "     -> put a picture inside that outfit's folder",
-            "  If a folder has several pictures, name the right one",
-            "  preview.png (or icon.png for the thumbnail).",
-            "",
-            "Do NOT change the \"folder\" lines -- they say where each",
-            "outfit's files live.",
+            "Leave the 'folder' lines alone -- they say where the files",
+            "live.",
         ],
         "name": prefill.get("name") or mod_name,
         "author": prefill.get("author", ""),
@@ -954,56 +930,63 @@ def write_template(source, mod_name, parts, prefill=None, restore=None,
         "stackable": False,
         "outfits": outfits,
     }
+    extras = [tuple(e) + (False,) * (3 - len(e)) for e in extras]
     if extras and restore:
         # Reproducing a real mod: its tiles are its own, exactly as they
         # were, or converting back would not give the same mod.
         template["_how_this_works"] += [
             "",
-            "\"variants\" below IS the menu: one entry = one tile, and these",
-            "are the original mod's. Picking a tile in game replaces the",
-            "last one, so anything worn together has to be one entry: give",
-            "it a \"name\" and list every pak it applies in \"parts\".",
+            "'variants' below IS the menu -- one entry = one tile, exactly",
+            "as the original mod had them.",
         ]
         template["variants"] = [{"name": label, "parts": [stem]}
-                                for label, stem in extras]
+                                for label, stem, _w in extras]
     elif extras:
-        # A modular pak mod. One tile per part would mean thirty tiles that
-        # each change one thing -- a menu nobody would assemble on purpose --
-        # so the parts are listed and the choosing is left to the person.
+        # A modular pak mod. One tile per outfit part would mean thirty
+        # tiles that each change one thing, so those are listed and the
+        # choosing is left to the person; a weapon part has nothing to
+        # combine with, so its entry is written ready to build. The entry
+        # shape rides as a REAL object ('_example_variant', built from the
+        # mod's own parts) -- quotes in the help text would be escaped in
+        # the raw file and copy out wrong.
+        combos = [(l, s) for l, s, w in extras if not w]
+        weap = [(l, s) for l, s, w in extras if w]
+        ex = (combos or weap)[:2]
         template["_how_this_works"] += [
             "",
-            "THIS MOD HAS MODULAR PARTS, and nothing has been set up for you.",
-            "",
-            "Each pak under Optional\\ changes one thing -- a recolour, a",
-            "piece hidden. Making each its own tile would fill the menu with",
-            "tiles that change one thing each, which is not how they are",
-            "worn, so \"variants\" is empty and the parts are only listed, in",
-            "\"parts_you_can_combine\".",
-            "",
-            "Write the combinations you actually want. One entry = one tile:",
-            "",
-            "  \"variants\": [",
-            "    { \"name\": \"Red, no hat\",",
-            "      \"parts\": [\"Red_Recolor_P\", \"No_Hat_P\"] },",
-            "    { \"name\": \"Just red\", \"parts\": [\"Red_Recolor_P\"] }",
-            "  ]",
-            "",
-            "Picking an entry in game replaces the last one, so anything you",
-            "want to wear together has to be ONE entry. Where two parts",
-            "change the same thing, the later one wins. Left empty, the",
-            "costume builds on its own and the parts are left out.",
-            "",
-            "Don't want to choose? Set \"stackable\": true instead. The parts",
-            "stay drop-in files: you get a \"Put in ~mods\" folder, drop in",
-            "the ones you want, mix them as you do today, and pick the",
-            "costume in Dresscode.",
+            "'variants' below is this mod's menu: one entry = one tile,",
+            "and an entry's 'name' is the tile's label. '_example_variant'",
+            "shows the shape, using this mod's own parts -- copy it into",
+            "the 'variants' list and edit it.",
         ]
-        template["parts_you_can_combine"] = [stem for _label, stem in extras]
-        template["variants"] = []
+        if combos:
+            template["_how_this_works"] += [
+                "",
+                "The paks in 'parts_you_can_combine' are NOT in the menu",
+                "yet. Make entries for the combinations you actually wear,",
+                "parts worn together in the same entry.",
+                "",
+                "Rather keep them as drag-in files? Set 'stackable' to true",
+                "and you get a 'Put in ~mods' folder that works like",
+                "always, with only the costume in the menu.",
+            ]
+        if weap:
+            template["_how_this_works"] += [
+                "",
+                "The WEAPON paks have their entries already -- each is one",
+                "tile in Dresscode's WEAPONS menu, and the stock weapon",
+                "tile switches it off. Nothing to do for those.",
+            ]
+        template["_example_variant"] = {
+            "name": " + ".join(l for l, _s in ex),
+            "parts": [s for _l, s in ex]}
+        if combos:
+            template["parts_you_can_combine"] = [s for _l, s in combos]
+        template["variants"] = [{"name": l, "parts": [s]} for l, s in weap]
     if restore:
         template["_how_this_works"] += [
             "",
-            "\"restore\" below is the original Dresscode mod, recorded so",
+            "'restore' below is the original Dresscode mod, recorded so",
             "that converting back reproduces it exactly. Leave it alone.",
         ]
         template["restore"] = restore
@@ -1978,32 +1961,42 @@ def loose_to_dresscode(source, mods, assume_yes=False):
         # mod, so there is no original shape to be faithful to.
         if refuse_mixed_shapes(mod_name, source, extras, variant_folders):
             return 1
-        path = write_template(
-            source, mod_name, parts,
-            extras=[(toggles.label_of(u),
-                     os.path.splitext(os.path.basename(u))[0])
-                    for u in extras])
+        # A weapon pak needs no combining decision -- its tile stands alone
+        # in the weapons menu -- so those entries are written ready-made.
+        def _is_weapon(u):
+            try:
+                toc = iostore.Toc(u)
+                got = weapons.is_weapon_pak(rename.read_packages(toc))
+                toc.close()
+                return got
+            except Exception:
+                return False
+
+        flagged = [(toggles.label_of(u),
+                    os.path.splitext(os.path.basename(u))[0],
+                    _is_weapon(u)) for u in extras]
+        path = write_template(source, mod_name, parts, extras=flagged)
+        n_combo = sum(1 for _l, _s, w in flagged if not w)
+        n_weap = len(flagged) - n_combo
         print()
         print(f"  {mod_name}  (pak -> Dresscode)")
         print(f"      created  {os.path.basename(path)}"
               f"  ({len(parts)} outfit{'s' if len(parts) > 1 else ''})")
-        if extras:
+        if n_weap:
             print()
-            print(f"      This mod is MODULAR: {len(extras)} small add-on pak"
-                  f"{'s' if len(extras) != 1 else ''}, each")
-            print("      changing one thing. They are not in the menu yet.")
+            print(f"      {n_weap} weapon pak{'s' if n_weap != 1 else ''} "
+                  f"set up as WEAPONS-menu tile{'s' if n_weap != 1 else ''}"
+                  " -- nothing to do.")
+        if n_combo:
             print()
-            print(f"      Open {TEMPLATE} and pick one:")
-            print()
-            print("        A.  List the few outfits you actually wear.")
-            print("            Every part is listed in there for you; a")
-            print("            combination of them becomes one menu entry.")
-            print()
-            print("        B.  Leave them as drop-in files. Set")
-            print("            \"stackable\": true and you get a")
-            print("            \"Put in ~mods\" folder: drop in the parts you")
-            print("            want, mix them as you do today, and pick the")
-            print("            costume itself in Dresscode.")
+            print(f"      This mod has {n_combo} add-on pak"
+                  f"{'s' if n_combo != 1 else ''}, not in the menu yet.")
+            print(f"      Open {TEMPLATE} and list the combinations you "
+                  "wear (one entry")
+            print("      = one tile), or set \"stackable\": true to keep "
+                  "the parts as")
+            print("      drop-in files. The file explains both.")
+        if flagged:
             print()
         print("      Drop the folder again to build. Before that, if you")
         print(f"      want, open {TEMPLATE} to set names and author, and put")
@@ -2076,7 +2069,7 @@ def loose_to_dresscode(source, mods, assume_yes=False):
         else:
             combos = sum(1 for _n, us in variants if len(us) > 1)
             print(f"      + {len(variants)} tile"
-                  f"{'s' if len(variants) != 1 else ''} built from "
+                  f"{'s' if len(variants) != 1 else ''} to build from "
                   f"{len(extras)} add-on pak{'s' if len(extras) != 1 else ''}"
                   + (f" ({combos} combining several)" if combos else ""))
     # Even an exact restore rebuilds from these bytes: a 1.004-era mod
@@ -2123,7 +2116,8 @@ def loose_to_dresscode(source, mods, assume_yes=False):
                 sub = safe_plugin_id(sub_name, used)
                 roots.append(mkdc.build(dict(meta, name=sub_name), [o],
                                         sub, out_root, extras=ex,
-                                        external=ext))
+                                        external=ext,
+                                        weapon_tiles=o is outfits[0]))
             else:
                 roots.append(mkdc.build(meta, outfits, plugin, out_root,
                                         extras=ex, external=ext))

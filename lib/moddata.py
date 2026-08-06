@@ -119,23 +119,24 @@ def read_outfits(data):
     return out
 
 
-def find_data_assets(toc, prefer=None):
-    """
-    Locate the mod's two registration assets by the class they instantiate.
+def _is_menu_list(data):
+    """An asset with a top-level "Mod Type" is an auxiliary menu list (rows
+    for Dresscode's WEAPONS menu), never the mod's own costume data."""
+    try:
+        props, _ = _properties(data)
+        return "Mod Type" in props
+    except Exception:
+        return False
 
-    Matching on the class -- via the global import ID of FF7RML's own asset --
-    rather than on a filename, because authors put them wherever they like:
-    MetaData/, Metadata/ and Assets/ all occur in the wild.
 
-    `prefer` is a lowercase package-name prefix: a container merged with a
-    library mod holds TWO sets of registration assets, and the ones under
-    the mod's own root are the ones that define it.
-    """
+def _registration_matches(toc):
+    """(kind, chunk index, package name) for every registration-class
+    instance in the container."""
     want = {
         cityhash.object_id(METADATA_CLASS, "PDA_ModMetaData_C"): "metadata",
         cityhash.object_id(CHARACTER_CLASS, "PDA_ModData_Character_C"): "character",
     }
-    found, fallback = {}, {}
+    out = []
     for i in range(toc.n):
         if toc.chunk_ids[i][11] != 2:
             continue
@@ -146,10 +147,41 @@ def find_data_assets(toc, prefer=None):
         own = pkg.names[pkg.name & 0x3FFFFFFF] if pkg.names else ""
         for e in pkg.exports:
             kind = want.get(e["cls"])
-            if not kind:
-                continue
-            if prefer and own.lower().startswith(prefer):
-                found[kind] = i
-            else:
-                fallback[kind] = i
+            if kind:
+                out.append((kind, i, own))
+    return out
+
+
+def find_data_assets(toc, prefer=None):
+    """
+    Locate the mod's two registration assets by the class they instantiate.
+
+    Matching on the class -- via the global import ID of FF7RML's own asset --
+    rather than on a filename, because authors put them wherever they like:
+    MetaData/, Metadata/ and Assets/ all occur in the wild.
+
+    `prefer` is a lowercase package-name prefix: a container merged with a
+    library mod holds TWO sets of registration assets, and the ones under
+    the mod's own root are the ones that define it. A weapon-tile asset
+    (same class, "Mod Type" set) is never returned as the costume data.
+    """
+    found, fallback = {}, {}
+    for kind, i, own in _registration_matches(toc):
+        if kind == "character" and _is_menu_list(toc.read(i)):
+            continue
+        if prefer and own.lower().startswith(prefer):
+            found[kind] = i
+        else:
+            fallback[kind] = i
     return {**fallback, **found}
+
+
+def registration_chunks(toc):
+    """
+    Chunk index of EVERY registration-class instance -- the costume data,
+    the mod card, and any auxiliary menu list. This is the drop set for a
+    conversion to a loose pak: these are the only packages that import the
+    FF7RML plugin, which does not exist yet when ~mods mounts, and one
+    surviving the conversion crashes the game at startup.
+    """
+    return {i for _kind, i, _own in _registration_matches(toc)}

@@ -461,6 +461,11 @@ def convert_payload(payload):
     report["n_bones"] = info["n_bones"]
 
     if lod["n_lods"] != 1:
+        # Multi-level models exist in mods: a converted weapon tile
+        # carries the game's own weapon mesh, already in the new layout.
+        # Refuse only a multi-level model that actually NEEDS the fix.
+        if not old_format(payload, lod["sections_at"], lod["n_sections"]):
+            return payload, report
         raise NotImplementedError(
             f"this mod's model has {lod['n_lods']} levels of detail; this tool "
             "only handles the single-level models that costume mods use -- "
@@ -570,6 +575,11 @@ def unconvert_payload(payload):
     report["n_bones"] = info["n_bones"]
 
     if lod["n_lods"] != 1:
+        # Same rule as convert_payload: a multi-level model already in the
+        # target layout (a weapon tile's carried game mesh, unpatched) is a
+        # no-op, not a failure.
+        if not new_format(payload, lod["sections_at"], lod["n_sections"]):
+            return payload, report
         raise NotImplementedError(
             f"this mod's model has {lod['n_lods']} levels of detail; this tool "
             "only handles the single-level models that costume mods use -- "
