@@ -38,10 +38,13 @@ too -- and in every single section the DupVertIndexData count comes out exactly
 equal to that section's vertex count. That is not a coincidence you get from a
 misparse; it's the structure being read correctly.
 
-So the mods write two arrays the current game doesn't read. The reader desyncs
-immediately after the first section's ClothingData, then interprets vertex data as
-structure -- which is why hovering a broken costume in the outfit menu is a hard
-crash rather than a missing model.
+So the mods write two arrays the current game's own meshes no longer carry.
+The engine reads the per-section class strip flag and handles both forms:
+real arrays (flag 0) beside 4-byte tangents load and run clean. The hard
+crash on old mods comes from CHANGE #2's tangent size mismatch, not from
+these arrays -- old_format() flags only the traits that actually break the
+game. The arrays are still stripped whenever a mesh is converted, keeping
+the output byte-conformant with the stock cook.
 
 THE FIX
 -------
@@ -431,13 +434,14 @@ def detect_dup_verts(data, sections_at, n_sections):
 
 
 def old_format(payload, sections_at, n_sections):
-    """True if this mesh still has ANY pre-1.005 trait: dup-verts arrays (the
-    crash), 8/16-byte tangents (wrong shading), or full-precision UVs (wrong
-    textures). convert_payload fixes all three, so "needs patching" must test
-    all three -- dup arrays alone miss meshes that were partially hand-fixed."""
-    has_dup, end = detect_dup_verts(payload, sections_at, n_sections)
-    if has_dup:
-        return True
+    """True if this mesh has a trait that BREAKS the 1.005 game: 8/16-byte
+    tangents (the overrun crash) or full-precision UVs (wrong texture reads).
+
+    Duplicated-vertex arrays alone are not one -- the engine honors the
+    per-section strip flag both ways, so real arrays beside 4-byte tangents
+    load and run clean. They are still stripped whenever a mesh is
+    converted, to match the stock cook."""
+    _has_dup, end = detect_dup_verts(payload, sections_at, n_sections)
     buf = _walk_vertex_buffers(payload, end)
     return buf is not None and bool(buf["elem"] in (8, 16)
                                     or (buf["full_uv"] and buf["uv_elem"] == 8))

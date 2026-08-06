@@ -389,7 +389,21 @@ def patch_package(data):
     for k, e in enumerate(pkg.exports):
         removed_before[k] = running
         if e["cls"] == skm.SKELETAL_MESH:
-            new_payload, report = MODE["convert"](bytes(payloads[k]))
+            # Convert only what the scan called out. The converter also
+            # normalizes traits that are legal either way (the dup-vert
+            # arrays), and running it unconditionally rewrote mods the
+            # listing had just called [ok].
+            payload = bytes(payloads[k])
+            try:
+                after, _info = skm.parse_head(payload, 0, len(payload),
+                                              skm.NoNames(), verbose=False)
+                lod = skm.parse_lod_header(payload, after)
+                if not MODE["needs"](payload, lod["sections_at"],
+                                     lod["n_sections"]):
+                    continue
+            except Exception:
+                pass                # let the converter raise its clear error
+            new_payload, report = MODE["convert"](payload)
             if report.get("changed"):
                 running += report["bytes_removed"]
                 payloads[k] = bytearray(new_payload)
