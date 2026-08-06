@@ -179,7 +179,7 @@ python patch.py --restore --all       put everything back
 python patch.py --restore ModName     put one mod back
 ```
 
-Only mod files are ever modified, never the game's own packages. Pak mods
+Only mod files are ever modified, never the game's own files. Pak mods
 live under `End\Content\Paks\~mods\`, so those files sit inside the game folder —
 but the game's own `.pak`/`.utoc`/`.ucas` (in `Paks\` itself) are never touched.
 
@@ -217,6 +217,7 @@ your installed library: you get the normal in-place patch, with backups in
 ### Other options
 
 ```
+--help         short command list
 --debug        add per-mesh detail to --list
 --pause        wait for a keypress before closing
 --no-pause     never wait
@@ -462,9 +463,10 @@ games known to ship one.
 **`no skeletal meshes -- unaffected`**
 That mod has no character model, so V1.005 didn't break it. Nothing to do.
 
-**A mod reports multiple LODs and refuses**
-This handles single-detail-level models, which covers every costume mod tested
-so far. It refuses rather than guessing. Please report the mod name.
+**A mod reports multiple levels of detail and refuses**
+Multi-level models are only refused when they actually need fixing (ones
+already in the right format are left alone). Every costume mod tested so far
+is single-level, so this should be rare — please report the mod name.
 
 **Patched, but the model still looks wrong (grey checkerboard skin)**
 Most likely not the mesh. Many costume mods keep their skin textures in a

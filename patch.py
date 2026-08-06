@@ -104,9 +104,8 @@ FORWARD = dict(
     needs=meshfix.old_format, convert=meshfix.convert_payload,
     needs_label="needs patching", done_label="patched",
     already="nothing to fix (already new-format)",
-    dresscode_ok=["installed -- not patched by this tool",
-                  "If Dresscode itself crashes, get the author's official",
-                  "V1.005 release."],
+    dresscode_ok=["installed -- not patched by this tool "
+                  "(it has its own official updates)"],
     dresscode_skip=["Dresscode has an official V1.005 update; install",
                     "it from its author instead of patching it here."],
 )
@@ -116,9 +115,8 @@ BACKWARD = dict(
     needs=meshfix.new_format, convert=meshfix.unconvert_payload,
     needs_label="needs unpatching", done_label="1.004 already",
     already="nothing to do (already the old 1.004 format)",
-    dresscode_ok=["installed -- not touched by this tool",
-                  "For the 1.004 game, install the author's original",
-                  "release of Dresscode."],
+    dresscode_ok=["installed -- not touched by this tool "
+                  "(use its author's release for your game version)"],
     dresscode_skip=["Dresscode is not converted here; for the 1.004",
                     "game install the author's original release."],
 )
@@ -364,8 +362,8 @@ def scan(utoc_path):
     if read_ok and not parsed and not found:
         found.append(dict(
             chunk=-1, path="", export="", size=0,
-            error="packages did not decode -- the Oodle DLL is likely the "
-                  "wrong version for this game"))
+            error="files did not decode -- the Oodle DLL is likely the "
+                  "wrong version for this game (need oo2core_6 or newer)"))
     return toc, found
 
 
@@ -480,7 +478,7 @@ def patch_mod(name, utoc_path, out_dir=None, backup_dir=None, no_backup=False):
     # --- Convert every package that needs it.
     pkg_indices = [i for i in sorted(toc.paths)
                    if toc.paths[i].endswith(".uasset")]
-    print(f"    scanning {len(pkg_indices)} packages")
+    print(f"    scanning {len(pkg_indices)} files")
     new_data = {}
     size_deltas = {}
     for i in pkg_indices:
@@ -499,12 +497,9 @@ def patch_mod(name, utoc_path, out_dir=None, backup_dir=None, no_backup=False):
             for export_name, rep in reports:
                 if rep.get("changed"):
                     delta = rep["bytes_removed"]
-                    print(f"    {toc.paths[i]} :: {export_name}")
-                    print(f"      {rep['n_sections']} sections, "
-                          f"{rep['n_bones']} bones, "
-                          f"{'removed' if delta >= 0 else 'added'} "
-                          f"{abs(delta):,} bytes "
-                          f"({len(data):,} -> {len(patched):,})")
+                    print(f"    fixed  {toc.paths[i]}  "
+                          f"({'removed' if delta >= 0 else 'added'} "
+                          f"{abs(delta):,} bytes)")
 
     if not new_data:
         print(f"    {MODE['already']}")
@@ -535,17 +530,17 @@ def patch_mod(name, utoc_path, out_dir=None, backup_dir=None, no_backup=False):
                         if toc.chunk_type(i) == 10)
     new_data[header_index] = rebuild_header(toc.read(header_index), size_deltas)
 
-    print(f"    rebuilding container ({toc.n} chunks)")
-    written = repack.write(toc, new_data, dst_dir, base, src_dir,
-                           copy_pak=not in_place)
+    print("    rebuilding the mod file")
+    repack.write(toc, new_data, dst_dir, base, src_dir,
+                 copy_pak=not in_place)
 
     if not in_place:
         print(f"    written {base}.utoc/.ucas/.pak  in  {dst_dir}")
     elif no_backup:
-        print(f"    written; .ucas now {written:,} bytes")
+        print("    written")
     else:
         # The full backup path is stated once, in the closing summary.
-        print(f"    written; .ucas now {written:,} bytes  (original backed up)")
+        print("    written  (original backed up)")
     return True
 
 
@@ -1047,6 +1042,20 @@ def main(argv):
     """Run the requested action. Returns a process exit code."""
     sources, out_dir, named, flags = _parse_args(argv)
 
+    if any(f in flags for f in ("-h", "--help")):
+        t = MODE["tool"]
+        print(f"python {t} --list               list mods and what needs fixing")
+        print(f"python {t} --all                {MODE['menu_verb']} everything "
+              "that needs it (backups kept)")
+        print(f"python {t} ModName              just one mod")
+        print(f"python {t} --restore --all      undo everything")
+        print(f'python {t} --path "D:\\mods"     work on a folder '
+              "(add --all, --out, --restore)")
+        print(f"Or just drag mod folders or archives onto {t}.")
+        print("More: --debug adds detail to --list; --pause / --no-pause "
+              "control the exit prompt.")
+        return 0
+
     # Archives can't be scanned in place -- they are extracted and patched by
     # the drop menu -- so keep them out of find_mods but still count as work.
     archives = [s for s in sources if _is_archive(s)]
@@ -1067,7 +1076,9 @@ def main(argv):
                 print("   ", os.path.abspath(s))
         else:
             print("No mods found under", config.MODS_DIR)
-            print("                or", config.MODS_PAKS_DIR)
+            paks = getattr(config, "MODS_PAKS_DIR", "")
+            if paks:
+                print("                or", paks)
         return 1
 
     want_all = "--all" in flags
@@ -1106,17 +1117,19 @@ def main(argv):
 
     # Archives are handled by the drop menu, not this direct-action path.
     if (archives or packed) and not mods:
-        print("An archive is extracted and patched by dragging it onto patch.py,")
-        print("not with flags. Drop it on patch.py, or unpack it and use --path.")
+        tool = MODE["tool"]
+        print(f"An archive is extracted and patched by dragging it onto {tool},")
+        print(f"not with flags. Drop it on {tool}, or unpack it and use --path.")
         return 1
 
     targets = mods if want_all else {k: v for k, v in mods.items() if k in named}
     unknown = [n for n in named if n not in mods]
     if unknown:
-        print("No mod called:", ", ".join(unknown), " (check the spelling)")
+        print(f"No mod called: {', '.join(unknown)} (check the spelling)")
     if not targets:
         print("Nothing selected. Use --list, --all, or name a mod.")
-        print("Installed mods:", ", ".join(mods))
+        print("Installed mods:" if not sources else "Mods found:",
+              ", ".join(mods))
         return 1
 
     backup_base = _backup_root(scan_sources)
@@ -1141,8 +1154,8 @@ def main(argv):
             else:
                 unchanged.append(name)
             for r in _missing_reqs(utoc):
-                print(f"    note: this mod also needs {r}, which is not")
-                print("    installed -- without it, textures show as grey checkers.")
+                print(f"    note: still needs {r} installed -- "
+                      "textures stay grey without it")
         except Exception as ex:
             print(f"    FAILED: {type(ex).__name__}: {ex}")
             failed.append(name)
@@ -1177,10 +1190,8 @@ def main(argv):
             summary.append("  Your original files were left exactly as they were.")
         else:
             summary.append("  Your untouched originals are backed up in:")
-            summary.append(f"    {os.path.abspath(backup_base)}{os.sep}"
-                           "   (one folder per mod)")
-            summary.append("  Keep it to undo later with --restore, or just delete")
-            summary.append("  it once the game looks right -- your call.")
+            summary.append(f"    {os.path.abspath(backup_base)}{os.sep}")
+            summary.append("  Undo anytime with --restore.")
 
     if not failed:
         summary.append("")

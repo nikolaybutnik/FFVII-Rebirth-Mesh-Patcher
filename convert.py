@@ -1,42 +1,37 @@
 """
-convert.py -- converts a FFVII Rebirth costume mod between its two formats.
+convert.py -- converts a FFVII Rebirth costume mod between its two formats:
 
-    python convert.py "D:\\mods\\SomeMod"        a Dresscode mod folder
-    python convert.py "D:\\mods\\SomeMod_P.utoc" a pak mod
+    DRESSCODE   picked in the Dresscode menu
+    PAK         dropped in ~mods, always worn
 
-Point it at a mod -- or drop one on convert.py: a folder, several at once, a
-.zip/.7z/.rar, or a folder of archives; archives nested inside archives are
-unpacked too. It works out which format each mod is in, says what it will
-produce, asks once, and writes every conversion beside its original (beside
-the archive, for a mod that arrived in one). Originals are never touched.
+    python convert.py "D:\\mods\\Some Mod"
 
-THE TWO FORMATS
----------------
-DRESSCODE   A plugin folder: <Mod>.uplugin and a container under
-            Content/Paks/WindowsNoEditor, whose packages are named /<Mod>/...
-            The outfit is ADDED to the Dresscode menu and picked there.
-
-PAK   A .utoc/.ucas/.pak dropped in ~mods, whose packages are named
-            /Game/... The outfit REPLACES a stock one and is always worn.
-
-So a conversion renames the MESH package onto the stock costume it replaces
-and moves every other package into that costume's folder under /Game/, plus a
-new .pak carrying the mount point the new format expects. lib/rename.py does
-the renames, lib/pakfile.py the pak.
-
-The /Game/ move is NOT cosmetic. Packages are found by ID, but the async
-loader silently skips imports into a root that is not mounted -- and a ~mods
-container mounts no plugin root. Probed in game: a mesh whose materials kept
-their /<Mod>/... names loads and renders, with every such material slot NULL
-(the default checker) while its /Game/ slots resolve fine.
-
-WHAT IS DELIBERATELY NOT HERE
------------------------------
-This is not patch.py. There is no game detection, no mod library, no backups, no
-in-place editing, no archive handling -- a converter that writes a new mod next
-to the old one needs none of it, and every one of those is a way to damage
-something. Conversion only ever creates.
+Or just drag a mod onto convert.py -- a folder, several at once, or a
+.zip/.7z/.rar. It works out which format each mod is in, says what it will
+make, asks before writing, and puts the result beside the original.
+Originals are never touched.
 """
+# HOW IT WORKS (not printed -- the docstring above doubles as the usage text)
+# ---------------------------------------------------------------------------
+# DRESSCODE   A plugin folder: <Mod>.uplugin and a container under
+#             Content/Paks/WindowsNoEditor, packages named /<Mod>/...
+# PAK         A .utoc/.ucas/.pak in ~mods, packages named /Game/..., winning
+#             by overriding a stock costume.
+#
+# A conversion renames the MESH package onto the stock costume it replaces
+# and moves every other package into that costume's folder under /Game/, plus
+# a new .pak carrying the mount point the new format expects. lib/rename.py
+# does the renames, lib/pakfile.py the pak.
+#
+# The /Game/ move is NOT cosmetic. Packages are found by ID, but the async
+# loader silently skips imports into a root that is not mounted -- and a
+# ~mods container mounts no plugin root. Probed in game: a mesh whose
+# materials kept their /<Mod>/... names loads and renders, with every such
+# material slot NULL (the default checker) while its /Game/ slots resolve.
+#
+# Deliberately NOT here: game detection, a mod library, in-place editing.
+# Conversion only ever creates (the one exception: the pre-1.005 pre-flight
+# can offer to run patch.py on the source, which keeps its usual backups).
 
 import base64
 import glob
@@ -404,8 +399,8 @@ def plan_variants(toc, plugin, extra_roots=()):
     for k, outfit in enumerate(wearable):
         mesh = outfit["skeletal_mesh"].split(".")[0]
         if by_name.get(mesh.lower()) is None:
-            print(f"  skipping {outfit['name'] or mesh!r}: its mesh package "
-                  "is not in the container")
+            print(f"  skipping {outfit['name'] or mesh!r}: its model file "
+                  "is missing from this mod")
             continue
         target = moddata.default_costume_package(outfit["player_type"])
         if not target:
@@ -508,9 +503,8 @@ def plan_toggles(toc, plugin, packages, by_name, deps, closure, base_union,
                 # base outfit -- nothing here needs an Optional pak.
                 continue
             print(f"      note: the \"{row['name'] or bp_pkg}\" menu item "
-                  "runs blueprint logic, not a material swap. There is no "
-                  "loose-pak form of that; it is kept in the record and "
-                  "returns when this folder converts back to Dresscode.")
+                  "is Dresscode-only logic with no pak form -- it is "
+                  "kept safe and returns when converted back.")
             continue
         blob_only.add(pack_pid)
         if resolver is None:
@@ -1059,9 +1053,16 @@ def plugin_id(name):
     exactly equals the .uplugin inside (the patcher repairs mismatched
     downloads for the same reason). Building from one derived id -- folder,
     .uplugin and container all -- makes a mismatch impossible.
+
+    Capped at 40 characters: the id lands in the install path TWICE (folder
+    and container file name), and past that a deep Steam path crosses
+    Windows' 260-character limit -- the game then cannot open the container
+    and the mod silently never appears in the menu (field report: a long
+    "mod - outfit" name; shortening it fixed the mod). Display names are
+    untouched, only the id shrinks.
     """
     cleaned = "".join(c for c in name if c.isalnum() or c == "_")
-    return cleaned or "Mod"
+    return cleaned[:40] or "Mod"
 
 
 def safe_plugin_id(name, used):
@@ -1071,7 +1072,7 @@ def safe_plugin_id(name, used):
     out, n = base, 1
     while out.lower() in used:
         n += 1
-        out = f"{base}{n}"
+        out = f"{base[:40 - len(str(n))]}{n}"
     used.add(out.lower())
     return out
 
@@ -1912,27 +1913,21 @@ def refuse_mixed_shapes(mod_name, source, extras, variant_folders):
         return False
     print()
     print(f"  {mod_name}: this folder mixes two ways of offering "
-          "alternatives, and a mod has to pick one.")
+          "alternatives, and a mod has to pick one:")
     print()
-    print("      Variants\  --  a whole costume per folder. Each becomes")
-    print("                     its own tile in the outfit menu. This is")
-    print("                     what a Dresscode mod normally does.")
-    print("      Optional\  --  the MODULAR PAK standard: little add-on")
-    print("                     paks you drag in next to a pak mod, each")
-    print("                     recolouring or hiding one material. They")
-    print("                     become toggles, and a toggle can only swap")
-    print("                     materials -- a model change (a part switched")
-    print("                     off, a different body) has no toggle form.")
+    print("      Variants\\  --  whole costumes, one per folder")
+    print("      Optional\\  --  small add-on paks (the modular pak standard)")
     print()
-    print("      Found under Optional (or read as option paks):")
-    for u in extras[:8]:
+    print("      The add-on paks found here:")
+    for u in extras[:4]:
         print(f"        {os.path.relpath(u, source)}")
-    if len(extras) > 8:
-        print(f"        ... and {len(extras) - 8} more")
+    if len(extras) > 4:
+        print(f"        ... and {len(extras) - 4} more")
     print()
-    print("      Move those out to build the variants, or take the")
-    print(f"      Variants folder{'s' if len(variant_folders) > 1 else ''}"
-          " out to build the modular form.")
+    print("      Move those out to build the variants -- or take the "
+          "Variants")
+    print(f"      folder{'s' if len(variant_folders) > 1 else ''} out to "
+          "build the modular form instead.")
     return True
 
 
@@ -1998,9 +1993,11 @@ def loose_to_dresscode(source, mods, assume_yes=False):
             print("      drop-in files. The file explains both.")
         if flagged:
             print()
-        print("      Drop the folder again to build. Before that, if you")
-        print(f"      want, open {TEMPLATE} to set names and author, and put")
-        print("      a picture in an outfit's folder to give it a preview.")
+        print("      NOTHING IS CONVERTED YET -- this first drop only "
+              "writes")
+        print(f"      {TEMPLATE}. Drop the same folder on convert.py again")
+        print("      to build the mod. (Names, author and pictures are")
+        print(f"      optional -- {TEMPLATE} explains.)")
         return 0
 
     meta, outfits = read_template(source, parts)
@@ -2138,7 +2135,7 @@ def loose_to_dresscode(source, mods, assume_yes=False):
                 print(f"    {p}")
             return 1
         print(f"    written  {masks_base}  "
-              f"({len(ext)} shared packages, verified)")
+              f"({len(ext)} shared files, verified)")
         for utoc in extras:
             stem = os.path.splitext(utoc)[0]
             for suffix in (".utoc", ".ucas", ".pak"):
@@ -2164,12 +2161,15 @@ def loose_to_dresscode(source, mods, assume_yes=False):
     print()
     if len(roots) > 1:
         print(f"  Done. Copy the {len(roots)} folders from inside "
-              f"\"{os.path.basename(out_root)}\" into End\\Mods:")
+              f"\"{os.path.basename(out_root)}\" into the game's End\\Mods")
+        print("  folder (where Dresscode itself is installed):")
         for root in roots:
             print(f"    {os.path.basename(root)}")
     else:
         print(f"  Done. Copy the \"{os.path.basename(roots[0])}\" folder "
-              f"from inside \"{os.path.basename(out_root)}\" into End\\Mods.")
+              f"from inside \"{os.path.basename(out_root)}\" into the")
+        print("  game's End\\Mods folder (where Dresscode itself is "
+              "installed).")
     if mods_dir:
         print(f"  Then copy the FILES from \"{os.path.basename(mods_dir)}\" "
               "into Content\\Paks\\~mods --")
@@ -2414,7 +2414,7 @@ def prepare_to_loose(toc, uplugin, out_base=None):
         common = os.path.commonprefix([n + "/" for n in new_names])
         common = common[:common.rfind("/") + 1]
         if not common.startswith("/Game/"):
-            print(f"          skipped: {label} touches paths outside /Game/")
+            print(f"          skipped: {label} changes files a pak cannot carry")
             continue
 
         def opt_run(renames=renames, objects=objects, drop=drop,
@@ -2457,11 +2457,9 @@ def prepare_to_loose(toc, uplugin, out_base=None):
         print("  !! THIS MOD NEEDS ANOTHER MOD, and it was not here:")
         for root in missing:
             print(f"       {root}")
-        print("     Converted without it. Installed like this, the parts it")
-        print("     provides (skin, usually) come out as grey checkers.")
-        print("     To fix: put that mod's folder next to this one and")
-        print("     convert again -- then its files ride inside the pak and")
-        print("     nothing else has to be installed.")
+        print("     Converted without it -- what it provides (skin, usually)")
+        print("     shows as grey checkers. To fix, put that mod's folder")
+        print("     next to this one and convert again.")
         return 0
 
     def record():
@@ -2670,7 +2668,7 @@ def main(argv):
                     print(f"  Could not read {os.path.basename(utoc)}: {ex}")
                     code = max(code, 1)
             if not found:
-                print(f"  No mod container (.utoc) found in {source}")
+                print(f"  No mod files (.utoc) found in {source}")
                 code = max(code, 1)
 
         if not runners:
@@ -2686,7 +2684,8 @@ def main(argv):
             code = max(code, run())
         print()
         print("  Done. Copy the three files from the folder you want into "
-              "End\\Content\\Paks\\~mods.")
+              "the game's")
+        print("  End\\Content\\Paks\\~mods folder.")
         return code
     finally:
         for toc in tocs:                # open handles block temp deletion
