@@ -794,6 +794,8 @@ def show_list(mods, debug=False, sources=None):
                       f"other unresolved: {ids or 'none'}")
         print()
 
+    return bool(need)
+
 
 # Console-ownership detection lives in lib/drops.py, shared with convert.py.
 _owns_console = drops.owns_console
@@ -839,8 +841,21 @@ _is_archive = drops.is_archive
 _archives_in = drops.archives_in
 _contains_archive = drops.contains_archive
 _show_archive = drops.show_archive
+_archive_summary = drops.archive_summary
 _extract_archive = drops.extract_archive
 _expand_archives = drops.expand_archives
+
+
+def _archive_covered(arc, mod_names):
+    """True when every mod inside `arc` already appears in the scan -- the
+    archive was extracted and handled on an earlier run, so offering it again
+    would only duplicate mods the user already has."""
+    names, inner = _archive_summary(arc)
+    if inner or not names:
+        return False
+    have = [k.lower() for k in mod_names]
+    return all(any(k == m.lower() or k.startswith(m.lower() + " (")
+                   for k in have) for m in names)
 
 
 def _dresscode_stem(folder):
@@ -895,8 +910,8 @@ def _folder_menu(sources):
           " originals")
     print(f"  untouched -- to a \"{MODE['wrapper']}\" folder beside "
           + ("it:" if len(sources) == 1 else "each:"))
-    for s in sources:
-        print(f"      {_wrapper_dir(s)}{os.sep}")
+    for d in dict.fromkeys(_wrapper_dir(s) for s in sources):
+        print(f"      {d}{os.sep}")
     try:
         ans = input("  Proceed?  [y/N] ").strip().lower()
     except (EOFError, KeyboardInterrupt):
@@ -1106,12 +1121,25 @@ def main(argv):
         listing = True
 
     if listing:
+        needs_work = False
         if mods:
-            show_list(mods, debug, sources=scan_sources)
-        if archives or packed:
+            needs_work = show_list(mods, debug, sources=scan_sources)
+        # An archive whose mods are all in the scan already was extracted and
+        # handled on an earlier run -- offering it again would only duplicate.
+        # Only when the scan itself is clean: with work pending, the menu
+        # patches the whole drop, archives included, so none can be skipped.
+        live_archives, live_packed = archives, packed
+        if not needs_work:
+            live_archives = [a for a in archives
+                             if not _archive_covered(a, mods)]
+            live_packed = [p for p in packed
+                           if not all(_archive_covered(a, mods)
+                                      for a in _archives_in(p))]
+        if live_archives or live_packed:
             print()
             print("  Archives to unpack and patch:")
-            for a in archives + [p for p in packed if p not in archives]:
+            for a in live_archives + [p for p in live_packed
+                                      if p not in live_archives]:
                 print(f"    {os.path.abspath(a)}")
                 if _is_archive(a):
                     _show_archive(a, " " * 8)
@@ -1119,14 +1147,32 @@ def main(argv):
                     for arc in _archives_in(a):
                         print(f"        {os.path.basename(arc)}")
                         _show_archive(arc, " " * 12)
+        skipped = ([a for a in archives if a not in live_archives]
+                   + [arc for p in packed if p not in live_packed
+                      for arc in _archives_in(p)])
+        if skipped:
+            print()
+            print("  Skipped -- the mods in these archives are already "
+                  "listed above:")
+            for arc in skipped:
+                print(f"    {os.path.basename(arc)}")
         # A drop owns its window, so a bare listing would dead-end at the exit
         # pause -- offer the follow-up: in-place confirm for installed mods, the
         # copy flow for anything else (an archive is always the copy flow).
+        # With nothing to do and nothing to unpack, there is nothing to offer.
         if sources and not (want_all or do_restore or named) and _owns_console():
-            if (scan_sources and not archives and not packed
+            if not (live_archives or live_packed) and not needs_work:
+                return 0
+            if (scan_sources and not live_archives and not live_packed
                     and _all_under_game(scan_sources)):
                 return _confirm_game_folder(scan_sources)
-            return _folder_menu(sources)
+            menu_sources = sources
+            if not needs_work:
+                # The scanned folders are done; only the archives hold
+                # anything unknown, so the offer covers just those.
+                menu_sources = [s for s in sources
+                                if s in live_archives or s in live_packed]
+            return _folder_menu(menu_sources)
         return 0
 
     # Archives are handled by the drop menu, not this direct-action path.
