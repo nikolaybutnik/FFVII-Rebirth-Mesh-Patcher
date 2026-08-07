@@ -266,10 +266,10 @@ Originals are never touched; everything new is written beside them.
 
 Nothing to organize — point it at the mod folder (the one holding the
 `.uplugin`) and every outfit becomes its own pak, menu variants become
-`Optional` paks, and a `dresscode.json` is written beside them. That file
-remembers the original, so converting the folder back later rebuilds it
-exactly. **Leave `dresscode.json` where it is** if you ever want the round
-trip.
+`Optional` paks, and a `dresscode.json` is written beside them. Weapons-menu
+rows convert too, one pak each. That file remembers the original, so
+converting the folder back later rebuilds it exactly. **Leave
+`dresscode.json` where it is** if you ever want the round trip.
 
 ### Paks → Dresscode: how to organize the folder
 
@@ -372,9 +372,10 @@ Some additional notes:
   Name an outfit the way it appears in the `"outfits"` list above (its
   `name`, or its folder). A name that matches nothing stops the conversion
   and lists the ones that exist.
-- **The one layout that is refused**: several different costume paks
-  loose in the top folder together, with nothing saying which is which.
-  Give each its own subfolder (or one shared `Main\`) and drop again.
+- **What gets refused**: several different costume paks loose in the top
+  folder together, with nothing saying which is which — give each its own
+  subfolder (or one shared `Main\`) and drop again. Also a folder with no
+  costume pak in it at all, since add-on paks have nothing to attach to.
 - **Another Dresscode mod this one depends on** (a shared asset mod
   its page says to install): put that mod's folder in the same parent folder
   as the one you drop, or have it installed in `End\Mods`. The converter
@@ -391,8 +392,10 @@ Some additional notes:
   made goes back to an override pak under `Optional\`, and a weapon mod
   written for Dresscode converts like a costume — its model takes over the
   stock weapon and the rest moves in beside it, one pak per row. Which
-  weapon it replaces is read from the ids its files carry, so a mod that
-  renamed everything is skipped with a note rather than guessed at.
+  weapon it replaces is read from the ids its files carry, checked against
+  the installed Dresscode's own weapon list, so that direction needs
+  Dresscode present; a mod whose files carry no id is skipped with a note
+  rather than guessed at.
 - **Retouched game textures**: many older mods replace the game's own
   textures (skin shading, say) rather than shipping their own, often in a
   separate pak. Those are carried into the mod and wired to the costume,
@@ -408,12 +411,14 @@ with the fixed files.
 
 ### Combine options into your own variants
 
-A fresh conversion leaves `"variants"` empty and lists every option pak
-under `"parts_you_can_combine"` — option paks do NOT become tiles on
-their own. That's deliberate: **tiles don't stack in game**. Pick "Red"
-and then "No Hat" and you'd get a hatless outfit in the normal colour,
-because the second tile replaces the first — a tile per option would
-just be clutter that works wrong.
+A fresh conversion lists every option pak under
+`"parts_you_can_combine"` and leaves `"variants"` for you to fill in —
+option paks do NOT become tiles on their own. That's deliberate: **tiles
+don't stack in game**. Pick "Red" and then "No Hat" and you'd get a
+hatless outfit in the normal colour, because the second tile replaces the
+first — a tile per option would just be clutter that works wrong.
+(Weapon paks are the exception: their tile stands alone in the WEAPONS
+menu, so their entries are written for you.)
 
 Making tiles is a copy-paste job — no tools, just Notepad. Open
 `dresscode.json`, find the `"variants"` list, and give each look you
@@ -443,6 +448,8 @@ its own tile. Some notes:
 
 - Combine as many parts in one entry as you want.
 - If two parts change the same thing, the one listed later wins.
+- An entry goes on every outfit. Add `"outfit": "Standard"` (or a list of
+  names) to put one on only some of them.
 - The menu shows exactly this list: rename tiles, delete the ones you
   never use, or replace the whole list with a few favourite combos.
 - Made a mess of the file? Delete `dresscode.json` and drop the folder
@@ -504,7 +511,7 @@ install, the unversioned `oo2core.dll` (take the one under a `win-x64` folder,
 never `win-x86`) — and copy it next to `patch.py`. See the Setup section for
 games known to ship one.
 
-**`no skeletal meshes -- unaffected`**
+**`No character meshes -- unaffected by V1.005`**
 That mod has no character model, so V1.005 didn't break it. Nothing to do.
 
 **A mod reports multiple levels of detail and refuses**
@@ -528,14 +535,19 @@ output of `python patch.py --list --debug`.
 
 Three things, all inside the mod's own files:
 
-1. Removes `FDuplicatedVerticesBuffer` from every render section — V1.005
-   dropped it, and mods that still write it desync the loader and crash.
-2. Converts the per-vertex tangent frame to the new 4-byte encoding
-   (from either the 8-byte standard or the 16-byte high-precision form).
-3. Converts full-precision texture coordinates to half floats, when a mod uses
+1. Converts the per-vertex tangent frame to the new 4-byte encoding (from
+   either the 8-byte standard or the 16-byte high-precision form). **This is
+   the one that crashes**: the old sizes desync the loader partway through
+   the mesh.
+2. Converts full-precision texture coordinates to half floats, when a mod uses
    them, because the current shaders read them as half.
+3. Removes `FDuplicatedVerticesBuffer` from every render section, which the
+   game's own V1.005 meshes no longer carry. On its own this is **not** a
+   defect — the engine reads a per-section flag and handles both forms — so
+   a mod that only differs here is left alone rather than rewritten.
 
-Converted models match the artist's original data to within **0.1 degrees**.
+Converted models stay within **a quarter of a degree** of the artist's original
+data — typically 0.06° for normals and 0.10° for tangents, never past 0.25°.
 
 `unpatch.py` reverses all three: the duplicated-vertex arrays return (in the
 empty form real 1.004 mods carry), tangents expand back to the 8-byte
