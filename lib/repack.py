@@ -16,10 +16,25 @@ not change any package's length need nothing at all.
 import os
 import shutil
 import sys
+from concurrent.futures import ThreadPoolExecutor
 
 import dirindex
 import iostore
 import writer
+
+_POOL = None
+
+
+def _pack_one(args):
+    raw, comp_method = args
+    comp = iostore.oodle_compress(raw) if comp_method else None
+    ok = comp is not None and len(comp) < len(raw)
+    if ok:
+        try:
+            ok = iostore.oodle_decompress(comp, len(raw)) == raw
+        except Exception:
+            ok = False
+    return (comp, len(raw), comp_method) if ok else (raw, len(raw), 0)
 
 
 def pack_blocks(payload, block_size, comp_method):
@@ -30,19 +45,19 @@ def pack_blocks(payload, block_size, comp_method):
     exact original -- before it is used. Anything that has no compressor, does
     not shrink, or does not round-trip is stored raw (method 0), so the output is
     always valid whatever the DLL does.
+
+    Blocks compress on a thread pool -- the Oodle calls are stateless and
+    ctypes releases the GIL, so this scales with cores. Order is preserved.
     """
-    out = []
-    for k in range(0, len(payload), block_size):
-        raw = payload[k:k + block_size]
-        comp = iostore.oodle_compress(raw) if comp_method else None
-        ok = comp is not None and len(comp) < len(raw)
-        if ok:
-            try:
-                ok = iostore.oodle_decompress(comp, len(raw)) == raw
-            except Exception:
-                ok = False
-        out.append((comp, len(raw), comp_method) if ok else (raw, len(raw), 0))
-    return out
+    pieces = [(payload[k:k + block_size], comp_method)
+              for k in range(0, len(payload), block_size)]
+    if comp_method and len(pieces) > 8:
+        global _POOL
+        if _POOL is None:
+            iostore.oodle_compress(b"\0")   # load the DLL once, serially
+            _POOL = ThreadPoolExecutor(min(8, os.cpu_count() or 2))
+        return list(_POOL.map(_pack_one, pieces, chunksize=8))
+    return [_pack_one(p) for p in pieces]
 
 
 def oodle_method(toc, say=None):

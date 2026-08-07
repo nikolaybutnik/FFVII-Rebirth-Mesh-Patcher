@@ -789,9 +789,12 @@ def build(meta, outfits, plugin, out_root, say=print, extras=(),
         for i in range(toc.n):
             if toc.chunk_ids[i][11] in (3, 4):
                 cid12 = new_ids.get(i, toc.chunk_ids[i])
+                d = new_data.get(i)
+                # Unchanged bulk data rides as a (id, toc, index) reference so
+                # its compressed blocks can be copied across untouched.
                 bulks.setdefault(
                     int.from_bytes(cid12[:8], "little"), []).append(
-                        (cid12, new_data.get(i) or toc.read(i)))
+                        (cid12, d) if d is not None else (cid12, toc, i))
 
         for pid, pkg in packages.items():
             if pkg["name"].lower() in external:
@@ -1218,14 +1221,46 @@ def build(meta, outfits, plugin, out_root, say=print, extras=(),
 
     def blocks_of(payload):
         packed[0] += 1
-        tick(f"compressing file {packed[0]}/{n_files}")
+        tick(f"packing file {packed[0]}/{n_files}")
         return rename.pack_blocks(payload, template_toc.block_size, comp)
+
+    # Bulk data referenced as (id, toc, index) is copied across still
+    # compressed, checksum row included -- skipping the decompress/re-Oodle
+    # round trip that dominates on a texture-heavy mod. Block method ids are
+    # per-container, so remap them to the template's table; anything that
+    # does not map falls back to recompressing.
+    _methods = {}
+
+    def ported_blocks(btoc, bi):
+        key = id(btoc)
+        if key not in _methods:
+            _methods[key] = [
+                next((j for j, n in enumerate(template_toc.methods)
+                      if n.lower() == m.lower()), None)
+                for m in btoc.methods]
+        mm = _methods[key]
+        out = []
+        for data, usize, method in original_blocks(btoc, bi):
+            m2 = mm[method] if method < len(mm) else None
+            if m2 is None:
+                return None
+            out.append((data, usize, m2))
+        # An all-raw chunk means the cooker never compressed it -- copying
+        # it would carry the bloat along, so let it go through the
+        # compressor. Raw blocks WITHIN a compressed chunk stay: those are
+        # raw because they did not shrink.
+        if out and all(m == 0 for _d, _u, m in out):
+            return None
+        return out
+
+    def meta_row(payload):
+        return hashlib.sha1(payload).digest() + b"\0" * 12 + b"\x01"
 
     # Packages first, bulk data after -- every container observed, the
     # game's own included, keeps the two segregated.
     chunks = [dict(id=cid.to_bytes(8, "little") + b"\0\0\0\x0a",
                    blocks=blocks_of(hdr), size=len(hdr))]
-    payloads = [hdr]
+    metas = [meta_row(hdr)]
     paths = []
     prefix = f"/{plugin}/"
     rels = {}
@@ -1234,16 +1269,32 @@ def build(meta, outfits, plugin, out_root, say=print, extras=(),
         cid12 = pid.to_bytes(8, "little") + b"\0\0\0\x02"
         chunks.append(dict(id=cid12, blocks=blocks_of(rec["data"]),
                            size=len(rec["data"])))
-        payloads.append(rec["data"])
+        metas.append(meta_row(rec["data"]))
         # Every package was renamed under /<plugin>/ (or already lived
         # there), so stripping the fixed-length prefix is always right.
         rels[pid] = rec["name"][len(prefix):]
         paths.append((rels[pid] + ".uasset", len(chunks) - 1))
     for pid in order:
-        for bid, bdata in merged[pid]["bulks"]:
-            chunks.append(dict(id=bytes(bid), blocks=blocks_of(bdata),
-                               size=len(bdata)))
-            payloads.append(bdata)
+        for entry in merged[pid]["bulks"]:
+            if len(entry) == 3:
+                bid, btoc, bi = entry
+                blocks = ported_blocks(btoc, bi)
+                if blocks is None:
+                    bdata = btoc.read(bi)
+                    blocks, size = blocks_of(bdata), len(bdata)
+                    metas.append(meta_row(bdata))
+                else:
+                    packed[0] += 1
+                    tick(f"packing file {packed[0]}/{n_files}")
+                    size = btoc.offlen[bi][1]
+                    metas.append(bytes(
+                        btoc.d[btoc.meta_off + bi * 33:
+                               btoc.meta_off + (bi + 1) * 33]))
+            else:
+                bid, bdata = entry
+                blocks, size = blocks_of(bdata), len(bdata)
+                metas.append(meta_row(bdata))
+            chunks.append(dict(id=bytes(bid), blocks=blocks, size=size))
             ext = ".uptnl" if bid[11] == 4 else ".ubulk"
             paths.append((rels[pid] + ext, len(chunks) - 1))
 
@@ -1255,8 +1306,7 @@ def build(meta, outfits, plugin, out_root, say=print, extras=(),
         template_toc, len(chunks), len(block_table), len(directory),
         template_toc.block_size))
     struct.pack_into("<Q", head, 0x38, cid)
-    metas = b"".join(hashlib.sha1(p).digest() + b"\0" * 12 + b"\x01"
-                     for p in payloads)
+    metas = b"".join(metas)
 
     pak_dir = os.path.join(out_root, plugin, "Content", "Paks",
                            "WindowsNoEditor")

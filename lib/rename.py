@@ -515,15 +515,5 @@ def verify(utoc_path):
 
 def pack_blocks(payload, block_size, comp_method):
     """Split into blocks, Oodle-compressing each only where it round trips."""
-    out = []
-    for k in range(0, len(payload), block_size):
-        raw = payload[k:k + block_size]
-        comp = iostore.oodle_compress(raw) if comp_method else None
-        ok = comp is not None and len(comp) < len(raw)
-        if ok:
-            try:
-                ok = iostore.oodle_decompress(comp, len(raw)) == raw
-            except Exception:
-                ok = False
-        out.append((comp, len(raw), comp_method) if ok else (raw, len(raw), 0))
-    return out
+    import repack
+    return repack.pack_blocks(payload, block_size, comp_method)
