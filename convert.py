@@ -2148,7 +2148,13 @@ def loose_to_dresscode(source, mods, assume_yes=False):
         name = os.path.basename(root)
         written = os.path.join(root, "Content", "Paks", "WindowsNoEditor",
                                f"{name}End-WindowsNoEditor.utoc")
+        live = sys.stdout.isatty()
+        if live:
+            print(f"    checking {os.path.basename(written)} ...",
+                  end="", flush=True)
         problems = rename.verify(written)
+        if live:
+            print("\r" + " " * 70 + "\r", end="", flush=True)
         if problems:
             print()
             print("  PROBLEM -- the converted mod is not sound, "

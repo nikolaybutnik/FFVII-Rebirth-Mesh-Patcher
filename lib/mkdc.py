@@ -26,6 +26,7 @@ import json
 import os
 import re
 import struct
+import sys
 import zlib
 
 import assetreg
@@ -635,6 +636,26 @@ def build(meta, outfits, plugin, out_root, say=print, extras=(),
     """
     fields_from_ff7rml()
     F = FIELDS
+
+    # A big mod is minutes of silent decompressing and recompressing; keep a
+    # counter on screen so it reads as working, not hung. The counter line is
+    # overwritten in place and cleared before any real message.
+    progress = sys.stdout.isatty()
+
+    def tick(msg):
+        if progress:
+            print(f"\r      {msg[:58]:<58}", end="", flush=True)
+
+    def tick_done():
+        if progress:
+            print("\r" + " " * 66 + "\r", end="", flush=True)
+
+    raw_say = say
+
+    def say(msg):
+        tick_done()
+        raw_say(msg)
+
     cid = cityhash.package_id(f"{plugin}End")
     mount = f"../../../End/Mods/{plugin}/Content/"
 
@@ -650,6 +671,7 @@ def build(meta, outfits, plugin, out_root, say=print, extras=(),
     # first gets its own private copy of them.
     pre = []
     for outfit in outfits:
+        tick(f"reading outfit {len(pre) + 1}/{len(outfits)}")
         ptoc = iostore.Toc(outfit["utoc"])
         pre.append((ptoc, rename.read_packages(ptoc)))
     shared = {}
@@ -657,16 +679,52 @@ def build(meta, outfits, plugin, out_root, say=print, extras=(),
         for p in ppkgs.values():
             shared.setdefault(p["name"].lower(), []).append((k, p["chunk"]))
     diff_owner = {}
-    for low, where in shared.items():
+    mentions = {}       # identical shared name -> its lowercase name table
+    for n_cmp, (low, where) in enumerate(shared.items()):
+        tick(f"comparing shared files {n_cmp + 1}/{len(shared)}")
         if len(where) < 2:
             continue
-        digests = {hashlib.md5(pre[k][0].read(chunk)).digest()
-                   for k, chunk in where}
+        digests, first = set(), None
+        for k, chunk in where:
+            data = pre[k][0].read(chunk)
+            if first is None:
+                first = data
+            digests.add(hashlib.md5(data).digest())
         if len(digests) > 1:
             diff_owner[low] = where[0][0]
+        else:
+            try:
+                mentions[low] = {n.lower() for n in ZenPackage(first).names}
+            except Exception:
+                pass
+    # Identical bytes are not enough: a package that references a name whose
+    # rename differs per outfit (the mesh, or a private copy above) comes out
+    # different once rewritten. Those need private copies too, transitively.
+    divergent = set(diff_owner)
+    for _ptoc, ppkgs in pre:
+        mesh, _p = find_stock_mesh(ppkgs)
+        if mesh:
+            divergent.add(mesh.lower())
+    changed = True
+    while changed:
+        changed = False
+        for low, names in mentions.items():
+            if low not in divergent and names & divergent:
+                diff_owner[low] = shared[low][0][0]
+                divergent.add(low)
+                changed = True
+
+    # Variant paks trigger the same graft notes; say each once, not per outfit.
+    said = set()
+
+    def say_once(msg):
+        if msg not in said:
+            said.add(msg)
+            say(msg)
 
     tocs, wearers = [], []
     for k, outfit in enumerate(outfits):
+        tick(f"merging outfit {k + 1}/{len(outfits)}: {outfit['name']}")
         toc, packages = pre[k]
         tocs.append(toc)
         if template_toc is None:
@@ -688,7 +746,7 @@ def build(meta, outfits, plugin, out_root, say=print, extras=(),
                 "<Qii", hdr, info["store_off"] + j * 32)[:3]
             raw_meta[pid] = (exp, bun,
                              conheader.imported_packages(hdr, info, j))
-        grafts = stockgraft.plan(packages, raw_meta, {old_mesh_pid}, say)
+        grafts = stockgraft.plan(packages, raw_meta, {old_mesh_pid}, say_once)
 
         safe = safe_id(outfit["name"], used_names, f"Outfit{k + 1}")
         mesh_new = f"/{plugin}/Outfits/{safe}"
@@ -782,6 +840,7 @@ def build(meta, outfits, plugin, out_root, say=print, extras=(),
     entries_weapons = []
     opened = {}
     for label, utocs in extras:
+        tick(f"reading part: {label}")
         parts, parts_index = [], {}
         weapon_parts = []
         for utoc in utocs:
@@ -1154,7 +1213,12 @@ def build(meta, outfits, plugin, out_root, say=print, extras=(),
     comp = next((m for m, n in enumerate(template_toc.methods)
                  if n.lower() == "oodle"), None)
 
+    n_files = 1 + len(merged) + sum(len(r["bulks"]) for r in merged.values())
+    packed = [0]
+
     def blocks_of(payload):
+        packed[0] += 1
+        tick(f"compressing file {packed[0]}/{n_files}")
         return rename.pack_blocks(payload, template_toc.block_size, comp)
 
     # Packages first, bulk data after -- every container observed, the
@@ -1184,6 +1248,7 @@ def build(meta, outfits, plugin, out_root, say=print, extras=(),
             paths.append((rels[pid] + ext, len(chunks) - 1))
 
     directory = dirindex.build_dir_index(mount, paths)
+    tick("writing the mod file")
     body, ucas, _offlen, block_table = writer.build_container(
         template_toc, chunks, template_toc.block_size)
     head = bytearray(writer.build_toc_header(

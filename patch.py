@@ -493,9 +493,18 @@ def patch_mod(name, utoc_path, out_dir=None, backup_dir=None, no_backup=False):
     pkg_indices = [i for i in sorted(toc.paths)
                    if toc.paths[i].endswith(".uasset")]
     print(f"    scanning {len(pkg_indices)} files")
+    live = sys.stdout.isatty()
+
+    def clear():
+        if live:
+            print("\r" + " " * 46 + "\r", end="", flush=True)
+
     new_data = {}
     size_deltas = {}
-    for i in pkg_indices:
+    for n, i in enumerate(pkg_indices):
+        if live and n % 10 == 0:
+            print(f"\r    scanning file {n + 1}/{len(pkg_indices)}...",
+                  end="", flush=True)
         data = toc.read(i)
         try:
             pkg = zen.ZenPackage(data)
@@ -511,9 +520,11 @@ def patch_mod(name, utoc_path, out_dir=None, backup_dir=None, no_backup=False):
             for export_name, rep in reports:
                 if rep.get("changed"):
                     delta = rep["bytes_removed"]
+                    clear()
                     print(f"    fixed  {toc.paths[i]}  "
                           f"({'removed' if delta >= 0 else 'added'} "
                           f"{abs(delta):,} bytes)")
+    clear()
 
     if not new_data:
         print(f"    {MODE['already']}")
