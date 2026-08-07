@@ -892,15 +892,22 @@ def build(meta, outfits, plugin, out_root, say=print, extras=(),
                     "refs", toggles.references(w["toc"], w["packages"])))
             if not slots:
                 names = [p["name"] for _et, ep in parts for p in ep.values()]
-                if names and all(n.lower().startswith("/game/")
-                                 for n in names):
-                    say(f"      note: {label} only changes game files "
-                        f"{w['outfit']['name']} never uses (a weapon, say) "
-                        "-- no tile made. Keep that pak in ~mods instead: "
-                        "it works there alongside the Dresscode outfit.")
+                # A part carrying its own costume mesh is a whole outfit
+                # filed as an add-on: Optional swaps materials, and no
+                # toggle can reshape a model.
+                if any(find_stock_mesh(ep)[0] for _et, ep in parts):
+                    say_once(f"      note: {label} replaces the model, not "
+                             "just materials -- no tile. Move its folder "
+                             "beside the outfit folders to make it an "
+                             "outfit of its own.")
+                elif names and all(n.lower().startswith("/game/")
+                                   for n in names):
+                    say_once(f"      note: {label} changes game files this "
+                             "outfit does not use -- no tile. Keep it in "
+                             "~mods, where it works as before.")
                 else:
-                    say(f"      note: {label} changes nothing on "
-                        f"{w['outfit']['name']} -- skipped")
+                    say_once(f"      note: {label} changes nothing here "
+                             "-- skipped")
                 continue
             safe = safe_id(f"{label}", used_names, f"Extra{len(used_names)}")
             made, actor = toggles.emit(

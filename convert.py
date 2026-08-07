@@ -57,6 +57,7 @@ import moddata                                                  # noqa: E402
 import pakfile                                                  # noqa: E402
 import pngfile                                                  # noqa: E402
 import rename                                                   # noqa: E402
+import stockgraft                                               # noqa: E402
 import texread                                                  # noqa: E402
 import toggles                                                  # noqa: E402
 import weapons                                                  # noqa: E402
@@ -760,6 +761,52 @@ VARIANTS_DIR_OUT = "Variants"           # what this tool writes
 PARENT_ASIDE = "_DCBase"
 
 
+def _pak_digest(utoc):
+    """A pak's bytes, .utoc and .ucas together."""
+    h = hashlib.md5()
+    for ext in (".utoc", ".ucas"):
+        try:
+            with open(os.path.splitext(utoc)[0] + ext, "rb") as f:
+                for block in iter(lambda: f.read(1 << 20), b""):
+                    h.update(block)
+        except OSError:
+            pass
+    return h.digest()
+
+
+def dedupe_paks(utocs):
+    """
+    One entry per DISTINCT pak. A mod that offers the same add-on to every
+    costume ships a copy of it in each costume's folder, and listing it once
+    per copy makes the template unreadable -- worse, entries name a pak by
+    its stem, so repeated names are ambiguous.
+
+    Bytes decide, not names: same-named paks that really differ all stay.
+    Only a name-and-size collision is hashed, so nothing is read twice over
+    for a mod whose paks are all distinct anyway.
+    """
+    groups = {}
+    for u in utocs:
+        stem = os.path.splitext(os.path.basename(u))[0].lower()
+        try:
+            size = os.path.getsize(os.path.splitext(u)[0] + ".ucas")
+        except OSError:
+            size = -1
+        groups.setdefault((stem, size), []).append(u)
+    out = []
+    for group in groups.values():
+        if len(group) == 1:
+            out += group
+            continue
+        seen = set()
+        for u in sorted(group):
+            digest = _pak_digest(u)
+            if digest not in seen:
+                seen.add(digest)
+                out.append(u)
+    return sorted(out)
+
+
 def carries_outfit(utoc):
     """Whether a pak replaces a character's standard costume -- an outfit.
     Anything else is an extra: the modular standard's optional paks override
@@ -847,8 +894,16 @@ def loose_layout(source, mods):
     for tag in (" (pak)", " (pak)", " (unpacked)"):
         if name.lower().endswith(tag):
             name = name[:-len(tag)]
-    return (name, sorted(parts), sorted(extras), sorted(companions),
+    # Companions are NOT deduped: each is scoped to the outfit it sits with,
+    # so an identical copy in a sibling folder is that outfit's own.
+    return (name, sorted(parts), dedupe_paks(extras), sorted(companions),
             {rel for rel, u in parts if u in variants})
+
+
+# Folders that say where a pak is filed, never what the costume is: a
+# download unpacked with its install path intact ends in one of these, and
+# naming a menu row "~mods" tells nobody anything.
+PACKAGING_DIRS = {"~mods", "mods", "content", "paks", "windowsnoeditor"}
 
 
 def outfit_label(rel, mod_name):
@@ -857,8 +912,10 @@ def outfit_label(rel, mod_name):
     reads as a costume, "Variants/No Jacket" reads as a filing system."""
     if rel == ".":
         return mod_name
-    lead = rel.split("/")[0].lower()
-    return rel.split("/")[-1] if lead in VARIANT_DIRS else rel
+    parts = rel.split("/")
+    while len(parts) > 1 and parts[-1].lower() in PACKAGING_DIRS:
+        parts.pop()
+    return parts[-1] if parts[0].lower() in VARIANT_DIRS else "/".join(parts)
 
 
 def images_in(folder):
@@ -1543,50 +1600,105 @@ def record_roundtrip(toc, uplugin, plugin, plans, ctx, mod_out, layout,
     return 0
 
 
+def _within(child, parent):
+    """True when `parent` is `child` itself or a folder above it."""
+    child = os.path.normcase(os.path.abspath(child))
+    parent = os.path.normcase(os.path.abspath(parent))
+    return child == parent or child.startswith(parent + os.sep)
+
+
+def retouches(outfits, pkgs):
+    """
+    Whether this pak is a stock-texture retouch belonging to one of these
+    outfits -- it overrides game packages the outfit's STOCK materials
+    sample (skin, head), which is how mods shipped before the modular
+    standard: mesh in one pak, retouched stock textures in another.
+
+    Nothing in the mod records the link; only the game's own files show it,
+    so the walk that would carry those materials is what decides.
+    """
+    pids = set(pkgs)
+    for _utoc, opkgs, hdeps, mesh_pid in outfits:
+        if mesh_pid is None:
+            continue
+        merged = dict(opkgs)
+        merged.update(pkgs)
+        meta = {pid: (1, 1, hdeps.get(pid, ())) for pid in merged}
+        if stockgraft.links(merged, meta, {mesh_pid}) & pids:
+            return True
+    return False
+
+
 def classify_companions(outfit_utocs, candidates):
     """
-    (companions, options) for non-outfit paks living OUTSIDE an Optional
-    folder. A REQUIRED companion is one the outfits' packages hard-import
-    from and that overrides nothing of theirs. Everything else is really
-    an option: it overrides outfit packages (an old-style mask swap), or
-    overrides a rival candidate (a choose-one set -- the first in load
-    order is the baked default, the rest convert as variants), or touches
-    nothing of the mod's at all (a weapon override riding in the same
-    download -- the variant machinery skips it with a note).
+    ({outfit utoc: [companion utoc]}, options) for non-outfit paks living
+    OUTSIDE an Optional folder.
+
+    A REQUIRED companion is one the outfit's packages hard-import from and
+    that overrides nothing of theirs -- or a stock-texture retouch, which
+    imports nothing and is recognised by retouches() instead.
+
+    A companion belongs to the outfit it ships beside: one in the outfit's
+    own folder, or in a folder above it (a pak shared by every outfit). A
+    mod offering several versions repeats one pak name in each version's
+    folder with DIFFERENT bytes, so a sibling's copy must not reach here.
+
+    Everything else is an option: it overrides outfit packages (an old-style
+    mask swap), or overrides a rival in the same scope (a choose-one set --
+    the first in load order is the baked default, the rest convert as
+    variants), or touches nothing of the mod's at all (a weapon override
+    riding in the same download -- the variant machinery skips it with a
+    note).
     """
-    own, deps = set(), set()
+    own, deps, outfits = set(), set(), []
     total = len(outfit_utocs) + len(candidates)
     for k, u in enumerate(outfit_utocs):
         progress("sorting companions from options", k, total)
         toc = iostore.Toc(u)
-        own |= set(rename.read_packages(toc))
-        for pids in header_deps(toc).values():
-            deps.update(pids)
+        pkgs = rename.read_packages(toc)
+        hdeps = header_deps(toc)
+        mesh, _player = mkdc.find_stock_mesh(pkgs)
         toc.close()
+        own |= set(pkgs)
+        for pids in hdeps.values():
+            deps.update(pids)
+        outfits.append((u, pkgs, hdeps,
+                        cityhash.package_id(mesh) if mesh else None))
     infos = []
     for k, u in enumerate(candidates):
         progress("sorting companions from options",
                  len(outfit_utocs) + k, total)
         toc = iostore.Toc(u)
-        infos.append((u, set(rename.read_packages(toc))))
+        infos.append((u, rename.read_packages(toc)))
         toc.close()
     progress("sorting companions from options", total, total)
-    companions, options = [], []
-    referenced = [(u, pids) for u, pids in infos
-                  if pids & deps and not pids & own]
-    options += [u for u, pids in infos
-                if pids & own or not pids & deps]
-    # Load order settled choose-one sets in ~mods; the alphabetical first
-    # is the default the others were alternatives to.
-    referenced.sort(key=lambda t: os.path.basename(t[0]).lower())
-    taken = set()
-    for u, pids in referenced:
-        if pids & taken:
-            options.append(u)
+
+    options, kind = [], []
+    for u, pkgs in infos:
+        pids = set(pkgs)
+        if pids & own:
+            options.append(u)               # overrides the outfit itself
+        elif pids & deps or retouches(outfits, pkgs):
+            kind.append((u, pids))
         else:
-            companions.append(u)
+            options.append(u)               # nothing of this mod's at all
+    # Load order settled choose-one sets in ~mods; the alphabetical first is
+    # the default the others were alternatives to. Rivalry is judged per
+    # outfit -- two VERSIONS' copies of one pak are not rivals.
+    kind.sort(key=lambda t: os.path.basename(t[0]).lower())
+    comp_map, used = {}, set()
+    for utoc, _pkgs, _hdeps, _mesh in outfits:
+        home = os.path.dirname(utoc)
+        taken, mine = set(), []
+        for u, pids in kind:
+            if not _within(home, os.path.dirname(u)) or pids & taken:
+                continue
+            mine.append(u)
             taken |= pids
-    return companions, options
+            used.add(u)
+        comp_map[utoc] = mine
+    options += [u for u, _pids in kind if u not in used]
+    return comp_map, sorted(options)
 
 
 def stack_tree(outfits, extras):
@@ -1862,6 +1974,17 @@ def resolve_variants(meta, extras):
         return os.path.splitext(os.path.basename(u))[0]
 
     by_stem = {stem(u).lower(): u for u in extras}
+    if len(by_stem) < len(extras):
+        # Entries name a pak by its stem, so two different paks sharing one
+        # would silently resolve to whichever was seen last.
+        seen, clash = set(), set()
+        for u in extras:
+            (clash if stem(u).lower() in seen else seen).add(stem(u).lower())
+        raise RuntimeError(
+            f"{TEMPLATE}: more than one add-on pak is called "
+            + ", ".join(sorted(clash))
+            + ". Rename them apart (or delete the copies you do not want) "
+              "and drop the folder again.")
     cfg = meta.get("variants")
     default = [(toggles.label_of(u), [u]) for u in extras]
     if cfg is None:
@@ -1898,37 +2021,19 @@ def resolve_variants(meta, extras):
     return out, edited
 
 
-def refuse_mixed_shapes(mod_name, source, extras, variant_folders):
+def note_mixed_shapes(extras, variant_folders):
     """
-    ONE SHAPE PER MOD. Options and variants are two different answers to
-    "what else can this costume look like", and a mod using both would ask
-    the person to hold both models in their head at once -- for a
-    combination nothing in the wild actually ships.
-
-    A folder converted FROM a Dresscode mod is exempt, because it is
-    reproducing a real mod whatever shape that mod had. Returns True if it
-    refused.
+    A mod may use BOTH shapes: whole costumes in Variants, add-on paks in
+    Optional. Every add-on is then offered on every costume, so the menu
+    gets a row per costume plus one per costume-and-add-on.
     """
     if not (variant_folders and extras):
-        return False
+        return
     print()
-    print(f"  {mod_name}: this folder mixes two ways of offering "
-          "alternatives, and a mod has to pick one:")
-    print()
-    print("      Variants\\  --  whole costumes, one per folder")
-    print("      Optional\\  --  small add-on paks (the modular pak standard)")
-    print()
-    print("      The add-on paks found here:")
-    for u in extras[:4]:
-        print(f"        {os.path.relpath(u, source)}")
-    if len(extras) > 4:
-        print(f"        ... and {len(extras) - 4} more")
-    print()
-    print("      Move those out to build the variants -- or take the "
-          "Variants")
-    print(f"      folder{'s' if len(variant_folders) > 1 else ''} out to "
-          "build the modular form instead.")
-    return True
+    print(f"      {len(variant_folders)} costumes in Variants\\ and "
+          f"{len(extras)} add-on pak{'s' if len(extras) != 1 else ''} in "
+          "Optional\\:")
+    print("      each add-on is offered on each costume.")
 
 
 def loose_to_dresscode(source, mods, assume_yes=False):
@@ -1945,17 +2050,16 @@ def loose_to_dresscode(source, mods, assume_yes=False):
             return 1
         return None
     mod_name, parts, extras, companions, variant_folders = layout
+    comp_map = {}
     if companions:
         # Folder names said "companion"; the packages have the last word.
-        companions, options = classify_companions(
+        comp_map, options = classify_companions(
             [u for _rel, u in parts], companions)
+        companions = sorted({u for us in comp_map.values() for u in us})
         extras = sorted(extras + options)
 
     if not os.path.exists(os.path.join(source, TEMPLATE)):
-        # No template means nothing converted this folder FROM a Dresscode
-        # mod, so there is no original shape to be faithful to.
-        if refuse_mixed_shapes(mod_name, source, extras, variant_folders):
-            return 1
+        note_mixed_shapes(extras, variant_folders)
         # A weapon pak needs no combining decision -- its tile stands alone
         # in the weapons menu -- so those entries are written ready-made.
         def _is_weapon(u):
@@ -2003,9 +2107,6 @@ def loose_to_dresscode(source, mods, assume_yes=False):
     meta, outfits = read_template(source, parts)
     variants, variants_edited = resolve_variants(meta, extras)
     rt = unpack_restore(meta.get("restore"))
-    if rt is None and refuse_mixed_shapes(mod_name, source, extras,
-                                          variant_folders):
-        return 1
     exact = rt is not None and restore_matches(rt, meta, outfits) \
         and not variants_edited
     plugin = rt["plugin"] if exact else plugin_id(meta["name"])
@@ -2015,8 +2116,8 @@ def loose_to_dresscode(source, mods, assume_yes=False):
     # reproduces the original mod, whatever shape that was.
     #
     # Variants are declared to belong together, so they stay one mod with a
-    # tile each. Built fresh they never arrive with toggles (refused above);
-    # a restore may have both, and there the original mod's own shape wins.
+    # tile each -- and add-on paks alongside them are offered on every
+    # variant, which is the one case where naming the toggle is unambiguous.
     split = not exact and len(outfits) > 1 and not variant_folders
     print()
     print(f"  {meta['name']}  (pak -> Dresscode"
@@ -2044,9 +2145,10 @@ def loose_to_dresscode(source, mods, assume_yes=False):
         print(f"      {k + 1}. {o['name']}   [{pic}]")
     stackable = meta["stackable"] and bool(extras) and not exact
     if companions and not exact:
-        print(f"      + {len(companions)} required companion pak"
-              f"{'s' if len(companions) != 1 else ''} merged into every "
-              "outfit")
+        n = len(companions)
+        print(f"      + {n} required companion pak{'s' if n != 1 else ''} "
+              + ("merged into the outfits they ship with"
+                 if len(outfits) > 1 else "merged into the outfit"))
     if extras and not exact:
         if stackable:
             print(f"      + {len(extras)} extra paks stay COMBINABLE: the "
@@ -2102,18 +2204,29 @@ def loose_to_dresscode(source, mods, assume_yes=False):
             # merged container IS the outfit.
             merge_tmp = os.path.join(out_root, "_merge_tmp")
             for k, o in enumerate(outfits):
-                o["utoc"] = merge_loose([o["utoc"]] + list(companions),
-                                        merge_tmp, f"Merged{k + 1}_P")
+                mine = comp_map.get(o["utoc"]) or []
+                if mine:
+                    o["utoc"] = merge_loose([o["utoc"]] + mine, merge_tmp,
+                                            f"Merged{k + 1}_P")
         ex = [] if stackable else variants
         ext = stack_tree(outfits, extras) if stackable else ()
         used, roots = set(), []
+        # One plugin per outfit means every note repeats per plugin, and the
+        # notes are about the paks, not the outfit. Say each once.
+        said = set()
+
+        def once(msg):
+            if msg not in said:
+                said.add(msg)
+                print(msg)
+
         for o in (outfits if split else [None]):
             if split:
                 sub_name = f"{meta['name']} - {o['name']}"
                 sub = safe_plugin_id(sub_name, used)
                 roots.append(mkdc.build(dict(meta, name=sub_name), [o],
                                         sub, out_root, extras=ex,
-                                        external=ext,
+                                        external=ext, say=once,
                                         weapon_tiles=o is outfits[0]))
             else:
                 roots.append(mkdc.build(meta, outfits, plugin, out_root,

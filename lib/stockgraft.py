@@ -2,9 +2,11 @@
 stockgraft.py -- keep a pak's stock-texture retouches working in a plugin.
 
 Some pak mods ship retouched copies of stock textures (skin colour,
-occlusion) beside their outfit. Nothing in the pak imports them: as a loose
-pak they work by overriding the game's own package, so the game's skin
-material picks up the retouch. A Dresscode plugin renames every package under
+occlusion) beside their outfit -- in the same container by the time this
+runs, older mods having shipped them as a separate pak that convert.py
+merges in first. Nothing in the pak imports them: as a loose pak they work
+by overriding the game's own package, so the game's skin material picks up
+the retouch. A Dresscode plugin renames every package under
 /<Mod>/ -- a plugin carrying /Game/ paths was fatal at startup when mounted,
 and none of 95 shipping Dresscode containers does it -- which orphans such
 retouches: the stock material keeps sampling the stock texture, and the
@@ -127,23 +129,25 @@ def _entry(pid, place):
     return exp, bun, conheader.imported_packages(raw, info, j)
 
 
-def plan(packages, raw_meta, mesh_pids, say=print):
+def _survey(packages, raw_meta, mesh_pids, say=None):
     """
-    The stock packages a plugin must carry so this pak's stock-texture
-    retouches keep working.
+    Which stock packages a plugin would have to carry, read from headers
+    alone -- nothing is decompressed, so this is cheap enough to ask
+    speculatively.
 
-    `packages` is rename.read_packages of the pak, `raw_meta` its header's
-    {pid: (exports, bundles, imported pids)}, `mesh_pids` the packages
-    becoming outfits (unreferenced by design, never retouches).
-
-    Returns {pid: dict(name, data, exp, bun, deps, bulks)} -- {} when the pak
-    retouches nothing. `bulks` entries are (12-byte chunk id, payload).
+    Returns (orphans, real, graft_pids, entries, consumed): `orphans` is
+    {pid: name} for the pak's stock overrides, `real` those the game
+    actually has, `graft_pids` the stock packages that must ride along with
+    them, `entries` those packages' header rows, and `consumed` the
+    overrides the grafts genuinely sample. All empty when the pak retouches
+    nothing.
     """
+    empty = ({}, set(), set(), {}, set())
     imported = set()
     for _exp, _bun, deps in raw_meta.values():
         imported.update(deps)
     if not imported:
-        return {}
+        return empty
     orphans = {pid: k["name"] for pid, k in packages.items()
                if k["name"].lower().startswith("/game/")
                and pid not in imported and pid not in mesh_pids}
@@ -156,11 +160,13 @@ def plan(packages, raw_meta, mesh_pids, say=print):
                        and cityhash.package_id(name[:-len("_Condition")])
                        in packages)}
     if not orphans:
-        return {}
+        return empty
     if not _utocs():
-        say("      !! this pak retouches stock textures, but the game's own "
-            "files were not found -- the retouch will not show in game")
-        return {}
+        if say:
+            say("      !! this pak retouches stock textures, but the game's "
+                "own files were not found -- the retouch will not show in "
+                "game")
+        return empty
 
     frontier = {pid for pid in imported if pid not in packages}
     place = _locate(frontier | set(orphans))
@@ -168,7 +174,7 @@ def plan(packages, raw_meta, mesh_pids, say=print):
     # leftovers. Renaming it along with everything else stays correct.
     real = {pid for pid in orphans if place.get(pid, {}).get("pkg")}
     if not real:
-        return {}
+        return empty
 
     # Walk stock dependencies outward from what the pak imports until the
     # samplers of every retouched texture are found. Header data only; a
@@ -214,7 +220,41 @@ def plan(packages, raw_meta, mesh_pids, say=print):
             graft_pids.add(p)
             p = parent.get(p)
 
-    grafts, consumed = {}, set()
+    consumed = set()
+    for pid in graft_pids:
+        consumed |= set(entries[pid][1][2]) & real
+    return orphans, real, graft_pids, entries, consumed
+
+
+def links(packages, raw_meta, mesh_pids):
+    """
+    Which of this pak's stock overrides the game's own materials actually
+    sample. Empty means its overrides have nothing to do with these
+    packages -- an unrelated pak riding in the same download.
+
+    Header data only, so a candidate can be tested before anything is built.
+    """
+    return _survey(packages, raw_meta, mesh_pids)[4]
+
+
+def plan(packages, raw_meta, mesh_pids, say=print):
+    """
+    The stock packages a plugin must carry so this pak's stock-texture
+    retouches keep working.
+
+    `packages` is rename.read_packages of the pak, `raw_meta` its header's
+    {pid: (exports, bundles, imported pids)}, `mesh_pids` the packages
+    becoming outfits (unreferenced by design, never retouches).
+
+    Returns {pid: dict(name, data, exp, bun, deps, bulks)} -- {} when the pak
+    retouches nothing. `bulks` entries are (12-byte chunk id, payload).
+    """
+    orphans, real, graft_pids, entries, consumed = _survey(
+        packages, raw_meta, mesh_pids, say)
+    if not orphans:
+        return {}
+
+    grafts = {}
     for pid in sorted(graft_pids):
         pl, (exp, bun, deps) = entries[pid]
         u, k = pl["pkg"]
@@ -226,15 +266,11 @@ def plan(packages, raw_meta, mesh_pids, say=print):
         grafts[pid] = dict(name=pkgedit.package_name_of(ZenPackage(data)),
                            data=data, exp=exp, bun=bun, deps=list(deps),
                            bulks=bulks)
-        consumed |= set(deps) & real
 
     if grafts:
-        tex = ", ".join(sorted(orphans[p].rsplit("/", 1)[-1]
-                               for p in consumed))
-        mats = ", ".join(sorted(g["name"].rsplit("/", 1)[-1]
-                                for g in grafts.values()))
-        say(f"      stock-texture retouch kept: {tex}")
-        say(f"        (carrying {mats} from the game so it rides the outfit)")
+        n = len(consumed)
+        say(f"      kept this mod's {n} retouched game texture"
+            f"{'s' if n != 1 else ''} with the outfit")
     # Whole costume slots get ONE plain sentence -- authors cook an outfit
     # over every slot so it follows the character through story scenes, and
     # a per-slot line each was seven lines of PC0002_xx jargon.
@@ -244,14 +280,11 @@ def plan(packages, raw_meta, mesh_pids, say=print):
         (slots if n.startswith("/game/character/player/")
          and "/model/" in n else other).append(p)
     if slots:
-        say(f"      note: the pak also replaces "
-            f"{len(slots)} more of this character's costumes (story "
-            "scenes, other slots). Worn through Dresscode, only the "
-            "outfit you pick changes -- the rest keep their normal look.")
+        say(f"      note: this pak also replaced {len(slots)} other costumes "
+            "as a loose mod. In Dresscode only the outfit you pick changes.")
     for p in other:
-        say(f"      note: {orphans[p].rsplit('/', 1)[-1]} overrides a stock "
-            "file nothing on this outfit uses -- that part won't apply in "
-            "Dresscode form")
+        say(f"      note: {orphans[p].rsplit('/', 1)[-1]} overrides a game "
+            "file this outfit does not use -- that part will not apply")
     return grafts
 
 

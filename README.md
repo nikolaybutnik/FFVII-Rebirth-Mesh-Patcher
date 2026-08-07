@@ -274,44 +274,69 @@ trip.
 Put ONE mod in one folder and drop that folder. First drop writes
 `dresscode.json` (open it to set names, or don't); second drop builds.
 
+**Set it up like this.** The converter accepts most shapes, but this is how I'd recommend you organize you folders to avoid confusion.
+
 ```
 My Mod\
-├── dresscode.json          written by the first drop
-├── icon.png                optional -- the mod's thumbnail
-├── SomeOutfit_P.utoc/.ucas/.pak     the outfit (anywhere: root or any
-│                                    subfolder, however deep)
-├── SomeTextures_P.*        a pak the outfit NEEDS (its textures or
-│                           materials in a separate download) -- put it
-│                           beside the outfit, it is detected and merged
-├── Variants\
-│   ├── No Jacket\SomeOutfit_P.*     a WHOLE costume of its own -- one
-│   └── Short Hair\SomeOutfit_P.*    extra outfit tile in the same mod
-└── Optional\
-    ├── No Hat\No_Hat_P.*            add-on paks, listed for you to
-    └── Red\Red_Recolor_P.*          combine -- see below
+├── icon.png                    the mod's thumbnail           (optional)
+├── Variants\                   every costume, one folder each
+│   ├── Standard\
+│   │   ├── Whatever_P.utoc     the costume's three files, loose in the
+│   │   ├── Whatever_P.ucas       folder -- plus any pak it needs, like
+│   │   ├── Whatever_P.pak        a separate textures one
+│   │   └── preview.png         this tile's picture           (optional)
+│   ├── No Jacket\
+│   └── Short Hair\
+└── Optional\                   only if the mod has add-ons
+    ├── Red\                    ONE copy of each add-on, never one
+    └── No Hat\                   copy per costume
 ```
 
-The rules, in plain terms:
+That gives you a single Dresscode entry with a tile per costume. Use it
+even when the mod has only one costume — `Variants\Standard\` on its own
+is fine, and keeps every mod you convert looking the same.
 
-- **Outfit paks** (the mod's mains) can sit anywhere — the root, `Main\`,
-  or nested download folders. Several outfits are fine; each becomes its
-  own Dresscode mod, named "mod - outfit".
-- **Option paks** — the little hide-this / recolor-that files — are
-  understood wherever they are. Under `Optional\` they always count as
-  options; anywhere else the converter reads their contents and works out
-  whether they are options (they change the outfit's look) or **required
-  companions** (the outfit's own materials point into them — those merge
-  into every outfit automatically, and the output says so).
-- **Whole alternate costumes** — a version with a part left out, a
-  different body, a different hairstyle — go under `Variants\`, one
-  folder each. They become extra **outfit tiles inside the same Dresscode
-  mod**, named after their folder, each able to have its own
-  `preview.png`. Alternates sitting loose beside the mains instead still
-  become separate Dresscode mods, which is the older behaviour.
-- **`Optional\` is for add-on paks** — the little drag-in files of the
-  modular pak standard (a recolour, a piece hidden). A difference that
-  lives in the model itself (a part switched off, a different body) is a
-  whole costume, and belongs under `Variants\`.
+Three habits that save trouble:
+
+- **Name the folders the way you want the tiles named** — those names go
+  straight into the menu. Keep them short; very long ones get shortened.
+- **Unpack down to the three files.** A download often arrives with
+  `~mods\` or `Content\Paks\WindowsNoEditor\` inside; lift the files out.
+  Both work, but the flat one is simplest.
+- **Nothing loose at the top** but `icon.png` and `dresscode.json`.
+
+**Why things go where — is this pak a whole costume, or a change to one?**
+
+A **whole costume** replaces the model — a different body, a hairstyle, a
+part modelled away. Those go under `Variants\`. A **change** only repaints
+or hides what the costume already has (a recolour, a hidden bra strap).
+Those go under `Optional\`. Get it wrong and the converter says so: a
+costume filed under `Optional\` is reported as "replaces the model, not
+just materials".
+
+| What you have | Where it goes | What you get |
+| --- | --- | --- |
+| every whole costume | `Variants\<name>\` | one tile each, all in one Dresscode mod |
+| changes to a costume | `Optional\<name>\` | listed for you to combine — see below |
+| a pak the costume NEEDS (its textures or materials, shipped separately) | beside that costume | merged in automatically |
+| whole costumes you want as **separate mods** instead | any other subfolder | a Dresscode mod per costume |
+
+Some additional notes:
+
+- **Tidying is for your sake, not the tool's.** Paks are found however
+  many folders deep they sit, and `~mods\`/`Content\Paks\` wrappers are
+  ignored when naming tiles — so an untouched download converts fine. It
+  just makes it easier to understand at a glance.
+- **`Variants\` and `Optional\` work together.** Add-ons apply to *every*
+  costume, so three costumes and two add-ons give you three tiles plus
+  their combinations, all in one Dresscode entry. Put **one** copy of an
+  add-on in `Optional\` — not a copy inside each variant. (Identical
+  copies are listed once anyway; ones that really differ must have
+  different pak names, or the converter stops and says which clash.)
+- **A separate textures pak is detected, not configured.** If the costume
+  needs it, it is merged into that costume. A pak sitting in one
+  costume's folder belongs to that costume alone, so mods shipping
+  several versions of the same download keep their own.
 - **Add-ons are listed, not turned into menu entries.** Picking a tile in
   Dresscode replaces the last one, so 30 add-ons as 30 one-change tiles
   is not how anyone wears them. Instead `dresscode.json` lists the parts
@@ -325,18 +350,12 @@ The rules, in plain terms:
   ]
   ```
 
-  A part that changes a weapon becomes a tile in the WEAPONS menu
-  instead, automatically; the stock weapon tile switches it back off.
-
   Don't want to choose? Set `"stackable": true` — the parts stay drop-in
   files (you get a "Put in ~mods" folder that works like always), and
   only the costume is picked in Dresscode.
-- **A mod uses one shape or the other.** A folder holding both `Variants\`
-  and `Optional\` is refused, and the message says which paks it found
-  and what each shape is for. Most Dresscode mods want `Variants\`;
-  `Optional\` is there for modular pak mods, and for a mod converted
-  out of Dresscode — whose own menu entries land there and ARE kept, so
-  converting it back reproduces the mod exactly.
+- **The one layout that is refused**: several different costume paks
+  loose in the top folder together, with nothing saying which is which.
+  Give each its own subfolder (or one shared `Main\`) and drop again.
 - **Another Dresscode mod this one depends on** (a shared asset mod
   its page says to install): put that mod's folder in the same parent folder
   as the one you drop, or have it installed in `End\Mods`. The converter
@@ -350,12 +369,13 @@ The rules, in plain terms:
   tile switches it back off. (This needs the game installed while
   converting — without it, the pak is skipped with a note and keeps
   working from `~mods`.)
-- **Retouched game textures**: some mods also ship corrected copies of the
-  game's own textures (skin shading, say) so the outfit blends cleanly.
-  The converter keeps those working on its own — the output says
-  "stock-texture retouch kept" when it happens. Parts of a mod that
-  override something the outfit itself never uses (another costume slot,
-  say) have no Dresscode form, and the output says that too.
+- **Retouched game textures**: many older mods replace the game's own
+  textures (skin shading, say) rather than shipping their own, often in a
+  separate pak. Those are carried into the mod and wired to the costume,
+  so they apply while it is worn and nowhere else — the output says
+  "kept this mod's N retouched game textures with the outfit". Parts that
+  override something the outfit never uses (another costume slot, say)
+  have no Dresscode form, and the output says that too.
 
 Pre-V1.005 mods are caught automatically: if the meshes are the old
 format, `convert.py` says so before doing anything and offers to patch
