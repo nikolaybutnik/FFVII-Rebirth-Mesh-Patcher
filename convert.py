@@ -258,12 +258,25 @@ def plan_variants(toc, plugin, extra_roots=()):
     """
     assets = moddata.find_data_assets(toc,
                                       prefer=f"/{plugin.lower()}/")
-    if "character" not in assets:
-        raise RuntimeError("no Dresscode outfit data in this mod")
-    outfits = moddata.read_outfits(toc.read(assets["character"]))
+    outfits = moddata.read_outfits(toc.read(assets["character"])) \
+        if "character" in assets else []
 
     packages = rename.read_packages(toc)
     own = {p["name"].lower() for p in packages.values()}
+
+    # A weapons-menu row converts like a costume one: its mesh takes over a
+    # stock package and the rest moves in beside it -- only WHICH stock
+    # package differs. Tiles this tool built are the exception: they kept
+    # the stock path as their tail, so weapon_tiles_back can put every file
+    # back exactly where it came from instead of relocating them.
+    for i in moddata.weapon_lists(toc, weapons.MOD_TYPE_WEAPON):
+        for row in moddata.read_outfits(toc.read(i)):
+            root = str(row.get("skeletal_mesh") or "").split(".")[0].lower()
+            if any(n.startswith(root + "/") for n in own):
+                continue
+            outfits.append(dict(row, weapon=True))
+    if not outfits:
+        raise RuntimeError("no Dresscode outfit data in this mod")
     by_name = {p["name"].lower(): pid for pid, p in packages.items()}
     deps = header_deps(toc)
 
@@ -354,7 +367,7 @@ def plan_variants(toc, plugin, extra_roots=()):
     bases = []
     for o in wearable:
         pid = by_name.get(o["skeletal_mesh"].split(".")[0].lower())
-        target = moddata.default_costume_package(o["player_type"])
+        target = stock_target(o, own)
         if pid is not None and target:
             bases.append((pid, target.rsplit("/Model/", 1)[0],
                           (o["name"] or "").strip()))
@@ -403,10 +416,15 @@ def plan_variants(toc, plugin, extra_roots=()):
             print(f"  skipping {outfit['name'] or mesh!r}: its model file "
                   "is missing from this mod")
             continue
-        target = moddata.default_costume_package(outfit["player_type"])
+        target = stock_target(outfit, own)
         if not target:
-            print(f"  skipping {outfit['name'] or mesh!r}: unknown character "
-                  f"{outfit['player_type']!r}")
+            if outfit.get("weapon"):
+                print(f"  skipping {outfit['name'] or mesh!r}: cannot tell "
+                      "which weapon it replaces (its files carry no weapon "
+                      "id, or Dresscode is not installed to look one up)")
+            else:
+                print(f"  skipping {outfit['name'] or mesh!r}: unknown "
+                      f"character {outfit['player_type']!r}")
             continue
 
         others = set().union(*(c for j, c in enumerate(closures) if j != k)) \
@@ -454,6 +472,17 @@ def plan_variants(toc, plugin, extra_roots=()):
     return plans, toggles, dict(packages=packages, assets=assets,
                                 outfits=outfits, blob_only=blob_only,
                                 roots=roots)
+
+
+def stock_target(row, own):
+    """
+    The stock package this row's mesh takes over: a character's default
+    costume, or -- for a weapons-menu row -- the weapon it stands in for.
+    None when it cannot be told, which the caller reports.
+    """
+    if not row.get("weapon"):
+        return moddata.default_costume_package(row["player_type"])
+    return weapons.stock_for(row["skeletal_mesh"].split(".")[0], own)
 
 
 def converted_name(name, plugin, costume_root):
@@ -726,11 +755,26 @@ def condition_refs(toc, chunk, own):
     return out
 
 
+def loose_root_of(target):
+    """The /Game/ folder a plan's packages all sit under -- Player for a
+    costume, Weapon for a weapons-menu row. The container mounts there, so
+    every package must share it."""
+    root = "/".join(target.split("/")[:4])
+    return root + "/" if root.startswith("/Game/Character/") else LOOSE_ROOT
+
+
+def loose_path_under(root):
+    """Container-relative path of a package, under `root`'s mount."""
+    def path(package_name):
+        if not package_name.startswith(root):
+            raise RuntimeError(f"cannot place {package_name} in a pak")
+        return package_name[len(root):]
+    return path
+
+
 def loose_path(package_name):
     """Container-relative path, under the player-character mount."""
-    if not package_name.startswith(LOOSE_ROOT):
-        raise RuntimeError(f"cannot place {package_name} in a pak")
-    return package_name[len(LOOSE_ROOT):]
+    return loose_path_under(LOOSE_ROOT)(package_name)
 
 
 # ---------------------------------------------------------------------------
@@ -2076,6 +2120,69 @@ def resolve_variants(meta, extras, outfits=()):
     return out, edited
 
 
+def weapon_tiles_back(toc, packages):
+    """
+    ([(label, renames, objects, keep)], elsewhere) turning the weapons-menu
+    tiles THIS TOOL built back into ordinary override paks.
+
+    `elsewhere` names the rows laid out some other way -- an author's own
+    weapon mod keeps its files under its plugin's own folders. Those are
+    not this function's to place; plan_variants converts them like any
+    other row, relocating them under the weapon they stand in for.
+
+    A tile lives under /<Plugin>/Weapons/<Safe>/ with the stock weapon's
+    own path kept as the tail, so mapping the tail onto
+    /Game/Character/Weapon/ puts every material and texture back over the
+    package it was overriding -- which is all a recolour pak ever was.
+
+    The tile's MESH is the stock weapon carried in so Dresscode has
+    something to show. A pak needs it only when the mod actually replaced
+    it, so it rides along only when its bytes differ from the game's.
+    """
+    lists = moddata.weapon_lists(toc, weapons.MOD_TYPE_WEAPON)
+    if not lists:
+        return [], []
+    by_low = {p["name"].lower(): p for p in packages.values()}
+    out, unmapped = [], []
+    for i in lists:
+        for row in moddata.read_outfits(toc.read(i)):
+            label = str(row.get("name") or "").strip()
+            root = str(row.get("skeletal_mesh") or "").split(".")[0]
+            mesh = by_low.get(root.lower())
+            if not mesh:
+                unmapped.append(label or root)
+                continue
+            under = {p["name"]: p["name"][len(root) + 1:]
+                     for p in packages.values()
+                     if p["name"].lower().startswith(root.lower() + "/")}
+            if not under:
+                unmapped.append(label or root)
+                continue
+            # Every tail starts with the weapon's own folder, which names
+            # the stock mesh: WE0002_15_Tifa_Foo -> .../Model/WE0002_15.
+            folder = sorted(under.values())[0].split("/")[0]
+            bits = folder.split("_")
+            if len(bits) < 2:
+                unmapped.append(label or folder)
+                continue
+            obj = f"{bits[0]}_{bits[1]}"
+            stock_mesh = f"{weapons.WEAPON_ROOT_PROPER}{folder}/Model/{obj}"
+            renames = {n.lower(): weapons.WEAPON_ROOT_PROPER + tail
+                       for n, tail in under.items()}
+            keep = set(under)
+            objects = {}
+            if weapons.replaces_stock_mesh(toc.read(mesh["chunk"]),
+                                           stock_mesh):
+                renames[mesh["name"].lower()] = stock_mesh
+                keep.add(mesh["name"])
+                # Its export was given a digit-free name for the menu; the
+                # stock package is referenced by the original one.
+                tile_obj = str(row.get("skeletal_mesh") or "").split(".")[-1]
+                objects[mesh["name"].lower()] = {tile_obj: obj}
+            out.append((label or folder, renames, objects, keep))
+    return out, unmapped
+
+
 def note_mixed_shapes(extras, variant_folders):
     """
     A mod may use BOTH shapes: whole costumes in Variants, add-on paks in
@@ -2424,11 +2531,14 @@ def prepare_to_loose(toc, uplugin, out_base=None):
     n = len(plans)
     chars = [o["player_type"].split("::")[-1].title() for o, *_ in plans]
     mixed = len(set(chars)) > 1
+    guns = [o.get("weapon") for o, *_ in plans]
     head = f"  {plugin}  (Dresscode"
     if n > 1:
-        head += f", {n} outfits"
+        head += f", {n} " + ("weapons" if all(guns) else "outfits")
     if not mixed:
-        head += f", replaces {chars[0]}'s standard outfit"
+        what = ("weapon" if all(guns) else
+                "outfit and weapon" if any(guns) else "standard outfit")
+        head += f", replaces {chars[0]}'s {what}"
     print()
     print(head + ")")
     print(f"      -> {mod_out}{os.sep}")
@@ -2463,10 +2573,14 @@ def prepare_to_loose(toc, uplugin, out_base=None):
         layout.append(("." if n == 1 else label,
                        (outfit, target, renames, objects, drop)))
 
+        lroot = loose_root_of(target)
+
         def run(renames=renames, objects=objects, drop=drop,
-                out_dir=out_dir, label=label):
-            written = rename.rename_container(toc, renames, CONTAINER_MOUNT,
-                                              loose_path, out_dir, base,
+                out_dir=out_dir, label=label, lroot=lroot):
+            written = rename.rename_container(toc, renames,
+                                              mount_of_common(lroot),
+                                              loose_path_under(lroot),
+                                              out_dir, base,
                                               container_name=base,
                                               object_renames=objects,
                                               drop=drop, fix_arcs=True,
@@ -2617,6 +2731,42 @@ def prepare_to_loose(toc, uplugin, out_base=None):
 
         runners.append(opt_run)
         opt_layout.append((rel, opt_base, t))
+
+    # ---- weapons-menu tiles, back to override paks -----------------------
+    # Their registration asset is dropped like every other one, so nothing
+    # downstream would ever see them: mapped back here or lost entirely.
+    weapon_backs, _elsewhere = weapon_tiles_back(toc, packages)
+    for w, (wlabel, wrenames, wobjects, wkeep) in enumerate(weapon_backs):
+        label = folder_name(wlabel) or f"weapon {w + 1}"
+        out_dir = os.path.join(mod_out, "Optional", label)
+        wdrop = {p["name"] for p in packages.values()
+                 if p["name"] not in wkeep}
+        wbase = f"0W{chr(65 + (w % 26))}_{plugin_id(label)}_P"
+        print(f"      + weapon: {label}   ({len(wkeep)} file"
+              f"{'s' if len(wkeep) != 1 else ''})")
+
+        def weapon_run(renames=wrenames, objects=wobjects, drop=wdrop,
+                       out_dir=out_dir, wbase=wbase, label=label):
+            written = rename.rename_container(
+                toc, renames, mount_of_common(weapons.WEAPON_ROOT_PROPER),
+                lambda n: n[len(weapons.WEAPON_ROOT_PROPER):],
+                out_dir, wbase, container_name=wbase,
+                object_renames=objects, drop=drop, fix_arcs=True,
+                quiet=True, cross_pak=True)
+            with open(os.path.join(out_dir, wbase + ".pak"), "wb") as f:
+                f.write(pakfile.build(pakfile.LOOSE_MOUNT))
+            problems = rename.verify(written)
+            if problems:
+                print(f"  PROBLEM -- weapon {label} is not sound:")
+                for p in problems[:6]:
+                    print(f"    {p}")
+                return 1
+            mb = os.path.getsize(os.path.splitext(written)[0] + ".ucas") \
+                / (1024 * 1024)
+            print(f"    weapon     {label}   ({mb:,.2f} MB, verified)")
+            return 0
+
+        runners.append(weapon_run)
 
     if len(plans) > 1 or opt_layout:
         print("      install: one outfit folder's three files go in ~mods; "

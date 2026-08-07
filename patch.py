@@ -104,6 +104,7 @@ FORWARD = dict(
     needs=meshfix.old_format, convert=meshfix.convert_payload,
     needs_label="needs patching", done_label="patched",
     already="nothing to fix (already new-format)",
+    done_inside="already patched",
     dresscode_ok=["installed -- not patched by this tool "
                   "(it has its own official updates)"],
     dresscode_skip=["Dresscode has an official V1.005 update; install",
@@ -115,6 +116,7 @@ BACKWARD = dict(
     needs=meshfix.new_format, convert=meshfix.unconvert_payload,
     needs_label="needs unpatching", done_label="1.004 already",
     already="nothing to do (already the old 1.004 format)",
+    done_inside="already back to the old 1.004 format",
     dresscode_ok=["installed -- not touched by this tool "
                   "(use its author's release for your game version)"],
     dresscode_skip=["Dresscode is not converted here; for the 1.004",
@@ -857,6 +859,61 @@ _extract_archive = drops.extract_archive
 _expand_archives = drops.expand_archives
 
 
+# Archives unpacked to be looked inside, keyed by absolute path. Unpacking
+# is the only way to see what a mod is, and answering "yes" would unpack the
+# same archive again -- so the copy is kept and patched in place instead.
+_UNPACKED = {}
+
+
+def _unpack_to_look(arc):
+    """
+    An unpacked copy of `arc` in a temporary folder, or None if it will not
+    open. Unpacked once per run: the scan reads it, and the patch that may
+    follow moves this very copy into place rather than repeating the work.
+    """
+    key = os.path.normcase(os.path.abspath(arc))
+    if key in _UNPACKED:
+        return _UNPACKED[key]
+    import tempfile
+    dst = tempfile.mkdtemp(prefix="modscan-")
+    try:
+        _extract_archive(arc, dst)
+        _expand_archives(dst)
+    except Exception:
+        shutil.rmtree(dst, ignore_errors=True)
+        _UNPACKED[key] = None
+        return None
+    _UNPACKED[key] = dst
+    return dst
+
+
+def _discard_unpacked():
+    """Drop what the scan unpacked and nothing took over."""
+    for dst in _UNPACKED.values():
+        if dst:
+            shutil.rmtree(dst, ignore_errors=True)
+    _UNPACKED.clear()
+
+
+def _archive_needs(arc):
+    """
+    Whether anything inside `arc` still needs work: True, False, or None
+    when it cannot be looked into. None is NOT "nothing to do" -- an archive
+    no tool here can open is offered as before, and the extraction attempt
+    is what reports why.
+    """
+    dst = _unpack_to_look(arc)
+    if dst is None:
+        return None
+    found = find_mods([dst])
+    if not found:
+        return None
+    try:
+        return any(mod_status(u)[0] == "needs_fix" for u in found.values())
+    except Exception:
+        return None
+
+
 def _archive_covered(arc, mod_names):
     """True when every mod inside `arc` already appears in the scan -- the
     archive was extracted and handled on an earlier run, so offering it again
@@ -949,14 +1006,27 @@ def _patch_copy(source):
 
     if _is_archive(src):
         dst = os.path.join(wrapper, os.path.splitext(os.path.basename(src))[0])
-        print(f"  Extracting {os.path.basename(src)} to {dst} ...")
-        try:
-            _extract_archive(src, dst)
-        except Exception as ex:
-            print(f"  Could not extract: {ex}")
-            _INTERACTED = True
-            return 0
-        _expand_archives(dst)
+        ready = _UNPACKED.pop(os.path.normcase(src), None)
+        if ready:
+            # Already unpacked to see inside it; move that copy into place.
+            print(f"  Extracting {os.path.basename(src)} to {dst} ...")
+            os.makedirs(os.path.dirname(dst) or ".", exist_ok=True)
+            if os.path.isdir(dst):
+                shutil.rmtree(dst, ignore_errors=True)
+            try:
+                shutil.move(ready, dst)
+            except Exception:
+                shutil.copytree(ready, dst, dirs_exist_ok=True)
+                shutil.rmtree(ready, ignore_errors=True)
+        else:
+            print(f"  Extracting {os.path.basename(src)} to {dst} ...")
+            try:
+                _extract_archive(src, dst)
+            except Exception as ex:
+                print(f"  Could not extract: {ex}")
+                _INTERACTED = True
+                return 0
+            _expand_archives(dst)
         dst = _fix_loader_names(dst)
         return main(["--path", dst, "--all", "--no-backup"])
 
@@ -1135,17 +1205,36 @@ def main(argv):
         needs_work = False
         if mods:
             needs_work = show_list(mods, debug, sources=scan_sources)
-        # An archive whose mods are all in the scan already was extracted and
-        # handled on an earlier run -- offering it again would only duplicate.
-        # Only when the scan itself is clean: with work pending, the menu
-        # patches the whole drop, archives included, so none can be skipped.
-        live_archives, live_packed = archives, packed
+        # An archive is the one source that cannot be read where it lies, so
+        # it used to be offered on faith. Look inside instead: one that needs
+        # nothing is nothing to do, exactly as the same folder unpacked would
+        # be. (The copy is kept, so saying yes does not unpack it twice.)
+        # One already extracted and handled on an earlier run is reported as
+        # the duplicate it is, which says more than "nothing to do" when the
+        # unpacked copies are sitting right there -- so that is settled
+        # first. Only when the scan itself is clean: with work pending the
+        # menu processes the whole drop, archives included.
+        every = archives + [arc for p in packed for arc in _archives_in(p)]
+        dupe = set()
         if not needs_work:
-            live_archives = [a for a in archives
-                             if not _archive_covered(a, mods)]
-            live_packed = [p for p in packed
-                           if not all(_archive_covered(a, mods)
-                                      for a in _archives_in(p))]
+            dupe = {os.path.normcase(os.path.abspath(a)) for a in every
+                    if _archive_covered(a, mods)}
+        settled = set()
+        for a in every:
+            if os.path.normcase(os.path.abspath(a)) in dupe:
+                continue
+            if _archive_needs(a) is False:
+                settled.add(os.path.normcase(os.path.abspath(a)))
+
+        def _handled(a):
+            return os.path.normcase(os.path.abspath(a)) in (settled | dupe)
+
+        def _settled(a):
+            return os.path.normcase(os.path.abspath(a)) in settled
+
+        live_archives = [a for a in archives if not _handled(a)]
+        live_packed = [p for p in packed
+                       if not all(_handled(a) for a in _archives_in(p))]
         if live_archives or live_packed:
             print()
             print("  Archives to unpack and patch:")
@@ -1161,11 +1250,20 @@ def main(argv):
         skipped = ([a for a in archives if a not in live_archives]
                    + [arc for p in packed if p not in live_packed
                       for arc in _archives_in(p)])
-        if skipped:
+        done = [a for a in skipped if _settled(a)]
+        dupes = [a for a in skipped if not _settled(a)]
+        if done:
+            which = "this archive" if len(done) == 1 else "these archives"
+            print()
+            print(f"  Nothing to do in {which} -- what is inside is "
+                  f"{MODE['done_inside']}:")
+            for arc in done:
+                print(f"    {os.path.basename(arc)}")
+        if dupes:
             print()
             print("  Skipped -- the mods in these archives are already "
                   "listed above:")
-            for arc in skipped:
+            for arc in dupes:
                 print(f"    {os.path.basename(arc)}")
         # A drop owns its window, so a bare listing would dead-end at the exit
         # pause -- offer the follow-up: in-place confirm for installed mods, the
@@ -1319,8 +1417,11 @@ def run(argv):
     # Folder mode (--path or dropped folders) needs only Oodle, not the game.
     _sources = _parse_args(argv)[0]
     code = 0 if startup(require_game=not _sources) else 1
-    if code == 0:
-        code = main(argv)
+    try:
+        if code == 0:
+            code = main(argv)
+    finally:
+        _discard_unpacked()     # whatever the scan opened and nothing claimed
     _pause_before_exit(argv)
     return code
 

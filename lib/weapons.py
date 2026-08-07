@@ -42,6 +42,8 @@ import stockgraft
 from zen import ZenPackage
 
 WEAPON_ROOT = "/game/character/weapon/"
+# The same root as the game spells it -- for building names, not matching.
+WEAPON_ROOT_PROPER = "/Game/Character/Weapon/"
 
 # The E_ModType value Dresscode's own DA_ModData_WeaponDefaults carries.
 MOD_TYPE_WEAPON = "E_ModType::NewEnumerator2"
@@ -99,6 +101,63 @@ def stock_preview(mesh_name):
     return _previews.get(mesh_name.lower())
 
 
+_stock_index = None
+
+
+def stock_index():
+    """
+    {mesh leaf (lower) -> stock weapon mesh package} for every weapon the
+    game has, read from the installed Dresscode's own weapon list.
+
+    A character has one default costume but a dozen weapons, so unlike a
+    costume the stock package a weapon mod stands in for cannot be worked
+    out from its row alone -- but the files keep the weapon's own id
+    (WE0000_00), and this turns that id back into a package.
+    """
+    global _stock_index
+    if _stock_index is None:
+        _stock_index = {}
+        pat = os.path.join(getattr(config, "MODS_DIR", "") or "", "Dresscode",
+                           "Content", "Paks", "WindowsNoEditor", "*.utoc")
+        for u in glob.glob(pat):
+            try:
+                toc = iostore.Toc(u)
+                for p in rename.read_packages(toc).values():
+                    if not p["name"].endswith("DA_ModData_WeaponDefaults"):
+                        continue
+                    for row in moddata.read_outfits(toc.read(p["chunk"])):
+                        mesh = (row["skeletal_mesh"] or "").split(".")[0]
+                        if mesh.lower().startswith(WEAPON_ROOT):
+                            _stock_index[mesh.rsplit("/", 1)[-1].lower()] = mesh
+                toc.close()
+            except Exception:
+                pass
+    return _stock_index
+
+
+def stock_for(mesh_name, names):
+    """
+    The stock weapon package a mod's weapon mesh stands in for, or None.
+
+    The mesh's own leaf usually IS the weapon id. Where an author renamed
+    it (a second, physics-free copy of one sword), the materials and
+    textures beside it still carry the id, so the longest id prefix any of
+    them shares with a real weapon decides it.
+    """
+    index = stock_index()
+    if not index:
+        return None
+    leaf = mesh_name.rsplit("/", 1)[-1].lower()
+    if leaf in index:
+        return index[leaf]
+    for n in sorted(names, key=len, reverse=True):
+        tail = n.rsplit("/", 1)[-1].lower()
+        for k in index:
+            if tail.startswith(k):
+                return index[k]
+    return None
+
+
 def _part_meta(toc):
     """{pid: (exports, bundles, imported pids)} from a part pak's header."""
     out = {}
@@ -112,6 +171,31 @@ def _part_meta(toc):
             "<Qii", hdr, info["store_off"] + j * 32)[:3]
         out[pid] = (exp, bun, conheader.imported_packages(hdr, info, j))
     return out
+
+
+def replaces_stock_mesh(tile_data, stock_name):
+    """
+    Whether a tile's mesh is the mod's OWN, rather than the stock weapon
+    carried in so the menu has something to show.
+
+    Only the export payload is compared: carrying the mesh rewrote its
+    header (names, imports, the export's menu-safe name), but never a byte
+    of the mesh itself. True when the game's copy cannot be read either --
+    keeping a mesh that turns out to be stock costs size, dropping one that
+    was the mod's loses the replacement.
+    """
+    pid = cityhash.package_id(stock_name)
+    place = stockgraft._locate({pid})
+    got = place.get(pid, {}).get("pkg")
+    if not got:
+        return True
+    try:
+        u, k = got
+        stock = stockgraft._toc(u).read(k)
+        return (tile_data[ZenPackage(tile_data).export_data_start():]
+                != stock[ZenPackage(stock).export_data_start():])
+    except Exception:
+        return True
 
 
 def _part_bulks(toc, pid):

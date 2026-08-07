@@ -203,6 +203,8 @@ onto `patch.py`**. It lists what it found, then offers to patch everything into 
 `Patched Mods` folder beside the original; your originals are never touched. Drop
 as many as you like at once, and each may hold several mods, or archives inside
 archives — all of it gets unpacked. `.7z` and `.rar` need nothing installed.
+An archive is looked inside before anything is offered, so one whose mods are
+already patched says so.
 
 Two naming rules are handled for you. The `.utoc`/`.ucas`/`.pak` files keep their
 exact names, because the loader would lose track of a renamed mod. And a Dresscode
@@ -385,7 +387,12 @@ Some additional notes:
   turns into its own tile in Dresscode's WEAPONS menu; the stock weapon
   tile switches it back off. (This needs the game installed while
   converting — without it, the pak is skipped with a note and keeps
-  working from `~mods`.)
+  working from `~mods`.) It converts the other way too: a tile this tool
+  made goes back to an override pak under `Optional\`, and a weapon mod
+  written for Dresscode converts like a costume — its model takes over the
+  stock weapon and the rest moves in beside it, one pak per row. Which
+  weapon it replaces is read from the ids its files carry, so a mod that
+  renamed everything is skipped with a note rather than guessed at.
 - **Retouched game textures**: many older mods replace the game's own
   textures (skin shading, say) rather than shipping their own, often in a
   separate pak. Those are carried into the mod and wired to the costume,

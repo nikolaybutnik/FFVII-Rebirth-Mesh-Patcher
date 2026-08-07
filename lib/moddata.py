@@ -185,3 +185,33 @@ def registration_chunks(toc):
     surviving the conversion crashes the game at startup.
     """
     return {i for _kind, i, _own in _registration_matches(toc)}
+
+
+def menu_type(data):
+    """
+    Which menu this asset registers into, as its E_ModType enum name --
+    None for the mod's own costume data, which carries no "Mod Type".
+
+    The property is a byte enum, so the stored value is an FName index into
+    the asset's own name table rather than a readable string.
+    """
+    try:
+        props, _ = _properties(data)
+        raw = props.get("Mod Type")
+        if not raw:
+            return None
+        idx = int.from_bytes(bytes(raw)[:4], "little")
+        names = ZenPackage(data).names
+        return names[idx] if idx < len(names) else ""
+    except Exception:
+        return None
+
+
+def weapon_lists(toc, kind):
+    """Chunk index of every menu list registering rows of `kind` (an
+    E_ModType enum name) -- a mod's weapons-menu tiles live in one."""
+    out = []
+    for what, i, _own in _registration_matches(toc):
+        if what == "character" and menu_type(toc.read(i)) == kind:
+            out.append(i)
+    return out
