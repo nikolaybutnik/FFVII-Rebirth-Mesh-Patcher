@@ -309,7 +309,7 @@ Three habits that save trouble:
 
 A **whole costume** replaces the model — a different body, a hairstyle, a
 part modelled away. Those go under `Variants\`. A **change** only repaints
-or hides what the costume already has (a recolour, a hidden bra strap).
+or hides what the costume already has (a recolour, a hidden buckle).
 Those go under `Optional\`. Get it wrong and the converter says so: a
 costume filed under `Optional\` is reported as "replaces the model, not
 just materials".
@@ -329,8 +329,9 @@ Some additional notes:
   just makes it easier to understand at a glance.
 - **`Variants\` and `Optional\` work together.** Add-ons apply to *every*
   costume, so three costumes and two add-ons give you three tiles plus
-  their combinations, all in one Dresscode entry. Put **one** copy of an
-  add-on in `Optional\` — not a copy inside each variant. (Identical
+  their combinations, all in one Dresscode entry — or name an `"outfit"`
+  in the entry to put one on just some of them (below). Put **one** copy
+  of an add-on in `Optional\` — not a copy inside each variant. (Identical
   copies are listed once anyway; ones that really differ must have
   different pak names, or the converter stops and says which clash.)
 - **A separate textures pak is detected, not configured.** If the costume
@@ -353,6 +354,22 @@ Some additional notes:
   Don't want to choose? Set `"stackable": true` — the parts stay drop-in
   files (you get a "Put in ~mods" folder that works like always), and
   only the costume is picked in Dresscode.
+- **An add-on that only suits some outfits**: add `"outfit"` to the entry,
+  naming the outfit — or several. Without it the entry is offered on every
+  outfit, which is usually what you want.
+
+  ```json
+  "variants": [
+    { "name": "Red",       "parts": ["Red_Recolor_P"] },
+    { "name": "No hat",    "parts": ["No_Hat_P"], "outfit": "Standard" },
+    { "name": "No jacket", "parts": ["No_Jacket_P"],
+      "outfit": ["Standard", "Short Hair"] }
+  ]
+  ```
+
+  Name an outfit the way it appears in the `"outfits"` list above (its
+  `name`, or its folder). A name that matches nothing stops the conversion
+  and lists the ones that exist.
 - **The one layout that is refused**: several different costume paks
   loose in the top folder together, with nothing saying which is which.
   Give each its own subfolder (or one shared `Main\`) and drop again.

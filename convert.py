@@ -563,9 +563,9 @@ def plan_toggles(toc, plugin, packages, by_name, deps, closure, base_union,
             #
             # Left alone, `overrides` (keyed by the base package) just kept
             # whichever slot came last, and the other's material vanished --
-            # which shipped a shirt material wearing the bikini's name and
-            # rendered the whole costume as grey checkers, in game, with
-            # nothing in the output saying so.
+            # which shipped one slot's material wearing the other's name
+            # and rendered the whole costume as grey checkers, in game,
+            # with nothing in the output saying so.
             collided = set()
             by_base = {}
             for slot, (base, repl, _sh) in swaps.items():
@@ -1021,6 +1021,14 @@ def write_template(source, mod_name, parts, prefill=None, restore=None,
                 "and you get a 'Put in ~mods' folder that works like",
                 "always, with only the costume in the menu.",
             ]
+            if len(parts) > 1:
+                template["_how_this_works"] += [
+                    "",
+                    "An entry is offered on every outfit. For one that",
+                    "only suits some, add an 'outfit' line to it naming",
+                    "the outfit, spelled as in 'outfits' above -- or a",
+                    "list of names.",
+                ]
         if weap:
             template["_how_this_works"] += [
                 "",
@@ -1963,30 +1971,59 @@ def layout_problem(source, mods):
             "the README's \"how to organize the folder\" section.")
 
 
-def resolve_variants(meta, extras):
+def check_part_names(extras):
     """
-    [(row name, [utoc, ...])] from the template's "variants" section --
-    or one row per extra when the section is absent. Also says whether the
-    person edited the section away from the generated default, which must
-    override an exact-restore record: an edit means they WANT the change.
+    Entries name an add-on pak by its stem, so two DIFFERENT paks sharing
+    one would silently resolve to whichever was read last. Identical copies
+    are already down to one by here (see dedupe_paks), so anything left
+    over is a real clash. Checked before the template is written, not just
+    when it is read back, so the ambiguous list is never handed over.
+    """
+    seen, clash = set(), set()
+    for u in extras:
+        stem = os.path.splitext(os.path.basename(u))[0].lower()
+        (clash if stem in seen else seen).add(stem)
+    if clash:
+        raise RuntimeError(
+            "more than one add-on pak is called "
+            + ", ".join(sorted(clash))
+            + ". Rename them apart (or delete the copies you do not want) "
+              "and drop the folder again.")
+
+
+def match_outfit(want, outfits):
+    """The outfit `want` names -- by its menu name, its folder, or the last
+    part of that folder, whichever the person had in front of them. Returns
+    the folder, which is what identifies an outfit; None if no such costume.
+    """
+    low = str(want).strip().lower()
+    for o in outfits:
+        if low in (str(o["name"]).lower(), str(o["folder"]).lower(),
+                   str(o["folder"]).split("/")[-1].lower()):
+            return o["folder"]
+    return None
+
+
+def resolve_variants(meta, extras, outfits=()):
+    """
+    [(row name, [utoc, ...], only_on)] from the template's "variants"
+    section -- or one row per extra when the section is absent.
+
+    `only_on` is None when an entry goes on every outfit, else the folders
+    of the ones its "outfit" field names -- a mod whose add-on suits only
+    some of its outfits says so there.
+
+    Also says whether the person edited the section away from the generated
+    default, which must override an exact-restore record: an edit means
+    they WANT the change.
     """
     def stem(u):
         return os.path.splitext(os.path.basename(u))[0]
 
+    check_part_names(extras)
     by_stem = {stem(u).lower(): u for u in extras}
-    if len(by_stem) < len(extras):
-        # Entries name a pak by its stem, so two different paks sharing one
-        # would silently resolve to whichever was seen last.
-        seen, clash = set(), set()
-        for u in extras:
-            (clash if stem(u).lower() in seen else seen).add(stem(u).lower())
-        raise RuntimeError(
-            f"{TEMPLATE}: more than one add-on pak is called "
-            + ", ".join(sorted(clash))
-            + ". Rename them apart (or delete the copies you do not want) "
-              "and drop the folder again.")
     cfg = meta.get("variants")
-    default = [(toggles.label_of(u), [u]) for u in extras]
+    default = [(toggles.label_of(u), [u], None) for u in extras]
     if cfg is None:
         return default, False
     if not isinstance(cfg, list):
@@ -2008,16 +2045,34 @@ def resolve_variants(meta, extras):
             utocs.append(u)
         if not utocs:
             continue                    # an empty entry is just skipped
+        want = entry.get("outfit")
+        only_on = None
+        if want not in (None, "", []):
+            only_on = []
+            for w in (want if isinstance(want, list) else [want]):
+                folder = match_outfit(w, outfits)
+                if folder is None:
+                    raise RuntimeError(
+                        f'{TEMPLATE}: variant {k + 1} is set to go on an '
+                        f'outfit that is not there: "{w}". The outfits '
+                        "are: " + ", ".join(str(o["name"]) for o in outfits)
+                        + ".")
+                only_on.append(folder)
         name = str(entry.get("name") or "").strip() \
             or " + ".join(toggles.label_of(u) for u in utocs)
-        out.append((name, utocs))
+        out.append((name, utocs, only_on))
     # Structural comparison only, as SETS -- display names differ by which
     # conversion wrote the template, and the two writers list the same
     # entries in different orders; a restore reproduces the original's
     # names and order regardless. Only recomposition means they want a
-    # different mod: entries added, removed, or made of different parts.
-    edited = {tuple(sorted(u.lower() for u in us)) for _n, us in out} != \
-             {tuple(sorted(u.lower() for u in us)) for _n, us in default}
+    # different mod: entries added, removed, made of different parts, or
+    # aimed at different costumes.
+    def shape(entry):
+        _name, us, only_on = entry
+        return (tuple(sorted(u.lower() for u in us)),
+                tuple(sorted(only_on)) if only_on else ())
+
+    edited = {shape(e) for e in out} != {shape(e) for e in default}
     return out, edited
 
 
@@ -2057,6 +2112,7 @@ def loose_to_dresscode(source, mods, assume_yes=False):
             [u for _rel, u in parts], companions)
         companions = sorted({u for us in comp_map.values() for u in us})
         extras = sorted(extras + options)
+    check_part_names(extras)
 
     if not os.path.exists(os.path.join(source, TEMPLATE)):
         note_mixed_shapes(extras, variant_folders)
@@ -2105,7 +2161,7 @@ def loose_to_dresscode(source, mods, assume_yes=False):
         return 0
 
     meta, outfits = read_template(source, parts)
-    variants, variants_edited = resolve_variants(meta, extras)
+    variants, variants_edited = resolve_variants(meta, extras, outfits)
     rt = unpack_restore(meta.get("restore"))
     exact = rt is not None and restore_matches(rt, meta, outfits) \
         and not variants_edited
@@ -2166,7 +2222,7 @@ def loose_to_dresscode(source, mods, assume_yes=False):
             print("        \"stackable\": true to keep them as drop-in files "
                   "for ~mods.")
         else:
-            combos = sum(1 for _n, us in variants if len(us) > 1)
+            combos = sum(1 for _n, us, _cs in variants if len(us) > 1)
             print(f"      + {len(variants)} tile"
                   f"{'s' if len(variants) != 1 else ''} to build from "
                   f"{len(extras)} add-on pak{'s' if len(extras) != 1 else ''}"

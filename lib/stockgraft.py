@@ -10,8 +10,8 @@ the retouch. A Dresscode plugin renames every package under
 /<Mod>/ -- a plugin carrying /Game/ paths was fatal at startup when mounted,
 and none of 95 shipping Dresscode containers does it -- which orphans such
 retouches: the stock material keeps sampling the stock texture, and the
-outfit shows the vanilla shading the author painted out (baked-in clothing
-lines on bare skin, typically).
+outfit shows the vanilla shading the author painted out (baked-in garment
+lines the new model does not have, typically).
 
 So the retouch rides the outfit instead. The pak's own header names its stock
 imports, and the game containers' headers name what each of those imports in

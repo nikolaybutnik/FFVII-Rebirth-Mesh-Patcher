@@ -618,12 +618,13 @@ def build(meta, outfits, plugin, out_root, say=print, extras=(),
     Write the plugin folder. `meta` and `outfits` come from the dresscode.json
     template (read_template's output shapes); each outfit carries its utoc.
 
-    `extras` is [(label, utoc)] for the old modular standard's optional paks:
-    each becomes a toggle row per outfit it can act on. Weapon paks among
-    them become weapons-menu tiles instead -- but only when `weapon_tiles`
-    is set: a multi-outfit mod builds one plugin per outfit from the SAME
-    extras, and only the first may carry the weapon tiles, or every plugin
-    would register an identical row.
+    `extras` is [(label, [utoc, ...], only_on)] for the old modular
+    standard's optional paks: each becomes a toggle row per outfit it can
+    act on -- or only on the outfits `only_on` names (their folders), when
+    it is not None. Weapon paks among them become weapons-menu tiles instead --
+    but only when `weapon_tiles` is set: a multi-outfit mod builds one
+    plugin per outfit from the SAME extras, and only the first may carry the
+    weapon tiles, or every plugin would register an identical row.
 
     `external` is lowercase package names to leave at their original /Game/
     paths and NOT ship: the stackable-masks design serves them from ~mods
@@ -842,7 +843,7 @@ def build(meta, outfits, plugin, out_root, say=print, extras=(),
     entries_toggles = []
     entries_weapons = []
     opened = {}
-    for label, utocs in extras:
+    for label, utocs, only_on in extras:
         tick(f"reading part: {label}")
         parts, parts_index = [], {}
         weapon_parts = []
@@ -886,6 +887,9 @@ def build(meta, outfits, plugin, out_root, say=print, extras=(),
         if not parts:
             continue
         for w in wearers:
+            if only_on is not None \
+                    and w["outfit"]["folder"] not in only_on:
+                continue                # this add-on is not for this outfit
             slots, _overridden, retex = toggles.plan(
                 w["toc"], w["packages"], w["mesh_chunk"], parts,
                 refs=w.setdefault(
