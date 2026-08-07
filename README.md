@@ -125,6 +125,23 @@ there yourself beforehand.
 
 ---
 
+## Linux
+
+In order to run on Linux you need [linoodle](https://github.com/McSimp/linoodle),
+which is fetched at build time. Needs `cmake`, `g++`, and `git`.
+Build once:
+
+```
+cmake -S third_party -B third_party/build -DCMAKE_BUILD_TYPE=Debug
+cmake --build third_party/build --target linoodle
+```
+
+**Steam-registry lookup in the auto-detection above is Windows-only.**
+It can only find the game by sitting inside its folder,
+and the Oodle DLL has to be sitting next to `patch.py`.
+
+---
+
 ## Usage
 
 Install your mods as normal first, then:
