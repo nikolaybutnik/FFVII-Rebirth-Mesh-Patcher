@@ -881,6 +881,12 @@ def build(meta, outfits, plugin, out_root, say=print, extras=(),
                 entries_weapons.append(dict(
                     label=row_label, mesh=mesh_path, player=player,
                     stock=stock_name))
+            # Same files move as a pak and hold still as a tile (menus
+            # fine), so the conversion is faithful; cause not yet pinned.
+            if rows:
+                say_once("      note: in testing, a weapon's moving parts "
+                         "hold still during gameplay. In tile preview and menus it looks fine).")
+                say_once("      Keep the pak in ~mods if the physics matter to you.")
         if not parts:
             continue
         for w in wearers:

@@ -142,19 +142,42 @@ def stock_preview(mesh_name):
 _stock_index = None
 
 
+# End/Content/Character/Weapon/WE0000_00_Cloud_BusterSword/Model/WE0000_00
+_STOCK_MESH_PATH = re.compile(
+    r"Character/Weapon/(WE\d{4}_\d{2}[^/]*)/Model/(WE\d{4}_\d{2})\.uasset$",
+    re.I)
+
+
 def stock_index():
     """
     {mesh leaf (lower) -> stock weapon mesh package} for every weapon the
-    game has, read from the installed Dresscode's own weapon list.
+    game has.
 
     A character has one default costume but a dozen weapons, so unlike a
     costume the stock package a weapon mod stands in for cannot be worked
     out from its row alone -- but the files keep the weapon's own id
     (WE0000_00), and this turns that id back into a package.
+
+    Read from the GAME's own container directory first: it lists every
+    weapon (208 of them, against the 54 Dresscode's menu covers) and is
+    there whenever the game is. Dresscode's weapon list is the fallback for
+    a machine with the mod but not the game. Neither is required -- with
+    no source at all, the row is skipped with a note rather than guessed at.
     """
     global _stock_index
-    if _stock_index is None:
-        _stock_index = {}
+    if _stock_index is not None:
+        return _stock_index
+    _stock_index = {}
+    for u in stockgraft._utocs():
+        try:
+            for p in stockgraft._toc(u).paths.values():
+                m = _STOCK_MESH_PATH.search(p.replace("\\", "/"))
+                if m:
+                    _stock_index[m.group(2).lower()] = (
+                        f"{WEAPON_ROOT_PROPER}{m.group(1)}/Model/{m.group(2)}")
+        except Exception:
+            pass
+    if not _stock_index:
         pat = os.path.join(getattr(config, "MODS_DIR", "") or "", "Dresscode",
                            "Content", "Paks", "WindowsNoEditor", "*.utoc")
         for u in glob.glob(pat):

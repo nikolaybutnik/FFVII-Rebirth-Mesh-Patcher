@@ -408,17 +408,24 @@ Everything below is reference — you don't need any of it for an ordinary mod.
 - **Don't want to compose tiles at all?** Set `"stackable": true` and the parts
   stay drop-in files: you get a "Put in ~mods" folder that works as always,
   with only the costume in the menu.
+- **A weapon's moving parts may not move in Dresscode.** During testing, a weapon
+  with physics — a dangling chain, a strap — keeps its shape and textures
+  and looks right in the menus, but loses physics during gameplay. The conversion is
+  not the cause: the same weapon as a pak in `~mods` moves fine. If the
+  physics matter to you, keep that weapon as a pak.
 - **Weapon paks become weapon tiles, and the WEAPONS menu is its own.** A
   weapon tile belongs to a character, not a costume, so it stays on whatever
   they are wearing. A weapon mod therefore needs no costume — drop a folder of
   weapon paks on their own and each weapon becomes a tile, including when one
   pak covers a character's whole set; `"outfits"` stays empty and the menu is
-  written for you. Making tiles needs the game installed, and a pak that can't
-  be placed is skipped with a note and keeps working from `~mods`. Coming back,
-  a tile this tool made returns to an override pak by itself, while a weapon
-  mod someone else wrote for Dresscode needs Dresscode installed to look up
-  which weapon it stands in for — one whose files carry no id is skipped with a
-  note rather than guessed at.
+  written for you. A weapon that ships its own model converts with nothing
+  installed; one that only recolours the stock model borrows it from the game,
+  so that pak needs the game and is otherwise skipped with a note and keeps
+  working from `~mods`. Coming back, a tile this tool made returns to an
+  override pak by itself, while a weapon mod someone else wrote for Dresscode
+  needs the game (or Dresscode) installed to look up which weapon it stands in
+  for — one whose files carry no id is skipped with a note rather than guessed
+  at.
 - **A separate textures pak is detected, not configured.** If the costume needs
   it, it is merged in; one sitting in a costume's folder belongs to that
   costume alone, so mods shipping several versions keep their own.
