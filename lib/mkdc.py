@@ -858,6 +858,8 @@ def build(meta, outfits, plugin, out_root, say=print, extras=(),
                 opened[key] = (etoc, epkgs,
                                toggles.export_index(etoc, epkgs))
             etoc, epkgs, eindex = opened[key]
+            if template_toc is None:
+                template_toc = etoc      # a weapon mod brings no outfit pak
             if weapons.is_weapon_pak(epkgs):
                 # A weapon recolour cannot ride an outfit tile -- the outfit
                 # never references the weapon -- but it CAN become a tile in
@@ -1114,28 +1116,34 @@ def build(meta, outfits, plugin, out_root, say=print, extras=(),
             if w["outfit"] is outfit:
                 bodies.append(toggle_body(w, label, actor))
 
-    char_props = [
-        ("Character Data",
-         ("array_structs", "UDS_ModData_Character", GUID_CHAR, bodies)),
-        ("NativeClass", ("obj", -1)),
-    ]
-    char_name = f"/{plugin}/MetaData/CharacterData"
-    add(char_name, mkpkg.build(
-        char_name, "CharacterData", CHAR_PKG, "PDA_ModData_Character_C",
-        char_props,
-        imports=[cityhash.object_id(CHAR_PKG, "PDA_ModData_Character_C"),
-                 NULL,
-                 cityhash.object_id(CHAR_PKG,
-                                    "Default__PDA_ModData_Character_C")],
-        graph=[(cityhash.package_id(CHAR_PKG), [(0, 0)])]),
-        [cityhash.package_id(CHAR_PKG)])
-    registry_assets.append(dict(
-        object_path=f"{char_name}.CharacterData",
-        package_path=f"/{plugin}/MetaData",
-        class_name="PDA_ModData_Character_C", package_name=char_name,
-        asset_name="CharacterData",
-        tags=data_asset_tags("PDA_ModData_Character_C", CHAR_PKG,
-                             "CharacterData")))
+    # A weapon-only mod writes no costume list at all rather than an empty
+    # one: no mod ships a list registering nothing, and the weapons list
+    # below carries everything this mod has. Reading it back agrees --
+    # find_data_assets already treats a missing costume asset as "no
+    # outfits" and takes the rows from the weapons list.
+    if bodies:
+        char_props = [
+            ("Character Data",
+             ("array_structs", "UDS_ModData_Character", GUID_CHAR, bodies)),
+            ("NativeClass", ("obj", -1)),
+        ]
+        char_name = f"/{plugin}/MetaData/CharacterData"
+        add(char_name, mkpkg.build(
+            char_name, "CharacterData", CHAR_PKG, "PDA_ModData_Character_C",
+            char_props,
+            imports=[cityhash.object_id(CHAR_PKG, "PDA_ModData_Character_C"),
+                     NULL,
+                     cityhash.object_id(CHAR_PKG,
+                                        "Default__PDA_ModData_Character_C")],
+            graph=[(cityhash.package_id(CHAR_PKG), [(0, 0)])]),
+            [cityhash.package_id(CHAR_PKG)])
+        registry_assets.append(dict(
+            object_path=f"{char_name}.CharacterData",
+            package_path=f"/{plugin}/MetaData",
+            class_name="PDA_ModData_Character_C", package_name=char_name,
+            asset_name="CharacterData",
+            tags=data_asset_tags("PDA_ModData_Character_C", CHAR_PKG,
+                                 "CharacterData")))
 
     if entries_weapons:
         # A second data asset of the SAME class, told apart by "Mod Type" --
@@ -1224,6 +1232,9 @@ def build(meta, outfits, plugin, out_root, say=print, extras=(),
         hdr += b"\0" * (65536 - len(hdr) % 65536)
 
     # ---- chunk list and files --------------------------------------------
+    if template_toc is None:
+        raise RuntimeError("nothing to build here -- no costume pak and no "
+                           "weapon pak")
     comp = next((m for m, n in enumerate(template_toc.methods)
                  if n.lower() == "oodle"), None)
 

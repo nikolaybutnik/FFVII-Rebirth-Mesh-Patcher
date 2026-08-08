@@ -269,13 +269,20 @@ def plan_variants(toc, plugin, extra_roots=()):
     # package differs. Tiles this tool built are the exception: they kept
     # the stock path as their tail, so weapon_tiles_back can put every file
     # back exactly where it came from instead of relocating them.
+    own_tiles = 0
     for i in moddata.weapon_lists(toc, weapons.MOD_TYPE_WEAPON):
         for row in moddata.read_outfits(toc.read(i)):
-            root = str(row.get("skeletal_mesh") or "").split(".")[0].lower()
-            if any(n.startswith(root + "/") for n in own):
+            root = str(row.get("skeletal_mesh") or "").split(".")[0]
+            # By its layout, not by what it carries: a tile that replaced
+            # the weapon model outright has nothing beneath it.
+            if weapons.is_tile_path(root) \
+                    or any(n.startswith(root.lower() + "/") for n in own):
+                own_tiles += 1
                 continue
             outfits.append(dict(row, weapon=True))
-    if not outfits:
+    # A mod whose every row is one of those tiles has nothing to plan here
+    # and is not empty: weapon_tiles_back hands each one back on its own.
+    if not outfits and not own_tiles:
         raise RuntimeError("no Dresscode outfit data in this mod")
     by_name = {p["name"].lower(): pid for pid, p in packages.items()}
     deps = header_deps(toc)
@@ -311,7 +318,7 @@ def plan_variants(toc, plugin, extra_roots=()):
         elif mesh_low not in base_meshes:
             base_meshes.add(mesh_low)
             wearable.append(o)
-    if not wearable:
+    if not wearable and not own_tiles:
         raise RuntimeError("this mod registers no mesh of its own to convert")
 
     # The registration assets are Dresscode's, and only Dresscode's. Carried
@@ -465,7 +472,7 @@ def plan_variants(toc, plugin, extra_roots=()):
                 renames[name.lower()] = converted_name(name, roots,
                                                        costume_root)
         plans.append((outfit, target, renames, objects, drop))
-    if not plans:
+    if not plans and not own_tiles:
         raise RuntimeError("none of this mod's outfits can be converted")
     # The survey rides along so the round-trip recorder does not pay for a
     # second full read of every package.
@@ -867,6 +874,38 @@ def carries_outfit(utoc):
         toc.close()
 
 
+def weapon_tiles_in(utoc):
+    """The stock weapons a pak covers -- one menu tile each. Empty when the
+    pak is not a weapon pak at all."""
+    try:
+        toc = iostore.Toc(utoc)
+    except Exception:
+        return set()
+    try:
+        pkgs = rename.read_packages(toc)
+        return weapons.weapon_folders(pkgs) \
+            if weapons.is_weapon_pak(pkgs) else set()
+    except Exception:
+        return set()
+    finally:
+        toc.close()
+
+
+def is_weapon_pak(utoc):
+    """Whether a pak replaces weapon content and nothing else."""
+    return bool(weapon_tiles_in(utoc))
+
+
+def mod_root_name(source):
+    """The dropped folder's name, without the suffix a conversion added --
+    a folder converted before the suffix was renamed keeps its name."""
+    name = os.path.basename(os.path.abspath(source).rstrip("\\/"))
+    for tag in (" (pak)", " (unpacked)"):
+        if name.lower().endswith(tag):
+            return name[:-len(tag)]
+    return name
+
+
 def loose_layout(source, mods):
     """
     (mod_name, [(relative folder, utoc)], [extra utoc], [companion utoc],
@@ -905,6 +944,12 @@ def loose_layout(source, mods):
             companions.append(utoc)
     progress("reading paks", len(mods), len(mods))
     if not outfits:
+        # A weapon mod has no costume to anchor on, and needs none: its rows
+        # stand alone in the WEAPONS menu. Every pak has to be a weapon one,
+        # or this is a costume mod whose main pak was left behind.
+        rest = extras + companions
+        if rest and all(is_weapon_pak(u) for u in rest):
+            return (mod_root_name(source), [], dedupe_paks(rest), [], set())
         return None
 
     # The "one outfit per folder" rules below are about telling several
@@ -932,15 +977,10 @@ def loose_layout(source, mods):
             parts.append(("." if at_root else rel, utoc))
     if len({p == "." for p, u in parts if u not in variants}) > 1:
         return None                     # a pak both at the root and in subs
-    name = os.path.basename(os.path.abspath(source).rstrip("\\/"))
-    # " (pak)" is what older builds wrote; still stripped so a
-    # folder converted before the rename keeps its name.
-    for tag in (" (pak)", " (pak)", " (unpacked)"):
-        if name.lower().endswith(tag):
-            name = name[:-len(tag)]
     # Companions are NOT deduped: each is scoped to the outfit it sits with,
     # so an identical copy in a sibling folder is that outfit's own.
-    return (name, sorted(parts), dedupe_paks(extras), sorted(companions),
+    return (mod_root_name(source), sorted(parts), dedupe_paks(extras),
+            sorted(companions),
             {rel for rel, u in parts if u in variants})
 
 
@@ -1003,20 +1043,35 @@ def write_template(source, mod_name, parts, prefill=None, restore=None,
                 or outfit_label(rel, mod_name),
                 "description": pre_outfits.get(rel, (None, ""))[1]}
                for rel, _utoc in parts]
-    template = {
-        "_how_this_works": [
-            "convert.py made this file. Drop the folder on it again and it",
-            "builds the Dresscode mod. Changing anything below is optional:",
-            "the 'name' lines are what things are called in game, 'author'",
-            "and the descriptions show on the mod's page.",
-            "",
+    intro = [
+        "convert.py made this file. Drop the folder on it again and it",
+        "builds the Dresscode mod. Changing anything below is optional:",
+        "the 'name' lines are what things are called in game, 'author'",
+        "and the descriptions show on the mod's page.",
+        "",
+    ]
+    if outfits:
+        intro += [
             "Pictures: icon.png next to this file becomes the mod's",
             "thumbnail; preview.png inside an outfit's folder becomes that",
             "outfit's tile picture.",
             "",
             "Leave the 'folder' lines alone -- they say where the files",
             "live.",
-        ],
+        ]
+    else:
+        # A weapon mod has no outfit folders and no tile pictures of its
+        # own: each tile shows the game's picture of the weapon it replaces.
+        intro += [
+            "This mod changes weapons, not costumes, so 'outfits' is empty",
+            "and stays empty. Each tile shows the game's own picture of the",
+            "weapon it replaces.",
+            "",
+            "Pictures: icon.png next to this file becomes the mod's",
+            "thumbnail.",
+        ]
+    template = {
+        "_how_this_works": intro,
         "name": prefill.get("name") or mod_name,
         "author": prefill.get("author", ""),
         "description": prefill.get("description", ""),
@@ -1046,14 +1101,14 @@ def write_template(source, mod_name, parts, prefill=None, restore=None,
         # the raw file and copy out wrong.
         combos = [(l, s) for l, s, w in extras if not w]
         weap = [(l, s) for l, s, w in extras if w]
-        ex = (combos or weap)[:2]
-        template["_how_this_works"] += [
-            "",
-            "'variants' below is this mod's menu: one entry = one tile,",
-            "and an entry's 'name' is the tile's label. '_example_variant'",
-            "shows the shape, using this mod's own parts -- copy it into",
-            "the 'variants' list and edit it.",
-        ]
+        if combos:
+            template["_how_this_works"] += [
+                "",
+                "'variants' below is this mod's menu: one entry = one tile,",
+                "and an entry's 'name' is the tile's label.",
+                "'_example_variant' shows the shape, using this mod's own",
+                "parts -- copy it into the 'variants' list and edit it.",
+            ]
         if combos:
             template["_how_this_works"] += [
                 "",
@@ -1073,17 +1128,33 @@ def write_template(source, mod_name, parts, prefill=None, restore=None,
                     "the outfit, spelled as in 'outfits' above -- or a",
                     "list of names.",
                 ]
-        if weap:
+        if weap and outfits:
             template["_how_this_works"] += [
                 "",
                 "The WEAPON paks have their entries already -- each is one",
                 "tile in Dresscode's WEAPONS menu, and the stock weapon",
-                "tile switches it off. Nothing to do for those.",
+                "tile switches it off. Nothing to do for those. That menu",
+                "is separate: a weapon tile stays on whatever costume the",
+                "character is wearing.",
             ]
-        template["_example_variant"] = {
-            "name": " + ".join(l for l, _s in ex),
-            "parts": [s for _l, s in ex]}
+        elif weap:
+            template["_how_this_works"] += [
+                "",
+                "'variants' below is the menu, and it is already written:",
+                "one entry per weapon pak, each a tile in Dresscode's",
+                "WEAPONS menu that the stock weapon tile switches off.",
+                "That menu is separate from costumes -- a weapon tile",
+                "stays on whatever the character is wearing. Rename the",
+                "entries if you like, then drop the folder again to build.",
+            ]
+        # Only where there is something to compose. Weapon paks are already
+        # tiles, so an example built from them would be a trap: copied in as
+        # it stands, it would register the same weapon a second time.
         if combos:
+            ex = combos[:2]
+            template["_example_variant"] = {
+                "name": " + ".join(l for l, _s in ex),
+                "parts": [s for _l, s in ex]}
             template["parts_you_can_combine"] = [s for _l, s in combos]
         template["variants"] = [{"name": l, "parts": [s]} for l, s in weap]
     if restore:
@@ -1135,7 +1206,9 @@ def read_template(source, parts):
         raise RuntimeError(
             f"{TEMPLATE} is missing its entry for: {', '.join(missing)}. "
             "Delete the file and drop the folder again to get a fresh one.")
-    if not outfits:
+    # No outfit FOLDERS means a weapon-only mod, where an empty list is the
+    # right answer -- only a mod that has costume folders is missing something.
+    if not outfits and by_folder:
         raise RuntimeError(
             f"{TEMPLATE} has no outfits in it. Delete the file and drop the "
             "folder again to get a fresh one.")
@@ -1636,6 +1709,9 @@ def record_roundtrip(toc, uplugin, plugin, plans, ctx, mod_out, layout,
     )
 
     parts = [(rel, None) for rel, _plan in layout]
+    # Normally an outfit's preview has made this folder already; a weapon
+    # mod has no outfit and no preview of its own.
+    os.makedirs(mod_out, exist_ok=True)
     write_template(mod_out, visible["name"], parts,
                    prefill=dict(name=visible["name"],
                                 author=visible["author"],
@@ -2000,6 +2076,13 @@ def layout_problem(source, mods):
         return None
     outfits = [u for u, _ in mods if carries_outfit(u)]
     if not outfits:
+        # A folder of weapon paks alone is a mod in its own right and never
+        # reaches here; mixed with anything else, there is no telling which
+        # half is the real mod.
+        if any(is_weapon_pak(u) for u, _ in mods):
+            return ("this folder mixes weapon paks with paks that are "
+                    "neither a weapon nor a costume. Drop the weapon paks "
+                    "on their own, or add the costume pak they belong to.")
         return ("none of these paks carries a costume -- the mod's MAIN "
                 "pak is missing from the folder. Drop the whole mod: the "
                 "main pak plus its option paks. (Option paks on their own "
@@ -2091,6 +2174,11 @@ def resolve_variants(meta, extras, outfits=()):
             continue                    # an empty entry is just skipped
         want = entry.get("outfit")
         only_on = None
+        # "outfit" aims a costume add-on at particular costumes. A weapon
+        # mod has none -- its tiles hang off the character, not a costume --
+        # so the field is ignored there rather than refused.
+        if not outfits:
+            want = None
         if want not in (None, "", []):
             only_on = []
             for w in (want if isinstance(want, list) else [want]):
@@ -2155,12 +2243,15 @@ def weapon_tiles_back(toc, packages):
             under = {p["name"]: p["name"][len(root) + 1:]
                      for p in packages.values()
                      if p["name"].lower().startswith(root.lower() + "/")}
-            if not under:
-                unmapped.append(label or root)
-                continue
             # Every tail starts with the weapon's own folder, which names
             # the stock mesh: WE0002_15_Tifa_Foo -> .../Model/WE0002_15.
-            folder = sorted(under.values())[0].split("/")[0]
+            # A tile that replaced the model outright has no tails at all,
+            # and records the weapon in its own name instead.
+            folder = (sorted(under.values())[0].split("/")[0] if under
+                      else weapons.folder_of_tile(root))
+            if not folder:
+                unmapped.append(label or root)
+                continue
             bits = folder.split("_")
             if len(bits) < 2:
                 unmapped.append(label or folder)
@@ -2179,6 +2270,9 @@ def weapon_tiles_back(toc, packages):
                 # stock package is referenced by the original one.
                 tile_obj = str(row.get("skeletal_mesh") or "").split(".")[-1]
                 objects[mesh["name"].lower()] = {tile_obj: obj}
+            if not keep:
+                unmapped.append(label or folder)
+                continue
             out.append((label or folder, renames, objects, keep))
     return out, unmapped
 
@@ -2225,30 +2319,32 @@ def loose_to_dresscode(source, mods, assume_yes=False):
         note_mixed_shapes(extras, variant_folders)
         # A weapon pak needs no combining decision -- its tile stands alone
         # in the weapons menu -- so those entries are written ready-made.
-        def _is_weapon(u):
-            try:
-                toc = iostore.Toc(u)
-                got = weapons.is_weapon_pak(rename.read_packages(toc))
-                toc.close()
-                return got
-            except Exception:
-                return False
-
+        # The set of weapons a pak covers, not just whether it is one: a
+        # single pak routinely does a character's whole set, one tile each.
         flagged = [(toggles.label_of(u),
                     os.path.splitext(os.path.basename(u))[0],
-                    _is_weapon(u)) for u in extras]
+                    weapon_tiles_in(u)) for u in extras]
         path = write_template(source, mod_name, parts, extras=flagged)
         n_combo = sum(1 for _l, _s, w in flagged if not w)
         n_weap = len(flagged) - n_combo
+        n_tiles = sum(len(w) for _l, _s, w in flagged if w)
         print()
         print(f"  {mod_name}  (pak -> Dresscode)")
-        print(f"      created  {os.path.basename(path)}"
-              f"  ({len(parts)} outfit{'s' if len(parts) > 1 else ''})")
-        if n_weap:
+        made = (f"{len(parts)} outfit{'s' if len(parts) > 1 else ''}"
+                if parts else
+                f"{n_tiles} weapon{'s' if n_tiles != 1 else ''}, no costume")
+        print(f"      created  {os.path.basename(path)}  ({made})")
+        if n_weap and parts:
             print()
             print(f"      {n_weap} weapon pak{'s' if n_weap != 1 else ''} "
                   f"set up as WEAPONS-menu tile{'s' if n_weap != 1 else ''}"
                   " -- nothing to do.")
+        elif n_weap:
+            print()
+            print(f"      The menu is already written: {n_tiles} "
+                  f"WEAPONS-menu tile{'s' if n_tiles != 1 else ''}.")
+            print("      Rename them if you like -- the stock weapon tile "
+                  "switches them off.")
         if n_combo:
             print()
             print(f"      This mod has {n_combo} add-on pak"
@@ -2270,7 +2366,11 @@ def loose_to_dresscode(source, mods, assume_yes=False):
     meta, outfits = read_template(source, parts)
     variants, variants_edited = resolve_variants(meta, extras, outfits)
     rt = unpack_restore(meta.get("restore"))
-    exact = rt is not None and restore_matches(rt, meta, outfits) \
+    # A record with nothing to rebuild FROM cannot restore anything: a mod
+    # whose every row was a weapon tile this tool built hands those back as
+    # override paks, which the fresh build turns into the same tiles again.
+    restorable = bool(rt and (rt.get("variants") or rt.get("optionals")))
+    exact = restorable and restore_matches(rt, meta, outfits) \
         and not variants_edited
     plugin = rt["plugin"] if exact else plugin_id(meta["name"])
     # Several outfits, each with its own toggles, in one mod make a menu
@@ -2282,9 +2382,17 @@ def loose_to_dresscode(source, mods, assume_yes=False):
     # tile each -- and add-on paks alongside them are offered on every
     # variant, which is the one case where naming the toggle is unambiguous.
     split = not exact and len(outfits) > 1 and not variant_folders
+    # A weapon mod's rows ARE its variants -- nothing about it is per-outfit,
+    # so the lines below count weapons instead. One entry is not one tile:
+    # a pak covering a character's whole set becomes a tile per weapon.
+    gun_tiles = ([sum(len(weapon_tiles_in(u)) for u in us)
+                  for _n, us, _o in variants] if not outfits else [])
+    guns = sum(gun_tiles)
     print()
     print(f"  {meta['name']}  (pak -> Dresscode"
-          + (f", {len(outfits)} outfits" if len(outfits) > 1 else "") + ")")
+          + (f", {len(outfits)} outfits" if len(outfits) > 1 else "")
+          + (f", {guns} weapon{'s' if guns != 1 else ''}" if guns else "")
+          + ")")
     if exact:
         print("      this folder came from a Dresscode mod -- restoring "
               "the original exactly")
@@ -2306,13 +2414,28 @@ def loose_to_dresscode(source, mods, assume_yes=False):
         pic = (os.path.basename(o["preview"]) if o["preview"]
                else "no picture (optional)")
         print(f"      {k + 1}. {o['name']}   [{pic}]")
-    stackable = meta["stackable"] and bool(extras) and not exact
+    for k, (name, _us, _only) in enumerate(variants if guns else ()):
+        n_t = gun_tiles[k]
+        print(f"      {k + 1}. {name}   "
+              + (f"[{n_t} weapons]" if n_t != 1 else "[weapon]"))
+    # Aiming a weapon entry at a costume reads as if it would work.
+    aimed = [n for n, us, only in variants
+             if only and all(weapon_tiles_in(u) for u in us)]
+    if aimed:
+        print(f'      note: "outfit" does nothing on a weapon entry '
+              f'({aimed[0]}) -- the WEAPONS menu is its own,')
+        print("      and a weapon tile stays on whatever the character "
+              "is wearing")
+    # Stackable is about keeping add-ons as drop-in files ALONGSIDE a costume
+    # in the menu. With no costume there is nothing left in the menu to keep.
+    stackable = (meta["stackable"] and bool(extras) and not exact
+                 and bool(outfits))
     if companions and not exact:
         n = len(companions)
         print(f"      + {n} required companion pak{'s' if n != 1 else ''} "
               + ("merged into the outfits they ship with"
                  if len(outfits) > 1 else "merged into the outfit"))
-    if extras and not exact:
+    if extras and not exact and not guns:      # weapons are listed above
         if stackable:
             print(f"      + {len(extras)} extra paks stay COMBINABLE: the "
                   "shared masks ride in ~mods")
@@ -2339,7 +2462,7 @@ def loose_to_dresscode(source, mods, assume_yes=False):
     preflight_meshes([u for _rel, u in parts] + list(extras)
                      + list(companions), assume_yes, source)
     print()
-    if not confirm(assume_yes, len(outfits)):
+    if not confirm(assume_yes, max(len(outfits), guns)):
         print("  Nothing converted.")
         return 0
 
@@ -2532,10 +2655,16 @@ def prepare_to_loose(toc, uplugin, out_base=None):
     chars = [o["player_type"].split("::")[-1].title() for o, *_ in plans]
     mixed = len(set(chars)) > 1
     guns = [o.get("weapon") for o, *_ in plans]
+    # Tiles this tool built are handed back further down rather than planned,
+    # so a mod made only of them plans nothing and still has content.
+    weapon_backs, _elsewhere = weapon_tiles_back(toc, ctx["packages"])
+    own_tiles = len(weapon_backs) if not n else 0
     head = f"  {plugin}  (Dresscode"
     if n > 1:
         head += f", {n} " + ("weapons" if all(guns) else "outfits")
-    if not mixed:
+    elif own_tiles:
+        head += f", {own_tiles} weapon{'s' if own_tiles != 1 else ''}"
+    if chars and not mixed:
         what = ("weapon" if all(guns) else
                 "outfit and weapon" if any(guns) else "standard outfit")
         head += f", replaces {chars[0]}'s {what}"
@@ -2735,7 +2864,6 @@ def prepare_to_loose(toc, uplugin, out_base=None):
     # ---- weapons-menu tiles, back to override paks -----------------------
     # Their registration asset is dropped like every other one, so nothing
     # downstream would ever see them: mapped back here or lost entirely.
-    weapon_backs, _elsewhere = weapon_tiles_back(toc, packages)
     for w, (wlabel, wrenames, wobjects, wkeep) in enumerate(weapon_backs):
         label = folder_name(wlabel) or f"weapon {w + 1}"
         out_dir = os.path.join(mod_out, "Optional", label)

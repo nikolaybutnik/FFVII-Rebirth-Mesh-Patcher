@@ -322,6 +322,7 @@ just materials".
 | changes to a costume | `Optional\<name>\` | listed for you to combine — see below |
 | a pak the costume NEEDS (its textures or materials, shipped separately) | beside that costume | merged in automatically |
 | whole costumes you want as **separate mods** instead | any other subfolder | a Dresscode mod per costume |
+| a weapon mod, with no costume in it | the weapon paks, loose in the folder | one WEAPONS-menu tile each |
 
 Some additional notes:
 
@@ -375,7 +376,8 @@ Some additional notes:
 - **What gets refused**: several different costume paks loose in the top
   folder together, with nothing saying which is which — give each its own
   subfolder (or one shared `Main\`) and drop again. Also a folder with no
-  costume pak in it at all, since add-on paks have nothing to attach to.
+  costume pak in it, unless what is in there is weapon paks — add-on paks
+  on their own have nothing to attach to.
 - **Another Dresscode mod this one depends on** (a shared asset mod
   its page says to install): put that mod's folder in the same parent folder
   as the one you drop, or have it installed in `End\Mods`. The converter
@@ -388,7 +390,15 @@ Some additional notes:
   turns into its own tile in Dresscode's WEAPONS menu; the stock weapon
   tile switches it back off. (This needs the game installed while
   converting — without it, the pak is skipped with a note and keeps
-  working from `~mods`.) It converts the other way too: a tile this tool
+  working from `~mods`.) **The WEAPONS menu is its own menu.** A weapon
+  tile belongs to a character, not to a costume: pick one and it stays on
+  whatever that character is wearing, and changing costume does not change
+  it. So a weapon mod needs no costume — drop a folder of weapon paks on
+  their own and each weapon becomes a tile, including when one pak covers
+  a character's whole set. Such a mod has no outfit folders, so its
+  `dresscode.json` keeps `"outfits"` empty and its menu is written for
+  you; rename the entries if you like. It converts the other way too:
+  a tile this tool
   made goes back to an override pak under `Optional\`, and a weapon mod
   written for Dresscode converts like a costume — its model takes over the
   stock weapon and the rest moves in beside it, one pak per row. Which
@@ -449,7 +459,9 @@ its own tile. Some notes:
 - Combine as many parts in one entry as you want.
 - If two parts change the same thing, the one listed later wins.
 - An entry goes on every outfit. Add `"outfit": "Standard"` (or a list of
-  names) to put one on only some of them.
+  names) to put one on only some of them. That is for costume add-ons
+  only — a weapon entry is not worn with a costume, so `"outfit"` does
+  nothing on one.
 - The menu shows exactly this list: rename tiles, delete the ones you
   never use, or replace the whole list with a few favourite combos.
 - Made a mess of the file? Delete `dresscode.json` and drop the folder

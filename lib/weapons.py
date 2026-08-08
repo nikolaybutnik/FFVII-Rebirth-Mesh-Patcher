@@ -29,6 +29,7 @@ cheaper than being right about it everywhere.
 
 import glob
 import os
+import re
 import struct
 
 import cityhash
@@ -63,6 +64,36 @@ def is_weapon_pak(pkgs):
         elif n.startswith("/game/character/"):
             other = True
     return weapon and not other
+
+
+def is_tile_path(mesh_package):
+    """Whether a row's mesh is a tile THIS TOOL built: /<Plugin>/Weapons/
+    <Safe>, with whatever it carries beneath it. An author's own weapon mod
+    files its meshes under its plugin's own folders instead."""
+    parts = mesh_package.split("/")
+    return len(parts) == 4 and parts[2].lower() == "weapons"
+
+
+def folder_of_tile(mesh_package):
+    """The stock weapon a tile's own name records, or None.
+
+    A tile that replaced the weapon MODEL outright carries no other file, so
+    there is no tail to read the weapon off. Its imports are no help either:
+    an all-weapons pak is routinely one mesh saved into every slot, and every
+    copy still imports the FIRST weapon's skeleton -- reading that would
+    override the wrong weapon. So the tile's own name carries the answer.
+    """
+    m = re.search(r"(WE\d{4}_\d{2}_[A-Za-z0-9_]+)$",
+                  mesh_package.rsplit("/", 1)[-1])
+    return m.group(1) if m else None
+
+
+def weapon_folders(pkgs):
+    """The stock weapons a pak covers -- one menu tile each. A single pak
+    routinely does a character's whole set."""
+    return {p["name"].split("/")[4] for p in pkgs.values()
+            if p["name"].lower().startswith(WEAPON_ROOT)
+            and p["name"].count("/") >= 5}
 
 
 def player_for(folder):
@@ -242,7 +273,7 @@ def build_tile(plugin, safe, parts, say=print, label=None):
          for f in folders})
 
     carried, rows = {}, []
-    for n_folder, folder in enumerate(folders):
+    for folder in folders:
         prefix = "_".join(folder.split("_")[:2])
         mesh_name = f"/Game/Character/Weapon/{folder}/Model/{prefix}"
         mesh_pid = cityhash.package_id(mesh_name)
@@ -317,7 +348,11 @@ def build_tile(plugin, safe, parts, say=print, label=None):
             else:
                 needed |= set(entries[c][1][2]) & o_pids
 
-        tsafe = safe if len(folders) == 1 else f"{safe}{n_folder + 1}"
+        # The weapon's own folder ends the name, which is what tells the
+        # conversion back which weapon this tile stands in for -- a tile
+        # replacing the model outright carries nothing else that says so.
+        # It doubles as the thing keeping one pak's tiles apart.
+        tsafe = f"{safe}_{folder}"
         root = f"/{plugin}/Weapons/{tsafe}"
 
         def fetch(pid):
