@@ -17,55 +17,52 @@ general-purpose mod fixer.
 
 **Dresscode itself now has an official V1.005 update** from its author, so this
 tool no longer patches Dresscode — install that release directly if the menu
-crashes. This patcher is for the costume and character mods that still need it.
+crashes. This patcher is for the costume and weapon mods that still need it.
+
+---
+
+## Quick start
+
+1. **Install Python 3.9 or newer** from <https://www.python.org/downloads/>.
+   If the installer shows a PATH tickbox — **"Add python.exe to PATH"** on
+   recent versions, "Add Python 3.x to PATH" on older ones — tick it; missing
+   it is the usual cause of `'python' is not recognized`. Newer Windows
+   installs use the **Python install manager**, which doesn't do that by
+   default: there, type **`py`** wherever this README says `python`.
+2. **Extract this tool**, then open a terminal in its folder — type `cmd` in
+   File Explorer's address bar while in the folder, or right-click the folder
+   and choose "Open in Terminal". Run `pip install numpy`. Once, ever. (If that
+   says `'pip' is not recognized`, use `python -m pip install numpy` — or
+   `py -m pip install numpy` with the install manager.)
+3. **Drag your mod folder — or its `.zip` — onto `patch.py`.** It lists what it
+   found and offers to fix it, writing patched copies into a `Patched Mods`
+   folder beside the original. Your files are not touched.
+
+Mods already installed in the game? Run `python patch.py --all` instead: it
+finds them and patches in place, keeping backups.
+
+The first run may ask you for an Oodle DLL — [Setup](#setup) explains where to
+get one.
 
 ---
 
 ## Read this first
 
-**This tool contains no mods.** It patches files you already have. You install
-the mods yourself — Dresscode, costumes, or standalone pak mods — from wherever
-their authors publish them.
+**This tool contains no mods.** It patches files you already have, and is not
+affiliated with any mod or its author. Please raise problems with this tool on
+its own issue tracker only — the mod authors did not write it and cannot help.
 
-**It is not affiliated with any mod it patches, or their authors.** It is an
-independent fix, written by reverse-engineering the game's own file format.
-Please do not raise problems with this tool anywhere except its own issue
-tracker — the mod authors did not write it and cannot help with it.
-
-**It may stop working when mods update.** This patcher rewrites mod files to
-match what the current game expects. If a mod author releases a version already
-built for V1.005 or later (as Dresscode's author now has), that version will not
-need patching — and if the file layout changes, this tool may need updating
-before it works again. It refuses rather than guessing when it meets something it
-does not recognise, so a mismatch should show up as "could not be read", not as a
-broken install.
-
-**If an official fix exists, use that instead.** This exists because one had not
-appeared. If that changes, the author's own release is the better option.
-
----
-
-## Requirements
-
-- **Python 3.9 or newer** — from <https://www.python.org/downloads/>. In the
-  installer, **tick "Add Python to PATH"**; skipping that box is the usual cause
-  of a later `'python' is not recognized`.
-- **NumPy** — a small library the patcher needs. After extracting the tool
-  (below), open a terminal in its folder — type `cmd` in File Explorer's address
-  bar while in the folder, or right-click the folder and choose "Open in
-  Terminal" — then type `pip install numpy` and press Enter. If that reports
-  `'pip' is not recognized`, use `python -m pip install numpy` instead. You only
-  do this once.
-
-That's it. There is normally nothing else to configure.
+**It may stop working when mods update.** A version already built for V1.005 or
+later needs no patching, and a future file-layout change may need this tool
+updated first. It refuses rather than guesses when it meets something it does
+not recognise, so a mismatch shows up as "could not be read", not as a broken
+install.
 
 ---
 
 ## Setup
 
-Everything runs from a terminal inside the extracted folder — the same one from
-Requirements: type `cmd` in File Explorer's address bar while in the folder (or
-right-click the folder and choose "Open in Terminal"). Then run:
+There is normally nothing to configure. Run this in the tool's folder:
 
 ```
 python patch.py --list
@@ -82,50 +79,71 @@ It finds the game and everything else on its own:
 sitting inside the game folder — so dropping it anywhere under the install works
 too, whether that's the base game folder or `End\Mods\`.
 
-**The Oodle library** decompresses mod archives. FFVII Rebirth builds Oodle into
-its executable, so there is no copy in the game folder to borrow. It is
-proprietary and cannot be bundled here — but it ships as a loose
-`oo2core_*_win64.dll` with a number of games. You need **oo2core_6 or newer**;
-oo2core_5 and older can't decode this game. The tool looks beside itself first,
-then through your installed Steam, Epic and GOG games, and any Unreal Engine
-install.
+**The Oodle library** decompresses mod files. Rebirth builds it into its
+executable, so there is no copy in the game folder to borrow, and it is
+proprietary so it cannot be bundled here — but it ships as a loose
+`oo2core_*_win64.dll` with a number of games. You need **oo2core_6 or newer**.
+The tool looks beside itself, then through your Steam, Epic and GOG games and
+any Unreal Engine install.
 
-Only a minority of games include it — roughly one in twenty — but they tend to
-be large titles, so there's a fair chance you already have one. Games known to
-ship a working copy:
+Only a minority of games include one, but they tend to be big titles, so
+there's a fair chance you already have it. Games reported to ship a working
+copy — search the game's folder for `oo2core`, as the file name and location
+vary:
 
-- **ELDEN RING** — `Game\oo2core_6_win64.dll`
-- **DOOM Eternal** — `oo2core_8_win64.dll` (in the game root)
-- **DEATH STRANDING DIRECTOR'S CUT** — `oo2core_7_win64.dll` (in the game root)
-- **Indiana Jones and the Great Circle** — `oo2core_9_win64.dll` (in the game root)
-
-Also reported by users to ship a working copy, but I don't own these so I can't
-confirm the exact filename or location — search the game folder for `oo2core`:
-
-- **Warhammer 40,000: Darktide**
+- **Final Fantasy VII Remake**
+- **Armored Core VI: Fires of Rubicon**
+- **DOOM Eternal**
+- **Death Stranding Director's Cut**
+- **ELDEN RING**
 - **ELDEN RING NIGHTREIGN**
+- **Indiana Jones and the Great Circle**
+- **Need for Speed Heat**
+- **SMITE**
+- **Star Wars Jedi: Survivor**
+- **Warhammer 40,000: Darktide**
 
 If you have none of those, **Unreal Engine ships one** and is free from the Epic
-Games Launcher. Install it and the tool finds the DLL on its own. If it can't,
-search the engine folder for **`oo2core.dll`** (recent versions) or
-**`oo2core_*_win64.dll`** (older ones) and drop it next to `patch.py` — take the
-copy under a **`win-x64`** folder, never `win-x86`. A large download for one
-file, but it always works.
+Games Launcher — a large download for one file, but it always works. The tool
+usually finds it; if not, search the engine folder for `oo2core.dll` (recent) or
+`oo2core_*_win64.dll` (older) and take the copy under a **`win-x64`** folder,
+never `win-x86`.
 
-If the tool can't find one, it will ask:
+When the tool can't find one it asks:
 
 ```
   Drag the file onto this window and press Enter, or paste its path.
   >
 ```
 
-Dragging the DLL onto the console window pastes its path. The tool copies it
-next to `patch.py`, so you are only asked once. You can also just put the file
-there yourself beforehand.
+Dragging the DLL onto the window pastes its path, and it is copied next to
+`patch.py` so you are asked only once.
 
 ---
 
 ## Usage
+
+### Drag and drop
+
+**Drag mod folders — or `.zip`/`.7z`/`.rar` archives — onto `patch.py`.** No
+terminal, no flags. It lists what it found, then offers to patch everything
+into a `Patched Mods` folder beside the original; your originals are never
+touched. Drop as many as you like at once, and each may hold several mods, or
+archives inside archives — all of it is unpacked. `.7z` and `.rar` need nothing
+installed. An archive is looked inside before anything is offered, so one whose
+mods are already patched says so instead.
+
+Two naming rules are handled for you. The `.utoc`/`.ucas`/`.pak` files keep
+their exact names, because the loader would lose track of a renamed mod. And a
+Dresscode mod's folder is renamed to match the `.uplugin` inside it — Dresscode
+looks a mod up by folder name and silently ignores one that doesn't match,
+which is how some downloads arrive. Correctly packaged mods are left alone.
+
+Drop folders from inside the game's own `End\Mods` or `~mods` and it recognises
+your installed library: you get the normal in-place patch with backups, not a
+copy.
+
+### From the command line
 
 Install your mods as normal first, then:
 
@@ -135,10 +153,10 @@ python patch.py --all       patch everything that needs it
 python patch.py ModName     patch one mod, by its folder or .utoc name
 ```
 
-It scans two places: `End\Mods\` (the FF7RML mod loader) and
-`End\Content\Paks\~mods\` (pak mods the game loads directly). Mods in the
-first are named by their folder; mods in the second by their `.utoc` filename,
-shown with a `(~mods)` tag.
+It scans two places: `End\Mods\` (mods installed through the FF7RML mod
+loader, which is what Dresscode uses) and `End\Content\Paks\~mods\` (pak mods
+the game loads directly). Mods in the first are named by their folder; mods in
+the second by their `.utoc` filename, shown with a `(~mods)` tag.
 
 Example:
 
@@ -198,24 +216,6 @@ python patch.py --path "D:\my mods" --out "D:\send"  patched COPIES to --out,
 In-place patches back up to a `_patch_backups\` folder inside the folder itself;
 `python patch.py --restore --all --path "D:\my mods"` puts them back.
 
-Or skip the command line: **drag mod folders — or `.zip`/`.7z`/`.rar` archives —
-onto `patch.py`**. It lists what it found, then offers to patch everything into a
-`Patched Mods` folder beside the original; your originals are never touched. Drop
-as many as you like at once, and each may hold several mods, or archives inside
-archives — all of it gets unpacked. `.7z` and `.rar` need nothing installed.
-An archive is looked inside before anything is offered, so one whose mods are
-already patched says so.
-
-Two naming rules are handled for you. The `.utoc`/`.ucas`/`.pak` files keep their
-exact names, because the loader would lose track of a renamed mod. And a Dresscode
-mod's folder is renamed to match the `.uplugin` inside it — Dresscode looks a mod
-up by folder name and silently ignores one that doesn't match, which is how some
-downloads arrive. Correctly packaged mods are left alone.
-
-Dropping folders from inside the game's own `End\Mods` or `~mods` is recognized as
-your installed library: you get the normal in-place patch, with backups in
-`backups\`, rather than a copy.
-
 ### Other options
 
 ```
@@ -253,8 +253,12 @@ visible.
 
 `convert.py` turns a costume mod from one format into the other, in either
 direction: a **Dresscode** mod (picked in the Dresscode menu) into **loose
-paks** (dropped in `~mods`, always worn), or the other way around. Drop a mod
-folder or archive onto `convert.py`, or run:
+paks** (dropped in `~mods`, always worn), or the other way around.
+
+Throughout this section, a **tile** means one entry in the Dresscode menu — the
+thing you click to wear something.
+
+Drop a mod folder or archive onto `convert.py`, or run:
 
 ```
 python convert.py "D:\mods\Some Mod"
@@ -276,7 +280,9 @@ converting the folder back later rebuilds it exactly. **Leave
 Put ONE mod in one folder and drop that folder. First drop writes
 `dresscode.json` (open it to set names, or don't); second drop builds.
 
-**Set it up like this.** The converter accepts most shapes, but this is how I'd recommend you organize you folders to avoid confusion.
+**Set it up like this.** The converter accepts most shapes, but this is the
+layout I'd recommend — it keeps things clear, and makes any problem easier
+to sort out.
 
 ```
 My Mod\
@@ -298,14 +304,18 @@ That gives you a single Dresscode entry with a tile per costume. Use it
 even when the mod has only one costume — `Variants\Standard\` on its own
 is fine, and keeps every mod you convert looking the same.
 
-Three habits that save trouble:
+Habits that save trouble — none of them required:
 
 - **Name the folders the way you want the tiles named** — those names go
   straight into the menu. Keep them short; very long ones get shortened.
-- **Unpack down to the three files.** A download often arrives with
-  `~mods\` or `Content\Paks\WindowsNoEditor\` inside; lift the files out.
-  Both work, but the flat one is simplest.
+- **Unpack down to the three files** (`.utoc`, `.ucas`, `.pak`). A download
+  often arrives with `~mods\` or `Content\Paks\WindowsNoEditor\` inside; lift
+  the files out. Both work, but the flat one is simplest.
 - **Nothing loose at the top** but `icon.png` and `dresscode.json`.
+- **One copy of each add-on** in `Optional\`, never a copy inside each variant.
+- **Tidying is for your sake, not the tool's.** Paks are found however many
+  folders deep they sit, and `~mods\`/`Content\Paks\` wrappers are ignored when
+  naming tiles, so an untouched download converts fine.
 
 **Why things go where — is this pak a whole costume, or a change to one?**
 
@@ -324,102 +334,10 @@ just materials".
 | whole costumes you want as **separate mods** instead | any other subfolder | a Dresscode mod per costume |
 | a weapon mod, with no costume in it | the weapon paks, loose in the folder | one WEAPONS-menu tile each |
 
-Some additional notes:
+Pre-V1.005 mods are caught for you: `convert.py` says so before doing anything
+and offers to patch them right there, backups kept.
 
-- **Tidying is for your sake, not the tool's.** Paks are found however
-  many folders deep they sit, and `~mods\`/`Content\Paks\` wrappers are
-  ignored when naming tiles — so an untouched download converts fine. It
-  just makes it easier to understand at a glance.
-- **`Variants\` and `Optional\` work together.** Add-ons apply to *every*
-  costume, so three costumes and two add-ons give you three tiles plus
-  their combinations, all in one Dresscode entry — or name an `"outfit"`
-  in the entry to put one on just some of them (below). Put **one** copy
-  of an add-on in `Optional\` — not a copy inside each variant. (Identical
-  copies are listed once anyway; ones that really differ must have
-  different pak names, or the converter stops and says which clash.)
-- **A separate textures pak is detected, not configured.** If the costume
-  needs it, it is merged into that costume. A pak sitting in one
-  costume's folder belongs to that costume alone, so mods shipping
-  several versions of the same download keep their own.
-- **Add-ons are listed, not turned into menu entries.** Picking a tile in
-  Dresscode replaces the last one, so 30 add-ons as 30 one-change tiles
-  is not how anyone wears them. Instead `dresscode.json` lists the parts
-  under `parts_you_can_combine`, and you write the combinations you
-  actually wear — one entry, one tile:
-
-  ```json
-  "variants": [
-    { "name": "Red, no hat", "parts": ["Red_Recolor_P", "No_Hat_P"] },
-    { "name": "Just red",    "parts": ["Red_Recolor_P"] }
-  ]
-  ```
-
-  Don't want to choose? Set `"stackable": true` — the parts stay drop-in
-  files (you get a "Put in ~mods" folder that works like always), and
-  only the costume is picked in Dresscode.
-- **An add-on that only suits some outfits**: add `"outfit"` to the entry,
-  naming the outfit — or several. Without it the entry is offered on every
-  outfit, which is usually what you want.
-
-  ```json
-  "variants": [
-    { "name": "Red",       "parts": ["Red_Recolor_P"] },
-    { "name": "No hat",    "parts": ["No_Hat_P"], "outfit": "Standard" },
-    { "name": "No jacket", "parts": ["No_Jacket_P"],
-      "outfit": ["Standard", "Short Hair"] }
-  ]
-  ```
-
-  Name an outfit the way it appears in the `"outfits"` list above (its
-  `name`, or its folder). A name that matches nothing stops the conversion
-  and lists the ones that exist.
-- **What gets refused**: several different costume paks loose in the top
-  folder together, with nothing saying which is which — give each its own
-  subfolder (or one shared `Main\`) and drop again. Also a folder with no
-  costume pak in it, unless what is in there is weapon paks — add-on paks
-  on their own have nothing to attach to.
-- **Another Dresscode mod this one depends on** (a shared asset mod
-  its page says to install): put that mod's folder in the same parent folder
-  as the one you drop, or have it installed in `End\Mods`. The converter
-  says whether it found it — and if it did not, the conversion still
-  works, minus whatever the missing mod provides (same as in game).
-- **Pictures**: a picture next to `dresscode.json` is the mod's thumbnail;
-  a picture inside an outfit's folder is that outfit's preview. Name them
-  `icon.png` / `preview.png` if a folder has several.
-- **Weapon paks become weapon tiles.** A pak that recolours a weapon
-  turns into its own tile in Dresscode's WEAPONS menu; the stock weapon
-  tile switches it back off. (This needs the game installed while
-  converting — without it, the pak is skipped with a note and keeps
-  working from `~mods`.) **The WEAPONS menu is its own menu.** A weapon
-  tile belongs to a character, not to a costume: pick one and it stays on
-  whatever that character is wearing, and changing costume does not change
-  it. So a weapon mod needs no costume — drop a folder of weapon paks on
-  their own and each weapon becomes a tile, including when one pak covers
-  a character's whole set. Such a mod has no outfit folders, so its
-  `dresscode.json` keeps `"outfits"` empty and its menu is written for
-  you; rename the entries if you like. It converts the other way too:
-  a tile this tool
-  made goes back to an override pak under `Optional\`, and a weapon mod
-  written for Dresscode converts like a costume — its model takes over the
-  stock weapon and the rest moves in beside it, one pak per row. Which
-  weapon it replaces is read from the ids its files carry, checked against
-  the installed Dresscode's own weapon list, so that direction needs
-  Dresscode present; a mod whose files carry no id is skipped with a note
-  rather than guessed at.
-- **Retouched game textures**: many older mods replace the game's own
-  textures (skin shading, say) rather than shipping their own, often in a
-  separate pak. Those are carried into the mod and wired to the costume,
-  so they apply while it is worn and nowhere else — the output says
-  "kept this mod's N retouched game textures with the outfit". Parts that
-  override something the outfit never uses (another costume slot, say)
-  have no Dresscode form, and the output says that too.
-
-Pre-V1.005 mods are caught automatically: if the meshes are the old
-format, `convert.py` says so before doing anything and offers to patch
-them right there (backups kept). Say yes and the conversion continues
-with the fixed files.
-
-### Combine options into your own variants
+### Making your own tiles
 
 A fresh conversion lists every option pak under
 `"parts_you_can_combine"` and leaves `"variants"` for you to fill in —
@@ -467,6 +385,58 @@ its own tile. Some notes:
 - Made a mess of the file? Delete `dresscode.json` and drop the folder
   again for a fresh one. (Only do that if the file has no `"restore"`
   section — that section is the mod's way back to its original form.)
+
+### Details
+
+Everything below is reference — you don't need any of it for an ordinary mod.
+
+- **Add-ons apply to every costume**, so three costumes and two add-ons give
+  three tiles plus their combinations, in one Dresscode entry. To put one on
+  only some costumes, add `"outfit"` to its entry:
+
+  ```json
+  "variants": [
+    { "name": "Red",       "parts": ["Red_Recolor_P"] },
+    { "name": "No hat",    "parts": ["No_Hat_P"], "outfit": "Standard" },
+    { "name": "No jacket", "parts": ["No_Jacket_P"],
+      "outfit": ["Standard", "Short Hair"] }
+  ]
+  ```
+
+  Name an outfit as it appears in the `"outfits"` list — its `name` or its
+  folder. A name matching nothing stops the conversion and lists the real ones.
+- **Don't want to compose tiles at all?** Set `"stackable": true` and the parts
+  stay drop-in files: you get a "Put in ~mods" folder that works as always,
+  with only the costume in the menu.
+- **Weapon paks become weapon tiles, and the WEAPONS menu is its own.** A
+  weapon tile belongs to a character, not a costume, so it stays on whatever
+  they are wearing. A weapon mod therefore needs no costume — drop a folder of
+  weapon paks on their own and each weapon becomes a tile, including when one
+  pak covers a character's whole set; `"outfits"` stays empty and the menu is
+  written for you. Making tiles needs the game installed, and a pak that can't
+  be placed is skipped with a note and keeps working from `~mods`. Coming back,
+  a tile this tool made returns to an override pak by itself, while a weapon
+  mod someone else wrote for Dresscode needs Dresscode installed to look up
+  which weapon it stands in for — one whose files carry no id is skipped with a
+  note rather than guessed at.
+- **A separate textures pak is detected, not configured.** If the costume needs
+  it, it is merged in; one sitting in a costume's folder belongs to that
+  costume alone, so mods shipping several versions keep their own.
+- **Retouched game textures** — many older mods repaint the game's own textures
+  (skin shading, say) instead of shipping their own. Those ride with the
+  costume, so they apply while it is worn and nowhere else. A part overriding
+  something the outfit never uses has no Dresscode form, and the output says so.
+- **Another Dresscode mod this one depends on**: put its folder in the same
+  parent folder as the one you drop, or have it installed in `End\Mods`.
+  Without it the conversion still works, minus whatever that mod provides —
+  same as in game.
+- **Pictures**: one next to `dresscode.json` is the mod's thumbnail; one inside
+  an outfit's folder is that outfit's preview. Name them `icon.png` /
+  `preview.png` if a folder holds several.
+- **What gets refused**: several different costume paks loose in the top folder
+  with nothing saying which is which — give each its own subfolder, or one
+  shared `Main\`. Also a folder with no costume pak in it, unless what's in
+  there is weapon paks.
 
 ---
 
@@ -516,6 +486,13 @@ Worth knowing:
   alongside it.
 
 ## Troubleshooting
+
+**`'python' is not recognized`**
+Either Python isn't on your PATH, or you installed it with the **Python install
+manager** — which sets up `py` rather than `python`. Try **`py patch.py --list`**
+first: if that works, use `py` in place of `python` everywhere here. Otherwise
+reinstall Python and tick the PATH box ("Add python.exe to PATH" on recent
+installers).
 
 **`Could not find an Oodle library`**
 Search your game folders for `oo2core_*_win64.dll` — or, inside an Unreal Engine
