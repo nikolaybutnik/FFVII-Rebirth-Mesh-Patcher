@@ -1064,11 +1064,10 @@ def write_template(source, mod_name, parts, prefill=None, restore=None,
         # own: each tile shows the game's picture of the weapon it replaces.
         intro += [
             "This mod changes weapons, not costumes, so 'outfits' is empty",
-            "and stays empty. Each tile shows the game's own picture of the",
-            "weapon it replaces.",
+            "and stays that way.",
             "",
             "Pictures: icon.png next to this file becomes the mod's",
-            "thumbnail.",
+            "thumbnail. Weapon tiles use the game's own picture.",
         ]
     template = {
         "_how_this_works": intro,
@@ -1140,11 +1139,9 @@ def write_template(source, mod_name, parts, prefill=None, restore=None,
         elif weap:
             template["_how_this_works"] += [
                 "",
-                "'variants' below is the menu, and it is already written:",
-                "one entry per weapon pak, each a tile in Dresscode's",
-                "WEAPONS menu that the stock weapon tile switches off.",
-                "That menu is separate from costumes -- a weapon tile",
-                "stays on whatever the character is wearing. Rename the",
+                "'variants' below is the menu, already written for you:",
+                "one tile per weapon, in Dresscode's WEAPONS menu. Pick",
+                "the stock weapon there to switch one off. Rename the",
                 "entries if you like, then drop the folder again to build.",
             ]
         # Only where there is something to compose. Weapon paks are already
@@ -2027,7 +2024,6 @@ def preflight_meshes(utocs, assume_yes, source_hint):
     same as patch.py --path. Under --yes there is nobody to ask, so it
     warns and converts as-is: automated runs must stay byte-faithful.
     """
-    global _INTERACTED
     import patch as patcher
     stale = []
     for k, u in enumerate(utocs):
@@ -2052,7 +2048,10 @@ def preflight_meshes(utocs, assume_yes, source_hint):
         print(f'       python patch.py --path "{source_hint}" --all')
         print("     and convert again -- or patch the converted output.")
         return
-    _INTERACTED = True
+    # NOT _INTERACTED: the conversion still runs after this answer, and its
+    # output is the part worth reading. Marking the run "already answered"
+    # here skipped the closing pause, so a dropped 1.004 mod converted
+    # correctly and then vanished with the window (field report).
     try:
         ans = input("     Patch them now, then convert? (backups are "
                     "kept)  [Y/n] ").strip().lower()
@@ -2080,9 +2079,9 @@ def layout_problem(source, mods):
         # reaches here; mixed with anything else, there is no telling which
         # half is the real mod.
         if any(is_weapon_pak(u) for u, _ in mods):
-            return ("this folder mixes weapon paks with paks that are "
-                    "neither a weapon nor a costume. Drop the weapon paks "
-                    "on their own, or add the costume pak they belong to.")
+            return ("this folder has weapon paks mixed with something that "
+                    "is neither weapon nor costume. Drop the weapon paks on "
+                    "their own, or add the costume pak they go with.")
         return ("none of these paks carries a costume -- the mod's MAIN "
                 "pak is missing from the folder. Drop the whole mod: the "
                 "main pak plus its option paks. (Option paks on their own "
@@ -2423,9 +2422,7 @@ def loose_to_dresscode(source, mods, assume_yes=False):
              if only and all(weapon_tiles_in(u) for u in us)]
     if aimed:
         print(f'      note: "outfit" does nothing on a weapon entry '
-              f'({aimed[0]}) -- the WEAPONS menu is its own,')
-        print("      and a weapon tile stays on whatever the character "
-              "is wearing")
+              f'({aimed[0]}) -- weapons are not tied to costumes')
     # Stackable is about keeping add-ons as drop-in files ALONGSIDE a costume
     # in the menu. With no costume there is nothing left in the menu to keep.
     stackable = (meta["stackable"] and bool(extras) and not exact

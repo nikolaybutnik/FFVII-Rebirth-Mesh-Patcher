@@ -96,6 +96,13 @@ def weapon_folders(pkgs):
             and p["name"].count("/") >= 5}
 
 
+def weapon_name(folder):
+    """The readable half of a stock weapon folder, for anything a person
+    reads: WE0000_00_Cloud_BusterSword -> BusterSword."""
+    bits = folder.split("_", 3)
+    return bits[3] if len(bits) > 3 else folder
+
+
 def player_for(folder):
     """WE0002_15_Tifa_... -> TIFA. Weapon numbering mirrors the PC numbers."""
     num = folder[2:6]
@@ -244,12 +251,14 @@ def build_tile(plugin, safe, parts, say=print, label=None):
     ~mods rules the paks were written for). Returns (carried, rows): carried
     is {pid: rec} shaped like mkdc.build's merged entries; rows is one
     (row label, mesh soft path, player key, stock mesh package) per weapon
-    touched. None when the game's own files are not installed -- there is
-    nothing to copy the weapon from.
-    """
-    if not stockgraft._utocs():
-        return None
+    touched.
 
+    The game's own files are used where the PAK does not carry what a tile
+    needs -- a recolour ships no weapon, so the stock mesh and the materials
+    sampling its textures are copied in. A pak that replaces the model
+    outright already carries everything, and builds with no game installed:
+    that case is never made to depend on one.
+    """
     overrides, metas = {}, {}
     for toc, pkgs in parts:
         pm = _part_meta(toc)
@@ -279,19 +288,27 @@ def build_tile(plugin, safe, parts, say=print, label=None):
         mesh_pid = cityhash.package_id(mesh_name)
         player = player_for(folder)
         pl = place.get(mesh_pid)
-        if not player or not pl or not pl["pkg"]:
-            say(f"      note: {folder} is not a weapon the game knows -- "
-                "that pak is skipped")
-            continue
-        ment = stockgraft._entry(mesh_pid, pl)
-        if ment is None:
-            continue
         # A pak replacing the weapon MODEL itself supplies the mesh; the
         # walk below then only rounds up whatever else of the pak's it uses.
+        # Only the other kind -- a recolour, which ships no mesh -- has to
+        # borrow one from the game.
         mod_mesh = mesh_pid in o_pids
+        if not player:
+            say(f"      note: {folder} is not a weapon this tool knows "
+                "-- skipped")
+            continue
         if mod_mesh:
             ment = (metas[mesh_pid][0], metas[mesh_pid][1],
                     list(metas[mesh_pid][2]))
+        else:
+            if not pl or not pl["pkg"]:
+                say(f"      note: {weapon_name(folder)} is a recolour, so "
+                    "it needs the game installed to build on. Left out -- "
+                    "keep that pak in ~mods.")
+                continue
+            ment = stockgraft._entry(mesh_pid, pl)
+            if ment is None:
+                continue
 
         # Walk outward from the mesh until everything sampling an overridden
         # package is found -- material instance chains put the texture two
@@ -329,8 +346,8 @@ def build_tile(plugin, safe, parts, say=print, label=None):
             if not frontier:
                 break
         if not hits and not mod_mesh:
-            say(f"      note: nothing on {folder} uses what that pak "
-                "changes -- skipped")
+            say(f"      note: nothing on {weapon_name(folder)} uses what "
+                "that pak changes -- skipped")
             continue
 
         # Chains back to the mesh, the overridden packages they sample, and
@@ -347,6 +364,20 @@ def build_tile(plugin, safe, parts, say=print, label=None):
                 needed.add(c)
             else:
                 needed |= set(entries[c][1][2]) & o_pids
+
+        # The walk above stops at the first package the PAK owns, because it
+        # is looking for what the stock tree touches. A pak that replaces the
+        # model brings its own chain -- mesh to materials to textures -- and
+        # everything past that first material would be left behind, so the
+        # tile loaded with the right shape and no textures on it at all
+        # (field report: a grey sword). Follow the pak's own references to
+        # the end.
+        todo = list(needed)
+        while todo:
+            for d in metas.get(todo.pop(), (0, 0, []))[2]:
+                if d in o_pids and d not in needed:
+                    needed.add(d)
+                    todo.append(d)
 
         # The weapon's own folder ends the name, which is what tells the
         # conversion back which weapon this tile stands in for -- a tile
@@ -438,8 +469,7 @@ def build_tile(plugin, safe, parts, say=print, label=None):
         # own name.
         row_label = label or tsafe
         if len(folders) > 1:
-            bits = folder.split("_", 3)
-            row_label = f"{row_label} - {bits[3] if len(bits) > 3 else folder}"
+            row_label = f"{row_label} - {weapon_name(folder)}"
         extra = len(pool) - 1
         say(f"      weapon tile  {row_label}: rides the WEAPONS menu"
             + (f" (+{extra} supporting file{'s' if extra != 1 else ''})"

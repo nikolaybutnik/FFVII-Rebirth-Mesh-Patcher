@@ -871,21 +871,16 @@ def build(meta, outfits, plugin, out_root, say=print, extras=(),
         if weapon_parts and weapon_tiles:
             wsafe = safe_id(f"{label}", used_names,
                             f"Weapon{len(used_names)}")
-            got = weapons.build_tile(plugin, wsafe, weapon_parts, say,
-                                     label=label)
-            if got is None:
-                say(f"      note: {label} changes a weapon, which takes "
-                    "copying the weapon from the game's own files -- not "
-                    "found here. Keep that pak in ~mods instead: it works "
-                    "there alongside the Dresscode outfit.")
-            else:
-                carried, rows = got
-                for pid, rec in carried.items():
-                    merged.setdefault(pid, rec)
-                for row_label, mesh_path, player, stock_name in rows:
-                    entries_weapons.append(dict(
-                        label=row_label, mesh=mesh_path, player=player,
-                        stock=stock_name))
+            # build_tile says per weapon why one was left out; it never
+            # refuses the lot for want of a game install.
+            carried, rows = weapons.build_tile(plugin, wsafe, weapon_parts,
+                                               say, label=label)
+            for pid, rec in carried.items():
+                merged.setdefault(pid, rec)
+            for row_label, mesh_path, player, stock_name in rows:
+                entries_weapons.append(dict(
+                    label=row_label, mesh=mesh_path, player=player,
+                    stock=stock_name))
         if not parts:
             continue
         for w in wearers:
@@ -936,6 +931,14 @@ def build(meta, outfits, plugin, out_root, say=print, extras=(),
             entries_toggles.append((w, label, actor, len(slots)))
             say(f"      toggle  {w['outfit']['name']}: {label}   "
                 f"({len(slots)} slot{'s' if len(slots) != 1 else ''})")
+
+    # A mod with no costume and no weapon tile has nothing for the menu to
+    # show. It still builds -- a valid, empty plugin -- and the person
+    # installs it and finds nothing there, so refuse instead.
+    if not entries_outfits and not entries_weapons:
+        raise RuntimeError(
+            "nothing here can go in the menu -- see the note above. "
+            "Nothing was written; keep the mod as paks in ~mods.")
 
     # ---- synthesized packages ------------------------------------------
     def add(name, data, deps):
