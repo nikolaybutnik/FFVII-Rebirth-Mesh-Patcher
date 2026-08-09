@@ -1829,6 +1829,22 @@ def classify_companions(outfit_utocs, candidates):
             taken |= pids
             used.add(u)
         comp_map[utoc] = mine
+    # A download can keep the shared files in a branch of their own -- one
+    # "textures" folder beside the costume folders -- so no outfit's folder
+    # scope claims them and they used to fall through to the options list.
+    # The costume then converted with nothing to skin it: every mesh
+    # hard-imports those materials and the game has no such file, so the
+    # tile came out bare (field report). They belong to every outfit.
+    # Several paks defining the same packages are a choose-one set, and load
+    # order settled those in ~mods -- the first is the one that gets baked
+    # in. All of them stay selectable as add-ons on top.
+    baked = set()
+    for u, pids in kind:
+        if u in used or not (pids & deps) or pids & baked:
+            continue
+        baked |= pids
+        for utoc in comp_map:
+            comp_map[utoc].append(u)
     options += [u for u, _pids in kind if u not in used]
     return comp_map, sorted(options)
 
