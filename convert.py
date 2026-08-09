@@ -1,0 +1,3167 @@
+"""
+convert.py -- converts a FFVII Rebirth costume mod between its two formats:
+
+    DRESSCODE   picked in the Dresscode menu
+    PAK         dropped in ~mods, always worn
+
+    python convert.py "D:\\mods\\Some Mod"
+
+Or just drag a mod onto convert.py -- a folder, several at once, or a
+.zip/.7z/.rar. It works out which format each mod is in, says what it will
+make, asks before writing, and puts the result beside the original.
+Originals are never touched.
+"""
+# HOW IT WORKS (not printed -- the docstring above doubles as the usage text)
+# ---------------------------------------------------------------------------
+# DRESSCODE   A plugin folder: <Mod>.uplugin and a container under
+#             Content/Paks/WindowsNoEditor, packages named /<Mod>/...
+# PAK         A .utoc/.ucas/.pak in ~mods, packages named /Game/..., winning
+#             by overriding a stock costume.
+#
+# A conversion renames the MESH package onto the stock costume it replaces
+# and moves every other package into that costume's folder under /Game/, plus
+# a new .pak carrying the mount point the new format expects. lib/rename.py
+# does the renames, lib/pakfile.py the pak.
+#
+# The /Game/ move is NOT cosmetic. Packages are found by ID, but the async
+# loader silently skips imports into a root that is not mounted -- and a
+# ~mods container mounts no plugin root. Probed in game: a mesh whose
+# materials kept their /<Mod>/... names loads and renders, with every such
+# material slot NULL (the default checker) while its /Game/ slots resolve.
+#
+# Deliberately NOT here: game detection, a mod library, in-place editing.
+# Conversion only ever creates (the one exception: the pre-1.005 pre-flight
+# can offer to run patch.py on the source, which keeps its usual backups).
+
+import base64
+import glob
+import hashlib
+import json
+import os
+import shutil
+import struct
+import sys
+import tempfile
+import zlib
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "lib"))
+
+import cityhash                                                 # noqa: E402
+import conheader                                                # noqa: E402
+import dirindex                                                 # noqa: E402
+import drops                                                    # noqa: E402
+import iostore                                                  # noqa: E402
+import matpack                                                  # noqa: E402
+import mkdc                                                     # noqa: E402
+import moddata                                                  # noqa: E402
+import pakfile                                                  # noqa: E402
+import pngfile                                                  # noqa: E402
+import rename                                                   # noqa: E402
+import stockgraft                                               # noqa: E402
+import texread                                                  # noqa: E402
+import toggles                                                  # noqa: E402
+import weapons                                                  # noqa: E402
+import writer                                                   # noqa: E402
+import zen                                                      # noqa: E402
+
+# Diagnostic switch (--keep-registration): convert without dropping the two
+# Dresscode registration assets, so the container header is remapped in place
+# instead of rebuilt. Isolates the drop path when bisecting a broken output.
+KEEP_REGISTRATION = False
+
+# The CONTAINER mounts at the player-character folder, exactly like every
+# pak mod confirmed working in game -- root mounts exist in the wild but
+# none has been verified, so we do not pioneer one. Every converted package
+# lands under this folder. The .pak is mounted separately and shallowly; see
+# pakfile.LOOSE_MOUNT, which is not this.
+CONTAINER_MOUNT = "../../../End/Content/Character/Player/"
+LOOSE_ROOT = "/Game/Character/Player/"
+
+
+def find_container(path):
+    """The mod's .utoc, given a folder or any of its three files."""
+    if os.path.isfile(path):
+        stem = os.path.splitext(path)[0]
+        return stem + ".utoc" if os.path.exists(stem + ".utoc") else None
+    for root, _dirs, files in os.walk(path):
+        for f in files:
+            if f.lower().endswith(".utoc"):
+                return os.path.join(root, f)
+    return None
+
+
+def find_uplugin(path):
+    """The mod's .uplugin, which is what makes it a plugin at all."""
+    folder = path if os.path.isdir(path) else os.path.dirname(path)
+    for _ in range(4):                          # the container sits 3 deep
+        try:
+            found = [f for f in os.listdir(folder) if f.lower().endswith(".uplugin")]
+        except OSError:
+            return None
+        if found:
+            return os.path.join(folder, found[0])
+        parent = os.path.dirname(folder)
+        if parent == folder:
+            return None
+        folder = parent
+    return None
+
+
+def find_mods(path):
+    """
+    Every mod under `path`, as [(utoc, uplugin or None)] -- one entry per mod.
+
+    A .uplugin is the deciding evidence for Dresscode -- it is what the loader
+    reads and what a pak has no equivalent of. A dropped folder can hold
+    several mods; each .uplugin is one, and a .utoc with no .uplugin above it
+    is a pak.
+    """
+    if os.path.isfile(path):
+        utoc = find_container(path)
+        return [(utoc, find_uplugin(utoc))] if utoc else []
+    found, seen = [], set()
+    for root, dirs, files in os.walk(path):
+        # The patcher's undo copies are not part of the mod -- scanned in,
+        # they double every outfit with its pre-patch self.
+        dirs[:] = [d for d in dirs
+                   if d.lower() not in ("_patch_backups", "backups")]
+        for f in sorted(files):
+            if not f.lower().endswith(".utoc"):
+                continue
+            utoc = os.path.join(root, f)
+            uplugin = find_uplugin(utoc)
+            if uplugin:
+                if uplugin.lower() in seen:     # one container per plugin
+                    continue
+                seen.add(uplugin.lower())
+            found.append((utoc, uplugin))
+    return found
+
+
+def actor_mesh(toc, packages, by_name, resolve, probed, actor):
+    """
+    The SkeletalMesh an actor blueprint equips, as "package.object" -- the
+    mesh of a row that carries no mesh path of its own. `probed` caches
+    which packages hold a mesh export; a 100 MB mesh decompresses once.
+    """
+    pid = by_name.get(str(actor).split(".")[0].lower())
+    if pid is None:
+        return None
+    z = zen.ZenPackage(toc.read(packages[pid]["chunk"]))
+    for imp in z.imports:
+        tgt = resolve.get(imp)
+        if not tgt:
+            continue
+        tp = by_name.get(tgt[0].lower())
+        if tp is None:
+            continue
+        if tp not in probed:
+            zz = zen.ZenPackage(toc.read(packages[tp]["chunk"]))
+            probed[tp] = {e["name"] for e in zz.exports
+                          if e["cls"] == mkdc.SKELETAL_MESH}
+        if tgt[1] in probed[tp]:
+            return f"{tgt[0]}.{tgt[1]}"
+    return None
+
+
+def foreign_roots(toc, plugin):
+    """
+    Other PLUGINS this container HARD-IMPORTS from -- dependencies no
+    manifest declares (a shared skin library). Only packages named in the
+    container header's dependency lists count: name tables are full of
+    benign leftovers (soft paths into the author's other mods, uncooked
+    project folders) that the mod demonstrably lives without.
+    """
+    skip = {plugin.lower(), "game", "script", "engine", "ff7rml", "dresscode"}
+    hard = set()
+    for pids in header_deps(toc).values():
+        hard.update(pids)
+    roots = {}
+    for p in rename.read_packages(toc).values():
+        for n in zen.ZenPackage(toc.read(p["chunk"])).names:
+            if not n.startswith("/") or "/" not in n[1:]:
+                continue
+            root = n[1:].split("/", 1)[0]
+            if root.lower() in skip or root.lower() in roots:
+                continue
+            if cityhash.package_id(n) in hard:
+                roots[root.lower()] = root
+    return sorted(roots.values())
+
+
+def locate_libraries(roots, uplugin):
+    """
+    ({root: (utoc, uplugin, where)}, [missing]) -- each library found
+    beside the dependent mod (anywhere under the folder that holds it) or
+    installed in End\\Mods; `where` says which, for the person watching.
+    Dresscode's own rule makes the .uplugin name the identity.
+    """
+    import config
+    found, missing = {}, []
+    near = os.path.dirname(os.path.dirname(os.path.abspath(uplugin)))
+    for root in roots:
+        cands = glob.glob(os.path.join(near, "**", f"{root}.uplugin"),
+                          recursive=True)
+        installed = os.path.join(getattr(config, "MODS_DIR", ""), root,
+                                 f"{root}.uplugin")
+        if os.path.exists(installed):
+            cands.append(installed)
+        hit = None
+        for c in cands:
+            utoc = find_container(os.path.dirname(c))
+            if utoc:
+                if os.path.normcase(c) == os.path.normcase(installed):
+                    where = "installed in End\\Mods"
+                else:
+                    rel = os.path.relpath(os.path.dirname(c), near)
+                    where = f"found beside it: {rel}{os.sep}"
+                hit = (utoc, c, where)
+                break
+        if hit:
+            found[root] = hit
+        else:
+            missing.append(root)
+    return found, missing
+
+
+def plan_variants(toc, plugin, extra_roots=()):
+    """
+    A conversion plan per wearable outfit -- a Dresscode mod can register
+    several variants, and each becomes its own pak.
+
+    `extra_roots` names library plugins whose packages ride inside `toc`
+    (a merged container): they relocate into the loose layout beside the
+    mod's own, each under its own subfolder.
+
+    Each variant's mesh takes over the character's DEFAULT costume package, so
+    it is worn without a menu. Everything else moves into a subfolder of that
+    same costume folder, named for the mod: /<Mod>/... names would keep their
+    IDs, but the loader silently skips imports into an unmounted root, so they
+    must live under /Game/ to resolve from ~mods.
+
+    A variant carries everything except what provably is not its: the
+    registration assets, preview images no mesh uses, and packages reachable
+    only from OTHER variants' meshes. Packages no variant references (physics
+    assets and the like, wired up in ways a dependency walk cannot see) ride
+    along in every variant -- a few wasted megabytes beat a missing feature.
+
+    Outfit rows with an ACTOR are Dresscode toggles (hide the jacket, recolor
+    the wings): a blueprint applying an EndMaterialPack that swaps mesh
+    material slots. Those become OPTIONAL paks in the pre-Dresscode modular
+    style -- a tiny pak overriding the swapped material outright, dropped in
+    ~mods next to the base at the user's choice. The blueprint and pack
+    themselves are meaningless outside Dresscode and travel only in the
+    round-trip record.
+
+    Returns (plans, toggles, ctx): plans is [(outfit, target, renames,
+    objects, drop)] per variant, toggles one dict per optional pak.
+    """
+    assets = moddata.find_data_assets(toc,
+                                      prefer=f"/{plugin.lower()}/")
+    outfits = moddata.read_outfits(toc.read(assets["character"])) \
+        if "character" in assets else []
+
+    packages = rename.read_packages(toc)
+    own = {p["name"].lower() for p in packages.values()}
+
+    # A weapons-menu row converts like a costume one: its mesh takes over a
+    # stock package and the rest moves in beside it -- only WHICH stock
+    # package differs. Tiles this tool built are the exception: they kept
+    # the stock path as their tail, so weapon_tiles_back can put every file
+    # back exactly where it came from instead of relocating them.
+    own_tiles = 0
+    for i in moddata.weapon_lists(toc, weapons.MOD_TYPE_WEAPON):
+        for row in moddata.read_outfits(toc.read(i)):
+            root = str(row.get("skeletal_mesh") or "").split(".")[0]
+            # By its layout, not by what it carries: a tile that replaced
+            # the weapon model outright has nothing beneath it.
+            if weapons.is_tile_path(root) \
+                    or any(n.startswith(root.lower() + "/") for n in own):
+                own_tiles += 1
+                continue
+            outfits.append(dict(row, weapon=True))
+    # A mod whose every row is one of those tiles has nothing to plan here
+    # and is not empty: weapon_tiles_back hands each one back on its own.
+    if not outfits and not own_tiles:
+        raise RuntimeError("no Dresscode outfit data in this mod")
+    by_name = {p["name"].lower(): pid for pid, p in packages.items()}
+    deps = header_deps(toc)
+
+    # Whole mods are authored with every mesh riding INSIDE its row's actor
+    # blueprint, the row's own mesh path left empty. Pull the mesh out of
+    # the blueprint and the row converts like any other outfit.
+    resolve = probed = None
+    for o in outfits:
+        if o["skeletal_mesh"] or not o.get("actor"):
+            continue
+        if resolve is None:
+            resolve = matpack.object_resolver(toc)
+            probed = {}
+        m = actor_mesh(toc, packages, by_name, resolve, probed, o["actor"])
+        if m:
+            o["skeletal_mesh"] = m
+
+    meshed = [o for o in outfits
+              if o["skeletal_mesh"]
+              and not o["skeletal_mesh"].startswith("/Game/")]
+    # Rows with an actor are Dresscode toggles. Their mesh is usually None
+    # ("apply to whatever is worn"); one with a mesh of its own is promoted
+    # to a base outfit too, so its look still ships.
+    toggle_rows = [o for o in outfits if o.get("actor")]
+    base_meshes = {o["skeletal_mesh"].split(".")[0].lower()
+                   for o in meshed if not o.get("actor")}
+    wearable = []
+    for o in meshed:
+        mesh_low = o["skeletal_mesh"].split(".")[0].lower()
+        if not o.get("actor"):
+            wearable.append(o)
+        elif mesh_low not in base_meshes:
+            base_meshes.add(mesh_low)
+            wearable.append(o)
+    if not wearable and not own_tiles:
+        raise RuntimeError("this mod registers no mesh of its own to convert")
+
+    # The registration assets are Dresscode's, and only Dresscode's. Carried
+    # into a pak they become data assets whose CLASS lives in a plugin
+    # that is not mounted when ~mods is -- and the loader still enumerates them
+    # at startup. They describe a mod that, in this format, does not exist.
+    # ALL of them go -- a weapon-tile list is one more instance of the same
+    # class, and one surviving is just as fatal as the costume data.
+    registration = set() if KEEP_REGISTRATION \
+        else moddata.registration_chunks(toc)
+
+    def closure(seed_pid):
+        """Everything a mesh pulls in, walking the container header's
+        dependency lists -- in-container packages only."""
+        keep, todo = set(), [seed_pid]
+        while todo:
+            pid = todo.pop()
+            if pid in keep or pid not in packages:
+                continue
+            keep.add(pid)
+            todo += deps.get(pid, [])
+        return keep
+
+    closures = []
+    for outfit in wearable:
+        mesh = outfit["skeletal_mesh"].split(".")[0]
+        pid = by_name.get(mesh.lower())
+        closures.append(closure(pid) if pid is not None else set())
+
+    # Preview images exist for the Dresscode menu; the game never asks for
+    # them from a pak. Each rides along in ITS outfit's variant anyway,
+    # because converting back to Dresscode then restores the original cooked
+    # texture untouched -- that is what makes the round trip lossless. Only a
+    # preview no wearable outfit references is dropped outright.
+    preview_users = {}                  # pid -> indexes of outfits using it
+    for j, o in enumerate(wearable):
+        if o["preview_image"]:
+            p = by_name.get(o["preview_image"].split(".")[0].lower())
+            if p is not None and not any(p in c for c in closures):
+                preview_users.setdefault(p, set()).add(j)
+    orphan_previews = set()
+    for o in outfits:
+        if o in wearable or o in toggle_rows or not o["preview_image"]:
+            continue
+        p = by_name.get(o["preview_image"].split(".")[0].lower())
+        if p is not None and p not in preview_users \
+                and not any(p in c for c in closures):
+            orphan_previews.add(p)
+
+    # The base outfits a mesh-less toggle may apply to. Slot names repeat
+    # across meshes (every outfit has a hair slot), so a toggle sharing its
+    # NAME with a base row belongs to that row alone.
+    bases = []
+    for o in wearable:
+        pid = by_name.get(o["skeletal_mesh"].split(".")[0].lower())
+        target = stock_target(o, own)
+        if pid is not None and target:
+            bases.append((pid, target.rsplit("/Model/", 1)[0],
+                          (o["name"] or "").strip()))
+
+    roots = (plugin, *extra_roots)
+    base_union = set().union(*closures) if closures else set()
+    toggles, blob_only, dead_repl = plan_toggles(
+        toc, roots, packages, by_name, deps, closure, base_union,
+        set(preview_users), toggle_rows, registration, bases)
+
+    # Cargo that IMPORTS the Dresscode-only machinery -- or anything only
+    # SOME variants carry -- is Dresscode-only machinery itself: parent
+    # blueprints, helper assets. It would dangle in every variant missing
+    # its target, and it does nothing in a pak anyway. Walk until no
+    # unclaimed package still references anything unsafe.
+    reg_pids = {pid for pid, p in packages.items()
+                if p["chunk"] in registration}
+    toggle_keep = set().union(*(t["keep"] for t in toggles)) \
+        if toggles else set()
+    common = set.intersection(*closures) if closures else set()
+    variant_specific = (base_union - common) | set(preview_users)
+    removed = reg_pids | blob_only | toggle_keep
+    changed = True
+    while changed:
+        changed = False
+        doomed = {cityhash.object_id(packages[pid]["name"], path)
+                  for pid in removed | variant_specific if pid in packages
+                  for path in packages[pid]["exports"]}
+        for pid, info in packages.items():
+            if pid in removed or pid in base_union:
+                continue
+            z = zen.ZenPackage(toc.read(info["chunk"]))
+            if any(imp in doomed for imp in z.imports):
+                blob_only.add(pid)
+                removed.add(pid)
+                changed = True
+
+    # dead_repl: variant materials no pak can apply. Owned by nobody, so
+    # without naming them here they would settle into the base pak.
+    toggle_owned = toggle_keep | blob_only | dead_repl
+
+    plans = []
+    for k, outfit in enumerate(wearable):
+        mesh = outfit["skeletal_mesh"].split(".")[0]
+        if by_name.get(mesh.lower()) is None:
+            print(f"  skipping {outfit['name'] or mesh!r}: its model file "
+                  "is missing from this mod")
+            continue
+        target = stock_target(outfit, own)
+        if not target:
+            if outfit.get("weapon"):
+                print(f"  skipping {outfit['name'] or mesh!r}: cannot tell "
+                      "which weapon it replaces (its files carry no weapon "
+                      "id, or Dresscode is not installed to look one up)")
+            else:
+                print(f"  skipping {outfit['name'] or mesh!r}: unknown "
+                      f"character {outfit['player_type']!r}")
+            continue
+
+        others = set().union(*(c for j, c in enumerate(closures) if j != k)) \
+            if len(closures) > 1 else set()
+        not_mine = {p for p, users in preview_users.items() if k not in users}
+        exclusive_elsewhere = (others - closures[k]) | not_mine \
+            | orphan_previews | (toggle_owned - closures[k])
+
+        # ".../PC0002_00_Tifa_Standard" -- the costume folder the mesh lives in.
+        costume_root = target.rsplit("/Model/", 1)[0]
+
+        renames, objects, drop = {}, {}, set()
+        for pid, info in packages.items():
+            name = info["name"]
+            if info["chunk"] in registration or pid in exclusive_elsewhere:
+                drop.add(name)
+            if name.lower() == mesh.lower():
+                renames[name.lower()] = target
+                # The mesh's EndCharacterConditionUserData soft-references a
+                # condition (petrify) mesh, and Dresscode authors can leave it
+                # pointing into their own uncooked project folder -- Dresscode
+                # never follows the reference, but the stock costume pipeline
+                # does. Point it at the condition mesh of the costume being
+                # replaced.
+                for cond in condition_refs(toc, info["chunk"], own):
+                    if cond.lower() != f"{target}_Condition".lower():
+                        renames[cond.lower()] = f"{target}_Condition"
+                # The object inside has to take the stock name too. The game
+                # imports /Game/.../PC0002_00.PC0002_00, and an import ID
+                # hashes the object name with the package's -- so a mesh still
+                # called MyOutfit answers to an ID nothing asks for, and the
+                # override silently does nothing.
+                stock_object = target.rsplit("/", 1)[-1]
+                objects[name.lower()] = {e: stock_object for e in info["exports"]
+                                         if "/" not in e and e != stock_object
+                                         and e == mesh.rsplit("/", 1)[-1]}
+            else:
+                renames[name.lower()] = converted_name(name, roots,
+                                                       costume_root)
+        plans.append((outfit, target, renames, objects, drop))
+    if not plans and not own_tiles:
+        raise RuntimeError("none of this mod's outfits can be converted")
+    # The survey rides along so the round-trip recorder does not pay for a
+    # second full read of every package.
+    return plans, toggles, dict(packages=packages, assets=assets,
+                                outfits=outfits, blob_only=blob_only,
+                                roots=roots)
+
+
+def stock_target(row, own):
+    """
+    The stock package this row's mesh takes over: a character's default
+    costume, or -- for a weapons-menu row -- the weapon it stands in for.
+    None when it cannot be told, which the caller reports.
+    """
+    if not row.get("weapon"):
+        return moddata.default_costume_package(row["player_type"])
+    return weapons.stock_for(row["skeletal_mesh"].split(".")[0], own)
+
+
+def converted_name(name, plugin, costume_root):
+    """Where a mod package lands in the loose layout; stock names stay put.
+    `plugin` may be one root or several -- a mod's undeclared library
+    dependencies relocate right beside it, each under its own subfolder."""
+    roots = (plugin,) if isinstance(plugin, str) else plugin
+    for r in roots:
+        if name.lower().startswith(f"/{r.lower()}/"):
+            return f"{costume_root}/{r}{name[len(r) + 1:]}"
+    return name
+
+
+def plan_toggles(toc, plugin, packages, by_name, deps, closure, base_union,
+                 base_previews, toggle_rows, registration, bases):
+    """
+    One optional-pak plan per distinct material swap.
+
+    Follows actor -> blueprint -> EndMaterialPack -> {slot: replacement},
+    reads a mesh's slot->material table, and turns each swap into a package
+    override: the replacement material renamed onto the material package the
+    base pak serves for that slot. A toggle row usually names no mesh
+    ("apply to whatever is worn"), so its pack is tried against every base
+    outfit and lands where its slot names match. A slot whose material
+    package is SHARED with slots the pack does not touch cannot be
+    overridden without side effects and is skipped with a note.
+    """
+    reg_pids = {pid for pid, p in packages.items()
+                if p["chunk"] in registration}
+    toggles, blob_only, dead_repl = [], set(), set()
+    resolver = None
+    slots_cache = {}
+    for row in toggle_rows:
+        bp_pkg = row["actor"].split(".")[0]
+        bp_pid = by_name.get(bp_pkg.lower())
+        if bp_pid is None:
+            continue
+        blob_only.add(bp_pid)
+        pack_pid = next(
+            (p for p in deps.get(bp_pid, []) if p in packages
+             and matpack.is_material_pack(toc.read(packages[p]["chunk"]))),
+            None)
+        if pack_pid is None:
+            own_mesh = (row["skeletal_mesh"] or "").split(".")[0]
+            own_pid = by_name.get(own_mesh.lower()) if own_mesh else None
+            if own_pid is not None and any(b[0] == own_pid for b in bases):
+                # The actor only equips a mesh that already converts as a
+                # base outfit -- nothing here needs an Optional pak.
+                continue
+            print(f"      note: the \"{row['name'] or bp_pkg}\" menu item "
+                  "is Dresscode-only logic with no pak form -- it is "
+                  "kept safe and returns when converted back.")
+            continue
+        blob_only.add(pack_pid)
+        if resolver is None:
+            resolver = matpack.object_resolver(toc)
+        pack = matpack.read_material_pack(toc.read(packages[pack_pid]["chunk"]))
+
+        own_mesh = (row["skeletal_mesh"] or "").split(".")[0]
+        own_pid = by_name.get(own_mesh.lower()) if own_mesh else None
+        if own_pid is not None:
+            candidates = [b for b in bases if b[0] == own_pid]
+        else:
+            row_name = (row["name"] or "").strip()
+            named = [b for b in bases if row_name and b[2] == row_name]
+            candidates = named or bases
+
+        matched = False
+        for mesh_pid, costume_root, _bname in candidates:
+            if mesh_pid not in slots_cache:
+                slots_cache[mesh_pid] = matpack.material_slots(
+                    toc.read(packages[mesh_pid]["chunk"]))
+            slots = slots_cache[mesh_pid]
+            slot_to_base = {s: imp for s, imp, _o in slots}
+
+            # swaps: {slot: (base (pkg, obj), repl (pkg, obj), shared)}. A
+            # slot whose base material package also serves slots the pack
+            # does not touch cannot be swapped by overriding the package --
+            # the pack's OTHER slots usually give an anchor: repoint the
+            # shared slot at a clean slot's material import (a 4-byte mesh
+            # patch to an EXISTING import) and let that slot's package
+            # override do the rest. Only a shared slot with no anchor needs
+            # the mesh to learn a brand-new import.
+            swaps, skipped = {}, []
+            for slot, repl_imp in pack.items():
+                base_imp = slot_to_base.get(slot)
+                base = resolver.get(base_imp) if base_imp else None
+                repl = resolver.get(repl_imp)
+                if not base or not repl:
+                    skipped.append(slot)
+                    continue
+                if base[0].lower() == repl[0].lower():
+                    continue
+                shared = any(s != slot and s not in pack and imp == base_imp
+                             for s, imp, _o in slots)
+                swaps[slot] = (base, repl, shared)
+            if not swaps:
+                continue
+            matched = True
+
+            # TWO SLOTS, ONE PACKAGE, TWO ANSWERS. A mesh may point two slots
+            # at the SAME material package, and a Dresscode row may still ask
+            # for a different material on each -- it applies materials per
+            # slot, so it can. A pak cannot: an override replaces the package
+            # both slots read, so both slots change together, and only one
+            # replacement can occupy that name.
+            #
+            # Left alone, `overrides` (keyed by the base package) just kept
+            # whichever slot came last, and the other's material vanished --
+            # which shipped one slot's material wearing the other's name
+            # and rendered the whole costume as grey checkers, in game,
+            # with nothing in the output saying so.
+            collided = set()
+            by_base = {}
+            for slot, (base, repl, _sh) in swaps.items():
+                by_base.setdefault(base[0].lower(), []).append(
+                    (slot, repl[0].lower()))
+            for _basepkg, entries in by_base.items():
+                if len({r for _s, r in entries}) < 2:
+                    continue                # all agree: one override serves
+                keeper = sorted(s for s, _r in entries)[0]
+                collided.update(s for s, _r in entries if s != keeper)
+
+            overrides, objects, repoint, loose = {}, {}, {}, {}
+            for slot, (base, repl, shared) in swaps.items():
+                if slot in collided:
+                    loose[slot] = repl
+                    continue
+                if shared:
+                    continue
+                overrides[base[0]] = repl[0]
+                if base[1] != repl[1]:      # must answer as the base object
+                    objects[repl[0].lower()] = {repl[1]: base[1]}
+            for slot, (base, repl, shared) in swaps.items():
+                if not shared:
+                    continue
+                anchor = next(
+                    (b2 for _s2, (b2, r2, sh2) in swaps.items()
+                     if not sh2 and r2[0].lower() == repl[0].lower()), None)
+                if anchor is not None:
+                    repoint[slot] = anchor      # base (pkg, obj) to reuse
+                else:
+                    # Would need the mesh to learn a brand-new import --
+                    # probed in game and the loader never resolves it, so
+                    # be honest instead of shipping a grey part.
+                    loose[slot] = repl
+            kind = "mesh" if repoint else "swap"
+
+            # A replacement that IMPORTS the package it replaces (a material
+            # instance overriding its own parent) would, renamed, import
+            # ITSELF -- and one self-import in a container header stops the
+            # game launching at all. Carry the base package in the pak under
+            # a side name so the parent chain stays real. When the parent is
+            # the game's own package there is no copy to carry, and a
+            # mesh-carrying pak needs the base name for the mesh -- both
+            # demote to "keeps its normal look" instead.
+            carry = set()
+            for slot, (base, repl, shared) in swaps.items():
+                if shared or slot in collided or slot in loose:
+                    continue
+                r_pid = by_name.get(repl[0].lower())
+                if r_pid is None or cityhash.package_id(base[0]) \
+                        not in deps.get(r_pid, ()):
+                    continue
+                if kind == "swap" and base[0].lower() in by_name:
+                    carry.add(base[0])
+                else:
+                    overrides.pop(base[0], None)
+                    objects.pop(repl[0].lower(), None)
+                    loose[slot] = repl
+            if collided:
+                # Said plainly, because the result LOOKS deliberate in game:
+                # the part is not missing, it is wearing its neighbour's
+                # material.
+                keepers = sorted(set(swaps) - collided - set(loose))
+                print(f"      note: {row['name'] or bp_pkg}: "
+                      f"{', '.join(sorted(collided))} shares one material "
+                      f"with {', '.join(keepers) or 'another slot'} in this "
+                      "model, so a pak cannot give them different looks -- "
+                      "they follow the one that can")
+            for slot in set(loose) | collided:
+                r = swaps[slot][1][0].lower()
+                if r in by_name:
+                    dead_repl.add(by_name[r])
+            stranded = sorted(set(loose) - collided)
+            if stranded:
+                print(f"      note: {row['name'] or bp_pkg}: "
+                      f"{', '.join(stranded)} cannot swap in a pak "
+                      "-- those parts keep their normal look")
+            if not overrides and not repoint:
+                continue
+
+            keep = set()
+            # Only what actually applies. A replacement for a slot that
+            # cannot swap is dead weight in the pak -- and dead weight that
+            # drags its whole material chain in behind it.
+            repl_pids = {by_name[r[0].lower()]
+                         for slot, (_b, r, _sh) in swaps.items()
+                         if slot not in collided and slot not in loose
+                         and r[0].lower() in by_name}
+            for pid in repl_pids:
+                keep |= closure(pid)
+            if row["preview_image"]:
+                p = by_name.get(row["preview_image"].split(".")[0].lower())
+                if p is not None:
+                    keep |= closure(p)
+            # Shared things stay with the base pak (an optional always
+            # rides beside it) -- except the replacements themselves, which
+            # the optional must carry regardless, and the mesh when the
+            # swap is baked into it.
+            keep -= base_union | base_previews | reg_pids | blob_only
+            keep |= repl_pids
+            keep |= {by_name[b.lower()] for b in carry}
+            if kind == "mesh":
+                keep.add(mesh_pid)
+
+            dup = next((t for t in toggles
+                        if t["swaps"] == swaps and t["kind"] == kind
+                        and (kind == "swap"
+                             or t["mesh_pid"] == mesh_pid)), None)
+            if dup is not None:
+                dup["keep"] |= keep
+                dup["bases"].add(mesh_pid)
+                continue
+            # `bases` is every outfit this one swap works on -- one means it
+            # belongs inside that outfit's folder, several mean it is general.
+            toggles.append(dict(
+                row=row, bp=bp_pkg, kind=kind, swaps=swaps,
+                overrides=overrides, objects=objects, repoint=repoint,
+                loose=loose, skipped=skipped, keep=keep, mesh_pid=mesh_pid,
+                bases={mesh_pid}, costume_root=costume_root, carry=carry))
+        if not matched:
+            print(f"      note: {row['name'] or bp_pkg}: its material swap "
+                  "has no effect a pak can carry -- Dresscode only")
+    # Replacements no row could apply serve nothing in pak form. Without
+    # this they fall out of every toggle's `keep` and land in the BASE pak
+    # instead -- 19 materials the outfit never reads, carried into every
+    # install for no reason.
+    used = set().union(*(t["keep"] for t in toggles)) if toggles else set()
+    dead = set()
+    for pid in dead_repl:
+        if pid not in used:
+            dead |= closure(pid)
+    dead -= used | base_union
+    return toggles, blob_only, dead
+
+
+def header_deps(toc):
+    """{package ID -> imported package IDs} from the container header."""
+    for i in range(toc.n):
+        if toc.chunk_ids[i][11] != 10:
+            continue
+        hdr = toc.read(i)
+        info = conheader.parse(hdr)
+        if not info:
+            break
+        return {pid: conheader.imported_packages(hdr, info, k)
+                for k, pid in enumerate(conheader.package_ids(hdr, info))}
+    return {}
+
+
+def condition_refs(toc, chunk, own):
+    """Condition-mesh packages the mesh soft-references outside this mod."""
+    out = set()
+    for s in zen.ZenPackage(toc.read(chunk)).names:
+        pkg = s.split(".")[0]
+        if (s.startswith("/") and pkg.lower().endswith("_condition")
+                and pkg.lower() not in own):
+            out.add(pkg)
+    return out
+
+
+def loose_root_of(target):
+    """The /Game/ folder a plan's packages all sit under -- Player for a
+    costume, Weapon for a weapons-menu row. The container mounts there, so
+    every package must share it."""
+    root = "/".join(target.split("/")[:4])
+    return root + "/" if root.startswith("/Game/Character/") else LOOSE_ROOT
+
+
+def loose_path_under(root):
+    """Container-relative path of a package, under `root`'s mount."""
+    def path(package_name):
+        if not package_name.startswith(root):
+            raise RuntimeError(f"cannot place {package_name} in a pak")
+        return package_name[len(root):]
+    return path
+
+
+def loose_path(package_name):
+    """Container-relative path, under the player-character mount."""
+    return loose_path_under(LOOSE_ROOT)(package_name)
+
+
+# ---------------------------------------------------------------------------
+# Pak -> Dresscode: the template.
+#
+# A Dresscode mod needs things a pak simply does not have -- a display
+# name, an author, per-outfit names, optional preview images -- and prompting
+# for each in a console is miserable. So the first drop of a pak mod writes
+# a dresscode.json template beside its paks, prefilled with everything
+# detectable, and the second drop reads it and builds. Editing it is optional:
+# the prefilled values already work.
+#
+# The folder layout IS the variant structure: paks directly in the dropped
+# folder are a single outfit; each sub-folder holding paks is one variant,
+# named for its folder.
+# ---------------------------------------------------------------------------
+
+TEMPLATE = "dresscode.json"
+IMAGE_EXTS = (".png", ".jpg", ".jpeg")
+
+# Folder names that mean "each subfolder here is a whole costume", as opposed
+# to Optional, which means "each pak here changes materials on the costume".
+VARIANT_DIRS = ("variants", "variant")
+VARIANTS_DIR_OUT = "Variants"           # what this tool writes
+
+# A carried parent (see plan_toggles) rides in an Optional pak under the
+# base package's name plus this suffix.
+PARENT_ASIDE = "_DCBase"
+
+
+def _pak_digest(utoc):
+    """A pak's bytes, .utoc and .ucas together."""
+    h = hashlib.md5()
+    for ext in (".utoc", ".ucas"):
+        try:
+            with open(os.path.splitext(utoc)[0] + ext, "rb") as f:
+                for block in iter(lambda: f.read(1 << 20), b""):
+                    h.update(block)
+        except OSError:
+            pass
+    return h.digest()
+
+
+def dedupe_paks(utocs):
+    """
+    One entry per DISTINCT pak. A mod that offers the same add-on to every
+    costume ships a copy of it in each costume's folder, and listing it once
+    per copy makes the template unreadable -- worse, entries name a pak by
+    its stem, so repeated names are ambiguous.
+
+    Bytes decide, not names: same-named paks that really differ all stay.
+    Only a name-and-size collision is hashed, so nothing is read twice over
+    for a mod whose paks are all distinct anyway.
+    """
+    groups = {}
+    for u in utocs:
+        stem = os.path.splitext(os.path.basename(u))[0].lower()
+        try:
+            size = os.path.getsize(os.path.splitext(u)[0] + ".ucas")
+        except OSError:
+            size = -1
+        groups.setdefault((stem, size), []).append(u)
+    out = []
+    for group in groups.values():
+        if len(group) == 1:
+            out += group
+            continue
+        seen = set()
+        for u in sorted(group):
+            digest = _pak_digest(u)
+            if digest not in seen:
+                seen.add(digest)
+                out.append(u)
+    return sorted(out)
+
+
+def carries_outfit(utoc):
+    """Whether a pak replaces a character's standard costume -- an outfit.
+    Anything else is an extra: the modular standard's optional paks override
+    a material or the mask a material samples, and never the mesh."""
+    try:
+        toc = iostore.Toc(utoc)
+    except Exception:
+        return False
+    try:
+        return bool(mkdc.find_stock_mesh(rename.read_packages(toc))[0])
+    except Exception:
+        return False
+    finally:
+        toc.close()
+
+
+def weapon_tiles_in(utoc):
+    """The stock weapons a pak covers -- one menu tile each. Empty when the
+    pak is not a weapon pak at all."""
+    try:
+        toc = iostore.Toc(utoc)
+    except Exception:
+        return set()
+    try:
+        pkgs = rename.read_packages(toc)
+        return weapons.weapon_folders(pkgs) \
+            if weapons.is_weapon_pak(pkgs) else set()
+    except Exception:
+        return set()
+    finally:
+        toc.close()
+
+
+def is_weapon_pak(utoc):
+    """Whether a pak replaces weapon content and nothing else."""
+    return bool(weapon_tiles_in(utoc))
+
+
+def mod_root_name(source):
+    """The dropped folder's name, without the suffix a conversion added --
+    a folder converted before the suffix was renamed keeps its name."""
+    name = os.path.basename(os.path.abspath(source).rstrip("\\/"))
+    for tag in (" (pak)", " (unpacked)"):
+        if name.lower().endswith(tag):
+            return name[:-len(tag)]
+    return name
+
+
+def loose_layout(source, mods):
+    """
+    (mod_name, [(relative folder, utoc)], [extra utoc], [companion utoc],
+    {variant folders}) when `source` is the root of a pak mod in a
+    shape the template supports -- else None.
+
+    Outfits are the paks carrying a costume. Everything else under an
+    Optional folder is an extra (a variant, opt-in); everything else
+    ELSEWHERE is a companion -- a REQUIRED pak the outfit cannot render
+    without (authors routinely ship the mesh in one pak and its materials
+    and textures in another). Companions merge into every outfit.
+
+    A VARIANTS folder is the third kind, and the one Optional cannot
+    express: each subfolder holds a whole costume -- its own mesh -- so it
+    becomes another outfit tile in the SAME Dresscode mod rather than a
+    toggle. Optional swaps materials on the worn model, which is why a
+    difference living inside the mesh (a part switched off, a reshaped
+    body) has no Optional form at all.
+    """
+    if not mods or any(uplugin for _utoc, uplugin in mods):
+        return None
+    root = os.path.normcase(os.path.abspath(source))
+    outfits, extras, companions, variants = [], [], [], set()
+    for k, (utoc, _) in enumerate(mods):
+        progress("reading paks", k, len(mods))
+        folders = os.path.relpath(utoc, source).lower().split(os.sep)[:-1]
+        # An Optional folder wins over content: a generated Optional tree's
+        # paks DO carry their outfit's mesh, and stay extras.
+        if "optional" in folders:
+            extras.append(utoc)
+        elif carries_outfit(utoc):
+            outfits.append(utoc)
+            if any(f in VARIANT_DIRS for f in folders):
+                variants.add(utoc)
+        else:
+            companions.append(utoc)
+    progress("reading paks", len(mods), len(mods))
+    if not outfits:
+        # A weapon mod has no costume to anchor on, and needs none: its rows
+        # stand alone in the WEAPONS menu. Every pak has to be a weapon one,
+        # or this is a costume mod whose main pak was left behind.
+        rest = extras + companions
+        if rest and all(is_weapon_pak(u) for u in rest):
+            return (mod_root_name(source), [], dedupe_paks(rest), [], set())
+        return None
+
+    # The "one outfit per folder" rules below are about telling several
+    # SEPARATE costumes apart. Variants are declared, not guessed, so they
+    # are exempt: the main costume at the root plus a Variants tree is the
+    # shape this folder is for.
+    plain = [u for u in outfits if u not in variants]
+    parts, by_folder = [], {}
+    for utoc in outfits:
+        d = os.path.dirname(os.path.abspath(utoc))
+        by_folder.setdefault(os.path.normcase(d), []).append(utoc)
+    for utoc in outfits:
+        d = os.path.dirname(os.path.abspath(utoc))
+        at_root = os.path.normcase(d) == root
+        if at_root and len(plain) > 1:
+            return None                 # several outfits loose in one folder
+        # Any depth goes -- downloads nest however their author unpacked
+        # them. Several outfits sharing one folder are named for their paks
+        # ALONE, exactly as before this understood nesting: existing
+        # dresscode.json files key their outfits by those stems.
+        rel = os.path.relpath(d, source).replace("\\", "/")
+        if len(by_folder[os.path.normcase(d)]) > 1:
+            parts.append((os.path.splitext(os.path.basename(utoc))[0], utoc))
+        else:
+            parts.append(("." if at_root else rel, utoc))
+    if len({p == "." for p, u in parts if u not in variants}) > 1:
+        return None                     # a pak both at the root and in subs
+    # Companions are NOT deduped: each is scoped to the outfit it sits with,
+    # so an identical copy in a sibling folder is that outfit's own.
+    return (mod_root_name(source), sorted(parts), dedupe_paks(extras),
+            sorted(companions),
+            {rel for rel, u in parts if u in variants})
+
+
+# Folders that say where a pak is filed, never what the costume is: a
+# download unpacked with its install path intact ends in one of these, and
+# naming a menu row "~mods" tells nobody anything.
+PACKAGING_DIRS = {"~mods", "mods", "content", "paks", "windowsnoeditor"}
+
+
+def outfit_label(rel, mod_name):
+    """What an outfit folder is called in the menu before anyone renames it.
+    A variant is named for its own folder, not the path to it -- "No Jacket"
+    reads as a costume, "Variants/No Jacket" reads as a filing system."""
+    if rel == ".":
+        return mod_name
+    parts = rel.split("/")
+    while len(parts) > 1 and parts[-1].lower() in PACKAGING_DIRS:
+        parts.pop()
+    return parts[-1] if parts[0].lower() in VARIANT_DIRS else "/".join(parts)
+
+
+def images_in(folder):
+    try:
+        return sorted(f for f in os.listdir(folder)
+                      if f.lower().endswith(IMAGE_EXTS))
+    except OSError:
+        return []
+
+
+def find_image(folder, preferred):
+    """
+    The picture a folder nominates, with no configuration: a file named
+    `preferred` (preview.png, icon.jpg, ...) wins, otherwise the first image
+    alphabetically. Nobody should ever have to type a file path into JSON --
+    where a picture SITS is the whole interface.
+    """
+    pics = images_in(folder)
+    for p in pics:
+        if os.path.splitext(p)[0].lower() == preferred:
+            return os.path.join(folder, p)
+    return os.path.join(folder, pics[0]) if pics else None
+
+
+def write_template(source, mod_name, parts, prefill=None, restore=None,
+                   extras=()):
+    """Prefill dresscode.json with the little a build needs. Pictures are on
+    purpose NOT in here -- they are picked up by where they sit.
+
+    `prefill` carries real values when the pak mod was itself converted
+    from a Dresscode mod; `restore` is that conversion's opaque record of the
+    original, which makes converting back exact. `extras` is [(label, pak
+    stem)] -- or (label, stem, is_weapon) triples -- for the mod's optional
+    paks. Weapon paks get a ready-made variants entry (their tile stands
+    alone in the weapons menu, there is nothing to combine); the rest are
+    listed for the person to compose."""
+    prefill = prefill or {}
+    pre_outfits = prefill.get("outfits", {})
+    outfits = [{"folder": rel,
+                "name": pre_outfits.get(rel, (None,))[0]
+                or outfit_label(rel, mod_name),
+                "description": pre_outfits.get(rel, (None, ""))[1]}
+               for rel, _utoc in parts]
+    intro = [
+        "convert.py made this file. Drop the folder on it again and it",
+        "builds the Dresscode mod. Changing anything below is optional:",
+        "the 'name' lines are what things are called in game, 'author'",
+        "and the descriptions show on the mod's page.",
+        "",
+    ]
+    if outfits:
+        intro += [
+            "Pictures: icon.png next to this file becomes the mod's",
+            "thumbnail; preview.png inside an outfit's folder becomes that",
+            "outfit's tile picture.",
+            "",
+            "Leave the 'folder' lines alone -- they say where the files",
+            "live.",
+        ]
+    else:
+        # A weapon mod has no outfit folders and no tile pictures of its
+        # own: each tile shows the game's picture of the weapon it replaces.
+        intro += [
+            "This mod changes weapons, not costumes, so 'outfits' is empty",
+            "and stays empty. Each tile shows the game's own picture of the",
+            "weapon it replaces.",
+            "",
+            "Pictures: icon.png next to this file becomes the mod's",
+            "thumbnail.",
+        ]
+    template = {
+        "_how_this_works": intro,
+        "name": prefill.get("name") or mod_name,
+        "author": prefill.get("author", ""),
+        "description": prefill.get("description", ""),
+        "category": prefill.get("category") or "Outfit",
+        "version": prefill.get("version") or "1.0.0",
+        "stackable": False,
+        "outfits": outfits,
+    }
+    extras = [tuple(e) + (False,) * (3 - len(e)) for e in extras]
+    if extras and restore:
+        # Reproducing a real mod: its tiles are its own, exactly as they
+        # were, or converting back would not give the same mod.
+        template["_how_this_works"] += [
+            "",
+            "'variants' below IS the menu -- one entry = one tile, exactly",
+            "as the original mod had them.",
+        ]
+        template["variants"] = [{"name": label, "parts": [stem]}
+                                for label, stem, _w in extras]
+    elif extras:
+        # A modular pak mod. One tile per outfit part would mean thirty
+        # tiles that each change one thing, so those are listed and the
+        # choosing is left to the person; a weapon part has nothing to
+        # combine with, so its entry is written ready to build. The entry
+        # shape rides as a REAL object ('_example_variant', built from the
+        # mod's own parts) -- quotes in the help text would be escaped in
+        # the raw file and copy out wrong.
+        combos = [(l, s) for l, s, w in extras if not w]
+        weap = [(l, s) for l, s, w in extras if w]
+        if combos:
+            template["_how_this_works"] += [
+                "",
+                "'variants' below is this mod's menu: one entry = one tile,",
+                "and an entry's 'name' is the tile's label.",
+                "'_example_variant' shows the shape, using this mod's own",
+                "parts -- copy it into the 'variants' list and edit it.",
+            ]
+        if combos:
+            template["_how_this_works"] += [
+                "",
+                "The paks in 'parts_you_can_combine' are NOT in the menu",
+                "yet. Make entries for the combinations you actually wear,",
+                "parts worn together in the same entry.",
+                "",
+                "Rather keep them as drag-in files? Set 'stackable' to true",
+                "and you get a 'Put in ~mods' folder that works like",
+                "always, with only the costume in the menu.",
+            ]
+            if len(parts) > 1:
+                template["_how_this_works"] += [
+                    "",
+                    "An entry is offered on every outfit. For one that",
+                    "only suits some, add an 'outfit' line to it naming",
+                    "the outfit, spelled as in 'outfits' above -- or a",
+                    "list of names.",
+                ]
+        if weap and outfits:
+            template["_how_this_works"] += [
+                "",
+                "The WEAPON paks have their entries already -- each is one",
+                "tile in Dresscode's WEAPONS menu, and the stock weapon",
+                "tile switches it off. Nothing to do for those. That menu",
+                "is separate: a weapon tile stays on whatever costume the",
+                "character is wearing.",
+            ]
+        elif weap:
+            template["_how_this_works"] += [
+                "",
+                "'variants' below is the menu, and it is already written:",
+                "one entry per weapon pak, each a tile in Dresscode's",
+                "WEAPONS menu that the stock weapon tile switches off.",
+                "That menu is separate from costumes -- a weapon tile",
+                "stays on whatever the character is wearing. Rename the",
+                "entries if you like, then drop the folder again to build.",
+            ]
+        # Only where there is something to compose. Weapon paks are already
+        # tiles, so an example built from them would be a trap: copied in as
+        # it stands, it would register the same weapon a second time.
+        if combos:
+            ex = combos[:2]
+            template["_example_variant"] = {
+                "name": " + ".join(l for l, _s in ex),
+                "parts": [s for _l, s in ex]}
+            template["parts_you_can_combine"] = [s for _l, s in combos]
+        template["variants"] = [{"name": l, "parts": [s]} for l, s in weap]
+    if restore:
+        template["_how_this_works"] += [
+            "",
+            "'restore' below is the original Dresscode mod, recorded so",
+            "that converting back reproduces it exactly. Leave it alone.",
+        ]
+        template["restore"] = restore
+    path = os.path.join(source, TEMPLATE)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(template, f, indent=2)
+    return path
+
+
+def read_template(source, parts):
+    """Parse and validate dresscode.json against the folder layout. Returns
+    (meta, outfits) with image paths resolved, or raises with what to fix."""
+    path = os.path.join(source, TEMPLATE)
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+    except ValueError as ex:
+        raise RuntimeError(f"{TEMPLATE} is not valid JSON: {ex}")
+
+    if not str(data.get("name", "")).strip():
+        raise RuntimeError(f'{TEMPLATE} needs at least a "name"')
+
+    by_folder = {rel: utoc for rel, utoc in parts}
+    outfits = []
+    for entry in data.get("outfits") or []:
+        rel = str(entry.get("folder", ""))
+        if rel not in by_folder:
+            raise RuntimeError(
+                f'{TEMPLATE} mentions an outfit folder that is not there: '
+                f'"{rel}". The folders are: {", ".join(sorted(by_folder))}. '
+                f'(The "folder" lines must match the real folders.)')
+        # Pictures come from where they sit, never from typed paths.
+        folder = source if rel == "." else os.path.join(source, rel)
+        outfits.append(dict(
+            folder=rel, utoc=by_folder[rel],
+            name=str(entry.get("name", "")) or (rel if rel != "." else
+                                                str(data["name"])),
+            description=str(entry.get("description", "")),
+            preview=find_image(folder, "preview"),
+        ))
+    missing = sorted(set(by_folder) - {o["folder"] for o in outfits})
+    if missing:
+        raise RuntimeError(
+            f"{TEMPLATE} is missing its entry for: {', '.join(missing)}. "
+            "Delete the file and drop the folder again to get a fresh one.")
+    # No outfit FOLDERS means a weapon-only mod, where an empty list is the
+    # right answer -- only a mod that has costume folders is missing something.
+    if not outfits and by_folder:
+        raise RuntimeError(
+            f"{TEMPLATE} has no outfits in it. Delete the file and drop the "
+            "folder again to get a fresh one.")
+
+    meta = dict(
+        name=str(data["name"]).strip(),
+        author=str(data.get("author", "")),
+        description=str(data.get("description", "")),
+        category=str(data.get("category", "")) or "Outfit",
+        version=str(data.get("version", "")) or "1.0.0",
+        icon=find_image(source, "icon"),
+        restore=data.get("restore"),
+        stackable=bool(data.get("stackable")),
+        variants=data.get("variants"),
+    )
+    return meta, outfits
+
+
+def plugin_id(name):
+    """
+    The display name reduced to a plugin identifier.
+
+    Dresscode looks a mod up by its folder name and ignores it unless that
+    exactly equals the .uplugin inside (the patcher repairs mismatched
+    downloads for the same reason). Building from one derived id -- folder,
+    .uplugin and container all -- makes a mismatch impossible.
+
+    Capped at 40 characters: the id lands in the install path TWICE (folder
+    and container file name), and past that a deep Steam path crosses
+    Windows' 260-character limit -- the game then cannot open the container
+    and the mod silently never appears in the menu (field report: a long
+    "mod - outfit" name; shortening it fixed the mod). Display names are
+    untouched, only the id shrinks.
+    """
+    cleaned = "".join(c for c in name if c.isalnum() or c == "_")
+    return cleaned[:40] or "Mod"
+
+
+def safe_plugin_id(name, used):
+    """plugin_id, kept unique across one drop -- two outfits whose names
+    differ only in punctuation would otherwise collide."""
+    base = plugin_id(name)
+    out, n = base, 1
+    while out.lower() in used:
+        n += 1
+        out = f"{base[:40 - len(str(n))]}{n}"
+    used.add(out.lower())
+    return out
+
+
+# ---------------------------------------------------------------------------
+# The round-trip record. Converting Dresscode -> loose throws real things
+# away -- the registration assets, the registry, the pak's exact shape, every
+# original package name. All of it is small except the packages, and THOSE
+# survive as the paks themselves. So the conversion stores the rest,
+# compressed, inside the dresscode.json it generates; converting back reads
+# it and reproduces the original mod instead of synthesizing a lookalike.
+# Deleting the key (or editing the visible fields) simply falls back to a
+# fresh build.
+# ---------------------------------------------------------------------------
+
+def pack_restore(obj):
+    return base64.b64encode(
+        zlib.compress(json.dumps(obj).encode("utf-8"), 9)).decode("ascii")
+
+
+def unpack_restore(text):
+    """The decoded record, or None for absent/corrupt -- never an error:
+    a mangled record just means a fresh build."""
+    if not text:
+        return None
+    try:
+        return json.loads(zlib.decompress(base64.b64decode(text)))
+    except Exception:
+        return None
+
+
+def restore_matches(rt, meta, outfits):
+    """
+    True when nothing the person can see was changed since the conversion
+    recorded the original -- names, descriptions, pictures. Any edit means
+    they WANT something different, so the build honors the edit instead of
+    the record.
+    """
+    vis = rt.get("visible", {})
+    if (meta["name"], meta["author"], meta["description"],
+            meta["category"], meta["version"]) != \
+            (vis.get("name"), vis.get("author"), vis.get("description"),
+             vis.get("category"), vis.get("version")):
+        return False
+    recorded = {rel: tuple(v) for rel, v in vis.get("outfits", {}).items()}
+    if {o["folder"] for o in outfits} != set(recorded):
+        return False
+    for o in outfits:
+        if (o["name"], o["description"]) != recorded[o["folder"]]:
+            return False
+
+    # Pictures: the file each folder nominates must hash to what was
+    # extracted. A swapped, added or deleted picture is an edit.
+    def md5_of(path):
+        if not path:
+            return None
+        with open(path, "rb") as f:
+            return hashlib.md5(f.read()).hexdigest()
+
+    by_folder = {}
+    for rel, digest in rt.get("pngs", {}).items():
+        folder = rel.rsplit("/", 1)[0] if "/" in rel else "."
+        by_folder[folder] = digest
+    for o in outfits:
+        got = md5_of(o.get("preview"))
+        want = by_folder.get(o["folder"])
+        # A single-outfit mod lives at the root, beside the mod's icon --
+        # with no preview of its own, the outfit picks the icon up as its
+        # folder's image. Seeing the icon twice is not an edit.
+        if got != want and not (want is None and got == rt.get("icon_md5")):
+            return False
+    return md5_of(meta.get("icon")) == rt.get("icon_md5")
+
+
+def library_record(root, lib_utoc, lib_uplugin, variants, optionals,
+                   carried):
+    """
+    A restore record for a library mod whose packages were inlined into a
+    dependent's loose conversion -- the same shape as the dependent's own
+    record, sharing the paks as the package source. Its uncarried
+    packages (registration assets, helpers nothing referenced) ride as
+    verbatim bytes.
+    """
+    toc = iostore.Toc(lib_utoc)
+    packages = rename.read_packages(toc)
+    name_of = {pid: p["name"] for pid, p in packages.items()}
+    hdr_chunk = next(i for i in range(toc.n) if toc.chunk_ids[i][11] == 10)
+    hdr = toc.read(hdr_chunk)
+    info = conheader.parse(hdr)
+    ids = conheader.package_ids(hdr, info)
+    entry_of = {}
+    for j, pid in enumerate(ids):
+        _sz, exp, bun, lo, pad = struct.unpack_from(
+            "<Qiiii", hdr, info["store_off"] + j * 32)
+        entry_of[pid] = dict(
+            exp=exp, bun=bun, lo=lo, pad=pad, order=j,
+            deps=[str(d) for d in
+                  conheader.imported_packages(hdr, info, j)])
+    chunk_order, dir_paths = [], []
+    for i in range(toc.n):
+        t = toc.chunk_ids[i][11]
+        pid = int.from_bytes(toc.chunk_ids[i][:8], "little")
+        chunk_order.append(["" if t == 10 else name_of.get(pid, ""), t])
+        dir_paths.append(toc.paths.get(i, ""))
+    neg_arcs, stored_chunks, stored_bulks = {}, {}, {}
+    for pid, p in packages.items():
+        data = toc.read(p["chunk"])
+        bad = [k for k, pos in enumerate(mkdc.arc_positions(data))
+               if struct.unpack_from("<i", data, pos)[0] == -1]
+        if bad:
+            neg_arcs[p["name"]] = bad
+        if p["name"].lower() in carried:
+            continue
+        stored_chunks[p["name"]] = base64.b64encode(
+            zlib.compress(data, 9)).decode("ascii")
+        blobs = []
+        for i in range(toc.n):
+            cid = toc.chunk_ids[i]
+            if cid[11] in (3, 4) and \
+                    int.from_bytes(cid[:8], "little") == pid:
+                blobs.append([bytes(cid).hex(), base64.b64encode(
+                    zlib.compress(toc.read(i), 9)).decode("ascii")])
+        if blobs:
+            stored_bulks[p["name"]] = blobs
+    with open(os.path.splitext(lib_utoc)[0] + ".pak", "rb") as f:
+        pak_mount, pak_seed, pak_files = pakfile.read_entries(
+            f.read(), iostore.oodle_decompress)
+    try:
+        with open(lib_uplugin, "rb") as f:
+            uplugin_raw = f.read()
+    except OSError:
+        uplugin_raw = b""
+    icon_b64 = None
+    icon_file = os.path.join(os.path.dirname(lib_uplugin), "Resources",
+                             "Icon128.png")
+    if os.path.exists(icon_file):
+        with open(icon_file, "rb") as f:
+            icon_b64 = base64.b64encode(f.read()).decode("ascii")
+    record = dict(
+        plugin=root,
+        mount=toc.mount,
+        cid=str(toc.container_id),
+        hdr_len=len(hdr),
+        uplugin=base64.b64encode(uplugin_raw).decode("ascii"),
+        icon_md5=None,
+        icon_b64=icon_b64,
+        id_order=[name_of.get(pid, "") for pid in ids],
+        entries={name_of[pid]: [e["lo"], e["pad"], e["exp"], e["bun"],
+                                e["deps"]]
+                 for pid, e in entry_of.items() if pid in name_of},
+        chunk_order=chunk_order,
+        dir_paths=dir_paths,
+        neg_arcs=neg_arcs,
+        stored_chunks=stored_chunks,
+        stored_bulks=stored_bulks,
+        pak_mount=pak_mount,
+        pak_seed=str(pak_seed),
+        pak_files=[[p, base64.b64encode(zlib.compress(b, 9)).decode("ascii")]
+                   for p, b in pak_files],
+        variants=variants,
+        optionals=optionals,
+        pngs={},
+        visible={},
+    )
+    toc.close()
+    return record
+
+
+def record_roundtrip(toc, uplugin, plugin, plans, ctx, mod_out, layout,
+                     opt_layout=(), orig=None, libraries=()):
+    """
+    Leave everything beside the written paks that converting BACK will
+    need: a prefilled dresscode.json, each outfit's preview as a PNG a person
+    can see and swap, the plugin icon -- and the opaque restore record.
+
+    `layout` is [(rel_folder, plan)], "." meaning the mod's root folder;
+    `opt_layout` is [(label, toggle)] for the generated Optional paks.
+
+    When library mods were inlined, `toc` is the MERGED container the plans
+    were made against, `orig` the dependent's own, and `libraries` is
+    [(root, utoc, uplugin)] per library. The main record then takes its
+    container SHAPE from the original and covers only its own packages;
+    each library gets a sibling record of the same form, so the way back
+    can rebuild every mod exactly as downloaded.
+    """
+    shape_toc = orig or toc
+    packages = ctx["packages"]
+    roots = ctx.get("roots", (plugin,))
+    by_name = {p["name"].lower(): pid for pid, p in packages.items()}
+    md = moddata.read_mod_metadata(toc.read(ctx["assets"]["metadata"])) \
+        if "metadata" in ctx["assets"] else {}
+    try:
+        with open(uplugin, "rb") as f:
+            uplugin_raw = f.read()
+        up = json.loads(uplugin_raw.decode("utf-8-sig"))
+    except Exception:
+        uplugin_raw, up = b"", {}
+
+    # --- pictures: extract what can be shown, remember what was written ---
+    pngs = {}
+
+    def put_png(folder, stem, chunk):
+        got = texread.extract(toc.read(chunk))
+        if not got:
+            return
+        w, h, bgra = got
+        data = pngfile.encode(w, h, bgra)
+        os.makedirs(folder, exist_ok=True)
+        path = os.path.join(folder, stem + ".png")
+        with open(path, "wb") as f:
+            f.write(data)
+        rel = os.path.relpath(path, mod_out).replace("\\", "/")
+        pngs[rel] = hashlib.md5(data).hexdigest()
+
+    for rel, (outfit, *_rest) in layout:
+        ref = outfit.get("preview_image")
+        chunk = None
+        if ref:
+            pid = by_name.get(ref.split(".")[0].lower())
+            chunk = packages[pid]["chunk"] if pid in packages else None
+        if chunk is not None:
+            put_png(mod_out if rel == "." else os.path.join(mod_out, rel),
+                    "preview", chunk)
+    for rel, _stem, t in opt_layout:
+        ref = t["row"].get("preview_image")
+        pid = by_name.get(ref.split(".")[0].lower()) if ref else None
+        if pid in packages:
+            put_png(os.path.join(mod_out, *rel.split("/")), "preview",
+                    packages[pid]["chunk"])
+
+    icon_md5 = None
+    icon_file = os.path.join(os.path.dirname(uplugin), "Resources",
+                             "Icon128.png")
+    if os.path.exists(icon_file):
+        with open(icon_file, "rb") as f:
+            icon_data = f.read()
+        with open(os.path.join(mod_out, "icon.png"), "wb") as f:
+            f.write(icon_data)
+        icon_md5 = hashlib.md5(icon_data).hexdigest()
+
+    # --- the original container's shape (the dependent's own when plans
+    # were made against a merged container) ---
+    hdr_chunk = next(i for i in range(shape_toc.n)
+                     if shape_toc.chunk_ids[i][11] == 10)
+    hdr = shape_toc.read(hdr_chunk)
+    info = conheader.parse(hdr)
+    ids = conheader.package_ids(hdr, info)
+    main_pids = set(ids)
+    entry_of = {}
+    for j, pid in enumerate(ids):
+        _sz, exp, bun, lo, pad = struct.unpack_from(
+            "<Qiiii", hdr, info["store_off"] + j * 32)
+        entry_of[pid] = dict(
+            exp=exp, bun=bun, lo=lo, pad=pad, order=j,
+            deps=[str(d) for d in
+                  conheader.imported_packages(hdr, info, j)])
+
+    name_of = {pid: p["name"] for pid, p in packages.items()}
+    chunk_order = []
+    for i in range(shape_toc.n):
+        t = shape_toc.chunk_ids[i][11]
+        pid = int.from_bytes(shape_toc.chunk_ids[i][:8], "little")
+        chunk_order.append(["" if t == 10 else name_of.get(pid, ""), t])
+    # The directory index VERBATIM, aligned with chunk_order. Deriving
+    # paths from package names loses the cooker's file-name casing (a
+    # package whose name table says "pink" can sit in the index as
+    # "Pink.uasset"), and a restore must not.
+    dir_paths = [shape_toc.paths.get(i, "") for i in range(shape_toc.n)]
+
+    # Which graph arcs are -1 in the ORIGINAL. The loose conversion must
+    # flatten them to 0 (the ~mods loader refuses them); converting back
+    # puts them back by ordinal.
+    neg_arcs = {}
+    for pid, p in packages.items():
+        if pid not in main_pids:
+            continue                    # a library's; its own record covers it
+        data = toc.read(p["chunk"])
+        bad = [k for k, pos in enumerate(mkdc.arc_positions(data))
+               if struct.unpack_from("<i", data, pos)[0] == -1]
+        if bad:
+            neg_arcs[p["name"]] = bad
+
+    # The registration assets plus the toggle blueprints and material packs
+    # travel as verbatim bytes -- they are Dresscode-only machinery no loose
+    # pak may carry. So does any Optional-pak package whose name table
+    # mentions an overridden base package: the override collapses two names
+    # into one, and no inverse map can pull them apart again.
+    stored_pids = {int.from_bytes(toc.chunk_ids[c][:8], "little")
+                   for c in ctx["assets"].values()}
+    stored_pids |= ctx.get("blob_only", set())
+    for _rel, _stem, t in opt_layout:
+        overridden = {b.lower() for b in t["overrides"]}
+        for pid in t["keep"]:
+            z = zen.ZenPackage(toc.read(packages[pid]["chunk"]))
+            if any(n.lower() in overridden for n in z.names):
+                stored_pids.add(pid)
+    stored_chunks = {
+        name_of[pid]: base64.b64encode(
+            zlib.compress(toc.read(packages[pid]["chunk"]), 9)).decode("ascii")
+        for pid in stored_pids if pid in packages and pid in main_pids}
+
+    # The completeness net: anything neither carried by a pak nor
+    # stored above would be unrecoverable. Seen in the wild: alternative
+    # hair meshes only a toggle actor references, spare icon textures.
+    # Their bulk data rides too -- a mesh has .ubulk.
+    carried = set()
+    for _rel, (_o, _t, _ren, _obj, drop) in layout:
+        dropped = {d.lower() for d in (drop or ())}
+        carried |= {p["name"].lower() for p in packages.values()} - dropped
+    stored_bulks = {}
+    for pid, p in packages.items():
+        if pid not in main_pids or p["name"].lower() in carried \
+                or name_of[pid] in stored_chunks:
+            continue
+        stored_chunks[name_of[pid]] = base64.b64encode(
+            zlib.compress(toc.read(p["chunk"]), 9)).decode("ascii")
+        blobs = []
+        for i in range(toc.n):
+            cid = toc.chunk_ids[i]
+            if cid[11] in (3, 4) and \
+                    int.from_bytes(cid[:8], "little") == pid:
+                blobs.append([bytes(cid).hex(), base64.b64encode(
+                    zlib.compress(toc.read(i), 9)).decode("ascii")])
+        if blobs:
+            stored_bulks[name_of[pid]] = blobs
+
+    # --- the original pak, entry by entry, decompressed ---
+    loose_path = os.path.splitext(shape_toc.path)[0] + ".pak"
+    with open(loose_path, "rb") as f:
+        pak_mount, pak_seed, pak_files = pakfile.read_entries(
+            f.read(), iostore.oodle_decompress)
+
+    # --- inverse rename maps, per variant. Keys in `renames` are lowercased;
+    # the restore must write back EXACT original strings, so recover casing
+    # from the packages themselves and, for external condition meshes, from
+    # the mesh's own name table.
+    case_of = {p["name"].lower(): p["name"] for p in packages.values()}
+    own = set(case_of)
+    variants = {}
+    for rel, (outfit, target, renames, objects, _drop) in layout:
+        mesh_pid = by_name.get(outfit["skeletal_mesh"].split(".")[0].lower())
+        if mesh_pid is not None:
+            for cond in condition_refs(toc, packages[mesh_pid]["chunk"], own):
+                case_of.setdefault(cond.lower(), cond)
+        back = {new.lower(): case_of.get(old, old)
+                for old, new in renames.items() if old != new.lower()}
+        objects_back = {}
+        for pkg_low, m in objects.items():
+            if not m:
+                continue
+            new_pkg = renames.get(pkg_low, pkg_low)
+            objects_back[new_pkg.lower()] = {v: k for k, v in m.items()}
+        variants[rel] = dict(renames_back=back, objects_back=objects_back)
+
+    # The Optional paks hold packages under their OVERRIDE names; the way
+    # back needs each one's true name again -- and the full inverse map,
+    # because kept materials also NAME dropped packages in their strings.
+    # A mesh-carrying optional used its base variant's renames wholesale,
+    # so its inverse is that variant's inverse.
+    rel_of_mesh = {}
+    for rel, (o, *_r) in layout:
+        pid = by_name.get(o["skeletal_mesh"].split(".")[0].lower())
+        if pid is not None:
+            rel_of_mesh[pid] = rel
+    # Keyed by folder so a person reading the record can tell what is what,
+    # but the pak's own name is what finds it again: folders get renamed and
+    # moved, generated file names do not.
+    optionals = {}
+    for opt_rel, stem, t in opt_layout:
+        if t["kind"] == "mesh":
+            v = variants[rel_of_mesh[t["mesh_pid"]]]
+            back = dict(v["renames_back"])
+            objects_back = {k: dict(m) for k, m in v["objects_back"].items()}
+            # Overridden paths hold the REPLACEMENT in this pak.
+            rel_v = rel_of_mesh[t["mesh_pid"]]
+            plan_renames = next(p[2] for r, p in layout if r == rel_v)
+            for base_pkg, repl_pkg in t["overrides"].items():
+                new = plan_renames.get(
+                    base_pkg.lower(),
+                    converted_name(base_pkg, roots, t["costume_root"]))
+                back[new.lower()] = repl_pkg
+            for repl_low, m in t["objects"].items():
+                new_pkg = next((k for k, vv in back.items()
+                                if vv.lower() == repl_low), None)
+                if new_pkg:
+                    objects_back.setdefault(new_pkg, {}).update(
+                        {v2: k2 for k2, v2 in m.items()})
+            optionals[opt_rel] = dict(pak=stem, renames_back=back,
+                                      objects_back=objects_back)
+            continue
+        back = {converted_name(p["name"], roots,
+                               t["costume_root"]).lower(): p["name"]
+                for p in packages.values()}
+        for base_pkg, repl_pkg in t["overrides"].items():
+            back[converted_name(base_pkg, roots,
+                                t["costume_root"]).lower()] = repl_pkg
+        for base_pkg in t["carry"]:
+            back[(converted_name(base_pkg, roots, t["costume_root"])
+                  + PARENT_ASIDE).lower()] = base_pkg
+        back = {k: v for k, v in back.items() if k != v.lower()}
+        objects_back = {}
+        for repl_low, m in t["objects"].items():
+            new_pkg = next((k for k, v in back.items()
+                            if v.lower() == repl_low), None)
+            if new_pkg:
+                objects_back[new_pkg] = {v: k for k, v in m.items()}
+        optionals[opt_rel] = dict(pak=stem, renames_back=back,
+                                  objects_back=objects_back)
+
+    # Snapshot what the template will SHOW (empty names fall back to the
+    # folder), or the untouched-template check can never match.
+    mod_name = md.get("friendly_name") or plugin
+    visible = dict(
+        name=mod_name,
+        author=md.get("created_by", ""),
+        description=md.get("description", ""),
+        category=md.get("category") or "Outfit",
+        version=up.get("VersionName") or "1.0.0",
+        outfits={rel: [o["name"] or (mod_name if rel == "." else rel),
+                       o["description"]]
+                 for rel, (o, *_r) in layout},
+    )
+
+    lib_records = [library_record(root, lib_utoc, lib_up, variants,
+                                  optionals, carried)
+                   for root, lib_utoc, lib_up in libraries]
+    record = dict(
+        plugin=plugin,
+        mount=shape_toc.mount,
+        cid=str(shape_toc.container_id),
+        hdr_len=len(hdr),
+        uplugin=base64.b64encode(uplugin_raw).decode("ascii"),
+        icon_md5=icon_md5,
+        id_order=[name_of.get(pid, "") for pid in ids],
+        entries={name_of[pid]: [e["lo"], e["pad"], e["exp"], e["bun"],
+                                e["deps"]]
+                 for pid, e in entry_of.items() if pid in name_of},
+        chunk_order=chunk_order,
+        dir_paths=dir_paths,
+        neg_arcs=neg_arcs,
+        stored_chunks=stored_chunks,
+        stored_bulks=stored_bulks,
+        pak_mount=pak_mount,
+        pak_seed=str(pak_seed),
+        pak_files=[[p, base64.b64encode(zlib.compress(b, 9)).decode("ascii")]
+                   for p, b in pak_files],
+        variants=variants,
+        optionals=optionals,
+        pngs=pngs,
+        visible=visible,
+        libraries=lib_records,
+    )
+
+    parts = [(rel, None) for rel, _plan in layout]
+    # Normally an outfit's preview has made this folder already; a weapon
+    # mod has no outfit and no preview of its own.
+    os.makedirs(mod_out, exist_ok=True)
+    write_template(mod_out, visible["name"], parts,
+                   prefill=dict(name=visible["name"],
+                                author=visible["author"],
+                                description=visible["description"],
+                                category=visible["category"],
+                                version=visible["version"],
+                                outfits={rel: tuple(v) for rel, v in
+                                         visible["outfits"].items()}),
+                   restore=pack_restore(record),
+                   extras=[(rel.split("/")[-1], str(v.get("pak", "")))
+                           for rel, v in optionals.items()])
+    print("    recorded  dresscode.json + pictures -- converting the folder "
+          "back restores this mod exactly")
+    return 0
+
+
+def _within(child, parent):
+    """True when `parent` is `child` itself or a folder above it."""
+    child = os.path.normcase(os.path.abspath(child))
+    parent = os.path.normcase(os.path.abspath(parent))
+    return child == parent or child.startswith(parent + os.sep)
+
+
+def retouches(outfits, pkgs):
+    """
+    Whether this pak is a stock-texture retouch belonging to one of these
+    outfits -- it overrides game packages the outfit's STOCK materials
+    sample (skin, head), which is how mods shipped before the modular
+    standard: mesh in one pak, retouched stock textures in another.
+
+    Nothing in the mod records the link; only the game's own files show it,
+    so the walk that would carry those materials is what decides.
+    """
+    pids = set(pkgs)
+    for _utoc, opkgs, hdeps, mesh_pid in outfits:
+        if mesh_pid is None:
+            continue
+        merged = dict(opkgs)
+        merged.update(pkgs)
+        meta = {pid: (1, 1, hdeps.get(pid, ())) for pid in merged}
+        if stockgraft.links(merged, meta, {mesh_pid}) & pids:
+            return True
+    return False
+
+
+def classify_companions(outfit_utocs, candidates):
+    """
+    ({outfit utoc: [companion utoc]}, options) for non-outfit paks living
+    OUTSIDE an Optional folder.
+
+    A REQUIRED companion is one the outfit's packages hard-import from and
+    that overrides nothing of theirs -- or a stock-texture retouch, which
+    imports nothing and is recognised by retouches() instead.
+
+    A companion belongs to the outfit it ships beside: one in the outfit's
+    own folder, or in a folder above it (a pak shared by every outfit). A
+    mod offering several versions repeats one pak name in each version's
+    folder with DIFFERENT bytes, so a sibling's copy must not reach here.
+
+    Everything else is an option: it overrides outfit packages (an old-style
+    mask swap), or overrides a rival in the same scope (a choose-one set --
+    the first in load order is the baked default, the rest convert as
+    variants), or touches nothing of the mod's at all (a weapon override
+    riding in the same download -- the variant machinery skips it with a
+    note).
+    """
+    own, deps, outfits = set(), set(), []
+    total = len(outfit_utocs) + len(candidates)
+    for k, u in enumerate(outfit_utocs):
+        progress("sorting companions from options", k, total)
+        toc = iostore.Toc(u)
+        pkgs = rename.read_packages(toc)
+        hdeps = header_deps(toc)
+        mesh, _player = mkdc.find_stock_mesh(pkgs)
+        toc.close()
+        own |= set(pkgs)
+        for pids in hdeps.values():
+            deps.update(pids)
+        outfits.append((u, pkgs, hdeps,
+                        cityhash.package_id(mesh) if mesh else None))
+    infos = []
+    for k, u in enumerate(candidates):
+        progress("sorting companions from options",
+                 len(outfit_utocs) + k, total)
+        toc = iostore.Toc(u)
+        infos.append((u, rename.read_packages(toc)))
+        toc.close()
+    progress("sorting companions from options", total, total)
+
+    options, kind = [], []
+    for u, pkgs in infos:
+        pids = set(pkgs)
+        if pids & own:
+            options.append(u)               # overrides the outfit itself
+        elif pids & deps or retouches(outfits, pkgs):
+            kind.append((u, pids))
+        else:
+            options.append(u)               # nothing of this mod's at all
+    # Load order settled choose-one sets in ~mods; the alphabetical first is
+    # the default the others were alternatives to. Rivalry is judged per
+    # outfit -- two VERSIONS' copies of one pak are not rivals.
+    kind.sort(key=lambda t: os.path.basename(t[0]).lower())
+    comp_map, used = {}, set()
+    for utoc, _pkgs, _hdeps, _mesh in outfits:
+        home = os.path.dirname(utoc)
+        taken, mine = set(), []
+        for u, pids in kind:
+            if not _within(home, os.path.dirname(u)) or pids & taken:
+                continue
+            mine.append(u)
+            taken |= pids
+            used.add(u)
+        comp_map[utoc] = mine
+    options += [u for u, _pids in kind if u not in used]
+    return comp_map, sorted(options)
+
+
+def stack_tree(outfits, extras):
+    """
+    The shared override tree a stackable build leaves at /Game/ paths: every
+    package an extra pak overrides, closed over what those packages import
+    from the mod itself (an extra served from ~mods keeps its original
+    imports, so whatever it names must stay at /Game/ too). Lowercase names.
+    """
+    ext, frontier = set(), []
+    for utoc in extras:
+        toc = iostore.Toc(utoc)
+        for p in rename.read_packages(toc).values():
+            ext.add(p["name"].lower())
+            frontier += [n.lower() for n in
+                         zen.ZenPackage(toc.read(p["chunk"])).names
+                         if n.startswith("/")]
+        toc.close()
+    tocs, base = [], {}
+    for o in outfits:
+        toc = iostore.Toc(o["utoc"])
+        tocs.append(toc)
+        for p in rename.read_packages(toc).values():
+            base.setdefault(p["name"].lower(), (toc, p))
+    for n in sorted(ext):               # the base copies' imports count too
+        if n in base:
+            toc, p = base[n]
+            frontier += [m.lower() for m in
+                         zen.ZenPackage(toc.read(p["chunk"])).names
+                         if m.startswith("/")]
+    while frontier:
+        n = frontier.pop()
+        if n in ext or n not in base:   # not ours -> a stock import, fine
+            continue
+        ext.add(n)
+        toc, p = base[n]
+        frontier += [m.lower() for m in
+                     zen.ZenPackage(toc.read(p["chunk"])).names
+                     if m.startswith("/")]
+    for toc in tocs:
+        toc.close()
+    return ext
+
+
+def write_masks_pak(outfit_utoc, ext, out_dir, base_name):
+    """The ~mods pak serving a stackable build's override tree: the base
+    pak's copies of `ext`, names untouched. Mounted at the content root --
+    the tree may reach outside Character/Player (a mod overriding a common
+    skin detail does). Returns the .utoc path."""
+    def content_path(package_name):
+        if not package_name.lower().startswith("/game/"):
+            raise RuntimeError(
+                f"cannot place {package_name} in a pak")
+        return package_name[len("/Game/"):]
+
+    toc = iostore.Toc(outfit_utoc)
+    packages = rename.read_packages(toc)
+    drop = [p["name"] for p in packages.values()
+            if p["name"].lower() not in ext]
+    os.makedirs(out_dir, exist_ok=True)
+    written = rename.rename_container(
+        toc, {}, "../../../End/Content/", content_path, out_dir, base_name,
+        container_name=base_name, drop=drop, fix_arcs=True, cross_pak=True,
+        quiet=True)
+    with open(os.path.join(out_dir, base_name + ".pak"), "wb") as f:
+        f.write(pakfile.build(pakfile.LOOSE_MOUNT))
+    toc.close()
+    return written
+
+
+def merge_loose(utocs, out_dir, base):
+    """
+    One loose container carrying every package of `utocs` -- an outfit that
+    ships as several REQUIRED paks (the mesh in one, its materials and
+    textures in another) becomes a single container the conversion treats
+    as THE outfit. Package bytes, names, arcs and bulk data are carried
+    unchanged; only the container header and directory are new. The first
+    pak wins a package two of them carry. Returns the merged .utoc path.
+    """
+    tocs = [iostore.Toc(u) for u in utocs]
+    template = tocs[0]
+    merged, order = {}, []
+    for toc in tocs:
+        packages = rename.read_packages(toc)
+        hdr = next(toc.read(i) for i in range(toc.n)
+                   if toc.chunk_ids[i][11] == 10)
+        info = conheader.parse(hdr)
+        entry_meta = {}
+        for j, pid in enumerate(conheader.package_ids(hdr, info)):
+            _sz, exp, bun = struct.unpack_from(
+                "<Qii", hdr, info["store_off"] + j * 32)[:3]
+            entry_meta[pid] = (exp, bun,
+                               conheader.imported_packages(hdr, info, j))
+        bulks = {}
+        for i in range(toc.n):
+            if toc.chunk_ids[i][11] in (3, 4):
+                pid = int.from_bytes(toc.chunk_ids[i][:8], "little")
+                bulks.setdefault(pid, []).append(i)
+        for pid, pkg in packages.items():
+            if pid in merged:
+                continue
+            exp, bun, deps = entry_meta.get(pid, (1, 1, []))
+            merged[pid] = dict(name=pkg["name"], toc=toc, data=toc.read(
+                pkg["chunk"]), exp=exp, bun=bun, deps=list(deps),
+                bulks=bulks.get(pid, []))
+            order.append(pid)
+
+    cid = cityhash.package_id(base)
+    hdr_out = struct.pack("<QIIIIQ", cid, len(order), 0, 0, 8, 0xC1640000)
+    hdr_out += struct.pack("<I", len(order))
+    hdr_out += b"".join(p.to_bytes(8, "little") for p in order)
+    store = bytearray()
+    for j, pid in enumerate(order):
+        rec = merged[pid]
+        store += struct.pack("<QiiII", len(rec["data"]), rec["exp"],
+                             rec["bun"], j, 0xFFFFFFFF)
+        store += struct.pack("<II", 0, 0)
+    for j, pid in enumerate(order):
+        rec = merged[pid]
+        view = j * 32 + 24
+        if rec["deps"]:
+            struct.pack_into("<II", store, view, len(rec["deps"]),
+                             len(store) - view)
+            store += struct.pack(f"<{len(rec['deps'])}Q", *rec["deps"])
+    hdr_out += struct.pack("<I", len(store)) + store
+    if len(hdr_out) % 65536:
+        hdr_out += b"\0" * (65536 - len(hdr_out) % 65536)
+
+    comp = next((m for m, n in enumerate(template.methods)
+                 if n.lower() == "oodle"), None)
+
+    def blocks_of(payload):
+        return rename.pack_blocks(payload, template.block_size, comp)
+
+    chunks = [dict(id=cid.to_bytes(8, "little") + b"\0\0\0\x0a",
+                   blocks=blocks_of(hdr_out), size=len(hdr_out))]
+    payloads = [hdr_out]
+    paths = []
+    for pid in order:
+        rec = merged[pid]
+        # Plugin-rooted names occur when merging Dresscode containers with
+        # their libraries; the merged container is a conversion INPUT only,
+        # so the index path just has to be self-consistent.
+        rel = rec["name"][len("/Game/"):] \
+            if rec["name"].lower().startswith("/game/") \
+            else rec["name"].lstrip("/")
+        chunks.append(dict(id=pid.to_bytes(8, "little") + b"\0\0\0\x02",
+                           blocks=blocks_of(rec["data"]),
+                           size=len(rec["data"])))
+        payloads.append(rec["data"])
+        paths.append((rel + ".uasset", len(chunks) - 1))
+        for i in rec["bulks"]:
+            data = rec["toc"].read(i)
+            chunks.append(dict(id=bytes(rec["toc"].chunk_ids[i]),
+                               blocks=blocks_of(data), size=len(data)))
+            payloads.append(data)
+            ext = ".uptnl" if rec["toc"].chunk_ids[i][11] == 4 else ".ubulk"
+            paths.append((rel + ext, len(chunks) - 1))
+
+    directory = dirindex.build_dir_index("../../../End/Content/", paths)
+    body, ucas, _offlen, block_table = writer.build_container(
+        template, chunks, template.block_size)
+    head = bytearray(writer.build_toc_header(
+        template, len(chunks), len(block_table), len(directory),
+        template.block_size))
+    struct.pack_into("<Q", head, 0x38, cid)
+    metas = b"".join(hashlib.sha1(p).digest() + b"\0" * 12 + b"\x01"
+                     for p in payloads)
+    os.makedirs(out_dir, exist_ok=True)
+    with open(os.path.join(out_dir, base + ".utoc"), "wb") as f:
+        f.write(bytes(head) + bytes(body) + directory + metas)
+    with open(os.path.join(out_dir, base + ".ucas"), "wb") as f:
+        f.write(ucas)
+    with open(os.path.join(out_dir, base + ".pak"), "wb") as f:
+        f.write(pakfile.build(pakfile.LOOSE_MOUNT))
+    for toc in tocs:
+        toc.close()
+    return os.path.join(out_dir, base + ".utoc")
+
+
+def progress(label, done, total):
+    """One updating console line -- enough to show life during a scan that
+    reads hundreds of megabytes. Piped output gets none of it."""
+    if not sys.stdout.isatty():
+        return
+    if done >= total:
+        print("\r" + " " * 70 + "\r", end="", flush=True)
+    else:
+        print(f"\r      {label} ... {done + 1}/{total}", end="", flush=True)
+
+
+def preflight_meshes(utocs, assume_yes, source_hint):
+    """
+    Pre-V1.005 meshes crash the game the moment they load, and a conversion
+    carries meshes exactly as they are. Catch that BEFORE converting -- the
+    classic mistake is converting a mod fresh from an archive that predates
+    the patch -- and offer to run the patcher right here, backups kept,
+    same as patch.py --path. Under --yes there is nobody to ask, so it
+    warns and converts as-is: automated runs must stay byte-faithful.
+    """
+    global _INTERACTED
+    import patch as patcher
+    stale = []
+    for k, u in enumerate(utocs):
+        progress("checking meshes", k, len(utocs))
+        try:
+            state, _n, _msg = patcher.mod_status(u)
+        except Exception:
+            continue
+        if state == "needs_fix":
+            stale.append(u)
+    progress("checking meshes", len(utocs), len(utocs))
+    if not stale:
+        return
+    n = len(stale)
+    print()
+    print(f"  !! {n} pak{'s' if n != 1 else ''} here still "
+          f"carr{'y' if n != 1 else 'ies'} PRE-V1.005 meshes. Converted "
+          "as-is, the outfit")
+    print("     crashes the game the moment it loads.")
+    if assume_yes:
+        print("     --yes given: converting as-is. To fix, run")
+        print(f'       python patch.py --path "{source_hint}" --all')
+        print("     and convert again -- or patch the converted output.")
+        return
+    _INTERACTED = True
+    try:
+        ans = input("     Patch them now, then convert? (backups are "
+                    "kept)  [Y/n] ").strip().lower()
+    except EOFError:
+        ans = "n"
+    if ans in ("", "y", "yes"):
+        backups = os.path.join(source_hint, "_patch_backups")
+        for u in stale:
+            name = os.path.splitext(os.path.basename(u))[0]
+            patcher.patch_mod(name, u, backup_dir=backups)
+        print("     patched -- converting the fixed files")
+    else:
+        print("     converting as-is -- patch before playing, or the game "
+              "will crash")
+
+
+def layout_problem(source, mods):
+    """Why loose_layout said no -- in words a person can act on. None when
+    this drop is not the loose flow's problem (a Dresscode mod, say)."""
+    if not mods or any(up for _u, up in mods):
+        return None
+    outfits = [u for u, _ in mods if carries_outfit(u)]
+    if not outfits:
+        # A folder of weapon paks alone is a mod in its own right and never
+        # reaches here; mixed with anything else, there is no telling which
+        # half is the real mod.
+        if any(is_weapon_pak(u) for u, _ in mods):
+            return ("this folder mixes weapon paks with paks that are "
+                    "neither a weapon nor a costume. Drop the weapon paks "
+                    "on their own, or add the costume pak they belong to.")
+        return ("none of these paks carries a costume -- the mod's MAIN "
+                "pak is missing from the folder. Drop the whole mod: the "
+                "main pak plus its option paks. (Option paks on their own "
+                "have nothing to attach to.)")
+    root = os.path.normcase(os.path.abspath(source))
+    loose_mains = [u for u in outfits if os.path.normcase(
+        os.path.dirname(os.path.abspath(u))) == root]
+    if len(outfits) > 1 and loose_mains:
+        return ("several outfit paks sit at the top of the dropped folder "
+                "-- put them all in one subfolder (\"Main\") or give each "
+                "its own, then drop again.")
+    return ("this folder's shape is not one the converter knows -- see "
+            "the README's \"how to organize the folder\" section.")
+
+
+def check_part_names(extras):
+    """
+    Entries name an add-on pak by its stem, so two DIFFERENT paks sharing
+    one would silently resolve to whichever was read last. Identical copies
+    are already down to one by here (see dedupe_paks), so anything left
+    over is a real clash. Checked before the template is written, not just
+    when it is read back, so the ambiguous list is never handed over.
+    """
+    seen, clash = set(), set()
+    for u in extras:
+        stem = os.path.splitext(os.path.basename(u))[0].lower()
+        (clash if stem in seen else seen).add(stem)
+    if clash:
+        raise RuntimeError(
+            "more than one add-on pak is called "
+            + ", ".join(sorted(clash))
+            + ". Rename them apart (or delete the copies you do not want) "
+              "and drop the folder again.")
+
+
+def match_outfit(want, outfits):
+    """The outfit `want` names -- by its menu name, its folder, or the last
+    part of that folder, whichever the person had in front of them. Returns
+    the folder, which is what identifies an outfit; None if no such costume.
+    """
+    low = str(want).strip().lower()
+    for o in outfits:
+        if low in (str(o["name"]).lower(), str(o["folder"]).lower(),
+                   str(o["folder"]).split("/")[-1].lower()):
+            return o["folder"]
+    return None
+
+
+def resolve_variants(meta, extras, outfits=()):
+    """
+    [(row name, [utoc, ...], only_on)] from the template's "variants"
+    section -- or one row per extra when the section is absent.
+
+    `only_on` is None when an entry goes on every outfit, else the folders
+    of the ones its "outfit" field names -- a mod whose add-on suits only
+    some of its outfits says so there.
+
+    Also says whether the person edited the section away from the generated
+    default, which must override an exact-restore record: an edit means
+    they WANT the change.
+    """
+    def stem(u):
+        return os.path.splitext(os.path.basename(u))[0]
+
+    check_part_names(extras)
+    by_stem = {stem(u).lower(): u for u in extras}
+    cfg = meta.get("variants")
+    default = [(toggles.label_of(u), [u], None) for u in extras]
+    if cfg is None:
+        return default, False
+    if not isinstance(cfg, list):
+        raise RuntimeError(f'{TEMPLATE}: "variants" must be a list')
+    out = []
+    for k, entry in enumerate(cfg):
+        if not isinstance(entry, dict):
+            raise RuntimeError(f'{TEMPLATE}: variant {k + 1} must be an '
+                               'object with "name" and "parts"')
+        utocs = []
+        for s in entry.get("parts") or []:
+            key = os.path.splitext(str(s))[0].lower()
+            u = by_stem.get(key)
+            if not u:
+                raise RuntimeError(
+                    f'{TEMPLATE}: variant {k + 1} names a pak that is not '
+                    f'there: "{s}". The paks are: '
+                    + ", ".join(sorted(by_stem)) + ".")
+            utocs.append(u)
+        if not utocs:
+            continue                    # an empty entry is just skipped
+        want = entry.get("outfit")
+        only_on = None
+        # "outfit" aims a costume add-on at particular costumes. A weapon
+        # mod has none -- its tiles hang off the character, not a costume --
+        # so the field is ignored there rather than refused.
+        if not outfits:
+            want = None
+        if want not in (None, "", []):
+            only_on = []
+            for w in (want if isinstance(want, list) else [want]):
+                folder = match_outfit(w, outfits)
+                if folder is None:
+                    raise RuntimeError(
+                        f'{TEMPLATE}: variant {k + 1} is set to go on an '
+                        f'outfit that is not there: "{w}". The outfits '
+                        "are: " + ", ".join(str(o["name"]) for o in outfits)
+                        + ".")
+                only_on.append(folder)
+        name = str(entry.get("name") or "").strip() \
+            or " + ".join(toggles.label_of(u) for u in utocs)
+        out.append((name, utocs, only_on))
+    # Structural comparison only, as SETS -- display names differ by which
+    # conversion wrote the template, and the two writers list the same
+    # entries in different orders; a restore reproduces the original's
+    # names and order regardless. Only recomposition means they want a
+    # different mod: entries added, removed, made of different parts, or
+    # aimed at different costumes.
+    def shape(entry):
+        _name, us, only_on = entry
+        return (tuple(sorted(u.lower() for u in us)),
+                tuple(sorted(only_on)) if only_on else ())
+
+    edited = {shape(e) for e in out} != {shape(e) for e in default}
+    return out, edited
+
+
+def weapon_tiles_back(toc, packages):
+    """
+    ([(label, renames, objects, keep)], elsewhere) turning the weapons-menu
+    tiles THIS TOOL built back into ordinary override paks.
+
+    `elsewhere` names the rows laid out some other way -- an author's own
+    weapon mod keeps its files under its plugin's own folders. Those are
+    not this function's to place; plan_variants converts them like any
+    other row, relocating them under the weapon they stand in for.
+
+    A tile lives under /<Plugin>/Weapons/<Safe>/ with the stock weapon's
+    own path kept as the tail, so mapping the tail onto
+    /Game/Character/Weapon/ puts every material and texture back over the
+    package it was overriding -- which is all a recolour pak ever was.
+
+    The tile's MESH is the stock weapon carried in so Dresscode has
+    something to show. A pak needs it only when the mod actually replaced
+    it, so it rides along only when its bytes differ from the game's.
+    """
+    lists = moddata.weapon_lists(toc, weapons.MOD_TYPE_WEAPON)
+    if not lists:
+        return [], []
+    by_low = {p["name"].lower(): p for p in packages.values()}
+    out, unmapped = [], []
+    for i in lists:
+        for row in moddata.read_outfits(toc.read(i)):
+            label = str(row.get("name") or "").strip()
+            root = str(row.get("skeletal_mesh") or "").split(".")[0]
+            mesh = by_low.get(root.lower())
+            if not mesh:
+                unmapped.append(label or root)
+                continue
+            under = {p["name"]: p["name"][len(root) + 1:]
+                     for p in packages.values()
+                     if p["name"].lower().startswith(root.lower() + "/")}
+            # Every tail starts with the weapon's own folder, which names
+            # the stock mesh: WE0002_15_Tifa_Foo -> .../Model/WE0002_15.
+            # A tile that replaced the model outright has no tails at all,
+            # and records the weapon in its own name instead.
+            folder = (sorted(under.values())[0].split("/")[0] if under
+                      else weapons.folder_of_tile(root))
+            if not folder:
+                unmapped.append(label or root)
+                continue
+            bits = folder.split("_")
+            if len(bits) < 2:
+                unmapped.append(label or folder)
+                continue
+            obj = f"{bits[0]}_{bits[1]}"
+            stock_mesh = f"{weapons.WEAPON_ROOT_PROPER}{folder}/Model/{obj}"
+            renames = {n.lower(): weapons.WEAPON_ROOT_PROPER + tail
+                       for n, tail in under.items()}
+            keep = set(under)
+            objects = {}
+            if weapons.replaces_stock_mesh(toc.read(mesh["chunk"]),
+                                           stock_mesh):
+                renames[mesh["name"].lower()] = stock_mesh
+                keep.add(mesh["name"])
+                # Its export was given a digit-free name for the menu; the
+                # stock package is referenced by the original one.
+                tile_obj = str(row.get("skeletal_mesh") or "").split(".")[-1]
+                objects[mesh["name"].lower()] = {tile_obj: obj}
+            if not keep:
+                unmapped.append(label or folder)
+                continue
+            out.append((label or folder, renames, objects, keep))
+    return out, unmapped
+
+
+def note_mixed_shapes(extras, variant_folders):
+    """
+    A mod may use BOTH shapes: whole costumes in Variants, add-on paks in
+    Optional. Every add-on is then offered on every costume, so the menu
+    gets a row per costume plus one per costume-and-add-on.
+    """
+    if not (variant_folders and extras):
+        return
+    print()
+    print(f"      {len(variant_folders)} costumes in Variants\\ and "
+          f"{len(extras)} add-on pak{'s' if len(extras) != 1 else ''} in "
+          "Optional\\:")
+    print("      each add-on is offered on each costume.")
+
+
+def loose_to_dresscode(source, mods, assume_yes=False):
+    """
+    The template flow for a dropped pak mod. Returns an exit code, or
+    None when `source` is not a pak mod root this direction understands.
+    """
+    layout = loose_layout(source, mods)
+    if layout is None:
+        problem = layout_problem(source, mods)
+        if problem:
+            print()
+            print(f"  {os.path.basename(source)}: {problem}")
+            return 1
+        return None
+    mod_name, parts, extras, companions, variant_folders = layout
+    comp_map = {}
+    if companions:
+        # Folder names said "companion"; the packages have the last word.
+        comp_map, options = classify_companions(
+            [u for _rel, u in parts], companions)
+        companions = sorted({u for us in comp_map.values() for u in us})
+        extras = sorted(extras + options)
+    check_part_names(extras)
+
+    if not os.path.exists(os.path.join(source, TEMPLATE)):
+        note_mixed_shapes(extras, variant_folders)
+        # A weapon pak needs no combining decision -- its tile stands alone
+        # in the weapons menu -- so those entries are written ready-made.
+        # The set of weapons a pak covers, not just whether it is one: a
+        # single pak routinely does a character's whole set, one tile each.
+        flagged = [(toggles.label_of(u),
+                    os.path.splitext(os.path.basename(u))[0],
+                    weapon_tiles_in(u)) for u in extras]
+        path = write_template(source, mod_name, parts, extras=flagged)
+        n_combo = sum(1 for _l, _s, w in flagged if not w)
+        n_weap = len(flagged) - n_combo
+        n_tiles = sum(len(w) for _l, _s, w in flagged if w)
+        print()
+        print(f"  {mod_name}  (pak -> Dresscode)")
+        made = (f"{len(parts)} outfit{'s' if len(parts) > 1 else ''}"
+                if parts else
+                f"{n_tiles} weapon{'s' if n_tiles != 1 else ''}, no costume")
+        print(f"      created  {os.path.basename(path)}  ({made})")
+        if n_weap and parts:
+            print()
+            print(f"      {n_weap} weapon pak{'s' if n_weap != 1 else ''} "
+                  f"set up as WEAPONS-menu tile{'s' if n_weap != 1 else ''}"
+                  " -- nothing to do.")
+        elif n_weap:
+            print()
+            print(f"      The menu is already written: {n_tiles} "
+                  f"WEAPONS-menu tile{'s' if n_tiles != 1 else ''}.")
+            print("      Rename them if you like -- the stock weapon tile "
+                  "switches them off.")
+        if n_combo:
+            print()
+            print(f"      This mod has {n_combo} add-on pak"
+                  f"{'s' if n_combo != 1 else ''}, not in the menu yet.")
+            print(f"      Open {TEMPLATE} and list the combinations you "
+                  "wear (one entry")
+            print("      = one tile), or set \"stackable\": true to keep "
+                  "the parts as")
+            print("      drop-in files. The file explains both.")
+        if flagged:
+            print()
+        print("      NOTHING IS CONVERTED YET -- this first drop only "
+              "writes")
+        print(f"      {TEMPLATE}. Drop the same folder on convert.py again")
+        print("      to build the mod. (Names, author and pictures are")
+        print(f"      optional -- {TEMPLATE} explains.)")
+        return 0
+
+    meta, outfits = read_template(source, parts)
+    variants, variants_edited = resolve_variants(meta, extras, outfits)
+    rt = unpack_restore(meta.get("restore"))
+    # A record with nothing to rebuild FROM cannot restore anything: a mod
+    # whose every row was a weapon tile this tool built hands those back as
+    # override paks, which the fresh build turns into the same tiles again.
+    restorable = bool(rt and (rt.get("variants") or rt.get("optionals")))
+    exact = restorable and restore_matches(rt, meta, outfits) \
+        and not variants_edited
+    plugin = rt["plugin"] if exact else plugin_id(meta["name"])
+    # Several outfits, each with its own toggles, in one mod make a menu
+    # where nothing says which toggle belongs to which outfit -- so each
+    # outfit becomes a Dresscode mod of its own. A restore is exempt: it
+    # reproduces the original mod, whatever shape that was.
+    #
+    # Variants are declared to belong together, so they stay one mod with a
+    # tile each -- and add-on paks alongside them are offered on every
+    # variant, which is the one case where naming the toggle is unambiguous.
+    split = not exact and len(outfits) > 1 and not variant_folders
+    # A weapon mod's rows ARE its variants -- nothing about it is per-outfit,
+    # so the lines below count weapons instead. One entry is not one tile:
+    # a pak covering a character's whole set becomes a tile per weapon.
+    gun_tiles = ([sum(len(weapon_tiles_in(u)) for u in us)
+                  for _n, us, _o in variants] if not outfits else [])
+    guns = sum(gun_tiles)
+    print()
+    print(f"  {meta['name']}  (pak -> Dresscode"
+          + (f", {len(outfits)} outfits" if len(outfits) > 1 else "")
+          + (f", {guns} weapon{'s' if guns != 1 else ''}" if guns else "")
+          + ")")
+    if exact:
+        print("      this folder came from a Dresscode mod -- restoring "
+              "the original exactly")
+    elif rt is not None:
+        print("      edited since it was converted -- building fresh from "
+              "the changed values")
+    if meta["author"]:
+        print(f"      by {meta['author']}")
+    icon = (os.path.basename(meta["icon"]) if meta["icon"]
+            else "none (optional -- a picture next to dresscode.json)")
+    print(f"      thumbnail: {icon}")
+    if split:
+        print(f"      -> {os.path.join(os.path.dirname(source), f'{plugin} (Dresscode)')}{os.sep}"
+              f"   ({len(outfits)} separate mods, one per outfit)")
+    else:
+        print(f"      -> {os.path.join(os.path.dirname(source), f'{plugin} (Dresscode)', plugin)}{os.sep}"
+              f"   (goes into End\\Mods)")
+    for k, o in enumerate(outfits):
+        pic = (os.path.basename(o["preview"]) if o["preview"]
+               else "no picture (optional)")
+        print(f"      {k + 1}. {o['name']}   [{pic}]")
+    for k, (name, _us, _only) in enumerate(variants if guns else ()):
+        n_t = gun_tiles[k]
+        print(f"      {k + 1}. {name}   "
+              + (f"[{n_t} weapons]" if n_t != 1 else "[weapon]"))
+    # Aiming a weapon entry at a costume reads as if it would work.
+    aimed = [n for n, us, only in variants
+             if only and all(weapon_tiles_in(u) for u in us)]
+    if aimed:
+        print(f'      note: "outfit" does nothing on a weapon entry '
+              f'({aimed[0]}) -- the WEAPONS menu is its own,')
+        print("      and a weapon tile stays on whatever the character "
+              "is wearing")
+    # Stackable is about keeping add-ons as drop-in files ALONGSIDE a costume
+    # in the menu. With no costume there is nothing left in the menu to keep.
+    stackable = (meta["stackable"] and bool(extras) and not exact
+                 and bool(outfits))
+    if companions and not exact:
+        n = len(companions)
+        print(f"      + {n} required companion pak{'s' if n != 1 else ''} "
+              + ("merged into the outfits they ship with"
+                 if len(outfits) > 1 else "merged into the outfit"))
+    if extras and not exact and not guns:      # weapons are listed above
+        if stackable:
+            print(f"      + {len(extras)} extra paks stay COMBINABLE: the "
+                  "shared masks ride in ~mods")
+            print("        and the original Optional paks keep working on "
+                  "top of the Dresscode outfit")
+        elif not variants:
+            # Said out loud, because "the parts are in the folder" and "the
+            # parts are in the mod" look identical once the build succeeds.
+            print(f"      + the {len(extras)} add-on pak"
+                  f"{'s' if len(extras) != 1 else ''} are NOT in this mod --")
+            print(f"        you have not said which outfits to make. Open "
+                  f"{TEMPLATE}:")
+            print("        list the combinations you wear, or set")
+            print("        \"stackable\": true to keep them as drop-in files "
+                  "for ~mods.")
+        else:
+            combos = sum(1 for _n, us, _cs in variants if len(us) > 1)
+            print(f"      + {len(variants)} tile"
+                  f"{'s' if len(variants) != 1 else ''} to build from "
+                  f"{len(extras)} add-on pak{'s' if len(extras) != 1 else ''}"
+                  + (f" ({combos} combining several)" if combos else ""))
+    # Even an exact restore rebuilds from these bytes: a 1.004-era mod
+    # restored is a 1.004-era mod, and it crashes just the same.
+    preflight_meshes([u for _rel, u in parts] + list(extras)
+                     + list(companions), assume_yes, source)
+    print()
+    if not confirm(assume_yes, max(len(outfits), guns)):
+        print("  Nothing converted.")
+        return 0
+
+    # A wrapper folder, so the output can never land on (and overwrite) an
+    # existing copy of the mod -- roundtrips make that collision routine. The
+    # folder INSIDE keeps the exact plugin name Dresscode requires.
+    out_root = os.path.join(os.path.dirname(source), f"{plugin} (Dresscode)")
+    merge_tmp = None
+    if exact:
+        # Extras are found by their pak's name, wherever the folder ended up.
+        by_pak = {os.path.splitext(os.path.basename(u))[0].lower(): u
+                  for u, _up in mods}
+        opt = {rel: by_pak.get(str(v.get("pak", "")).lower())
+               for rel, v in (rt.get("optionals") or {}).items()}
+        parts_by_folder = {o["folder"]: o["utoc"] for o in outfits}
+        roots = [mkdc.restore(rt, parts_by_folder, out_root, optionals=opt)]
+        # Library mods inlined on the way out come back as themselves --
+        # every mod exactly as downloaded, from the same paks.
+        for lib in rt.get("libraries") or []:
+            roots.append(mkdc.restore(lib, parts_by_folder, out_root,
+                                      optionals=opt))
+    else:
+        if companions:
+            # The outfit cannot render without them, so from here on the
+            # merged container IS the outfit.
+            merge_tmp = os.path.join(out_root, "_merge_tmp")
+            for k, o in enumerate(outfits):
+                mine = comp_map.get(o["utoc"]) or []
+                if mine:
+                    o["utoc"] = merge_loose([o["utoc"]] + mine, merge_tmp,
+                                            f"Merged{k + 1}_P")
+        ex = [] if stackable else variants
+        ext = stack_tree(outfits, extras) if stackable else ()
+        used, roots = set(), []
+        # One plugin per outfit means every note repeats per plugin, and the
+        # notes are about the paks, not the outfit. Say each once.
+        said = set()
+
+        def once(msg):
+            if msg not in said:
+                said.add(msg)
+                print(msg)
+
+        for o in (outfits if split else [None]):
+            if split:
+                sub_name = f"{meta['name']} - {o['name']}"
+                sub = safe_plugin_id(sub_name, used)
+                roots.append(mkdc.build(dict(meta, name=sub_name), [o],
+                                        sub, out_root, extras=ex,
+                                        external=ext, say=once,
+                                        weapon_tiles=o is outfits[0]))
+            else:
+                roots.append(mkdc.build(meta, outfits, plugin, out_root,
+                                        extras=ex, external=ext))
+    mods_dir = None
+    if stackable:
+        # One masks pak serves every outfit -- they share the tree. The
+        # extras ride along untouched, so the folder is a complete kit.
+        mods_dir = os.path.join(out_root, "Put in ~mods")
+        masks_base = f"Z8_{plugin}_MASKS_P"
+        written = write_masks_pak(outfits[0]["utoc"], ext, mods_dir,
+                                  masks_base)
+        problems = rename.verify(written)
+        if problems:
+            print()
+            print("  PROBLEM -- the masks pak is not sound, do not "
+                  "install it:")
+            for p in problems[:8]:
+                print(f"    {p}")
+            return 1
+        print(f"    written  {masks_base}  "
+              f"({len(ext)} shared files, verified)")
+        for utoc in extras:
+            stem = os.path.splitext(utoc)[0]
+            for suffix in (".utoc", ".ucas", ".pak"):
+                if os.path.exists(stem + suffix):
+                    shutil.copy2(stem + suffix, mods_dir)
+        print(f"    copied   {len(extras)} original Optional paks beside it")
+    if merge_tmp:
+        shutil.rmtree(merge_tmp, ignore_errors=True)
+    for root in roots:
+        name = os.path.basename(root)
+        written = os.path.join(root, "Content", "Paks", "WindowsNoEditor",
+                               f"{name}End-WindowsNoEditor.utoc")
+        live = sys.stdout.isatty()
+        if live:
+            print(f"    checking {os.path.basename(written)} ...",
+                  end="", flush=True)
+        problems = rename.verify(written)
+        if live:
+            print("\r" + " " * 70 + "\r", end="", flush=True)
+        if problems:
+            print()
+            print("  PROBLEM -- the converted mod is not sound, "
+                  "do not install it:")
+            for p in problems[:8]:
+                print(f"    {p}")
+            return 1
+        print(f"    checked  {os.path.basename(written)} is internally "
+              "consistent")
+    print()
+    if len(roots) > 1:
+        print(f"  Done. Copy the {len(roots)} folders from inside "
+              f"\"{os.path.basename(out_root)}\" into the game's End\\Mods")
+        print("  folder (where Dresscode itself is installed):")
+        for root in roots:
+            print(f"    {os.path.basename(root)}")
+    else:
+        print(f"  Done. Copy the \"{os.path.basename(roots[0])}\" folder "
+              f"from inside \"{os.path.basename(out_root)}\" into the")
+        print("  game's End\\Mods folder (where Dresscode itself is "
+              "installed).")
+    if mods_dir:
+        print(f"  Then copy the FILES from \"{os.path.basename(mods_dir)}\" "
+              "into Content\\Paks\\~mods --")
+        print("  the masks pak always, plus whichever Optional paks you "
+              "want active. They combine freely.")
+    return 0
+
+
+def folder_name(text):
+    """`text` reduced to something Windows accepts as a folder name."""
+    cleaned = "".join(" " if c in '<>:"/\\|?*' or ord(c) < 32 else c
+                      for c in text)
+    return " ".join(cleaned.split()).strip(" .")
+
+
+def prepare_to_loose(toc, uplugin, out_base=None):
+    """
+    Plan a mod's conversions and print their summaries. Returns a list of
+    zero-argument callables, one per variant -- planning is separated from
+    writing so a multi-mod drop can show everything before one confirmation.
+
+    A single-outfit mod writes straight into "<Mod> (pak)". Variants
+    each get a sub-folder inside it, named for the outfit, and every variant
+    keeps the same file name -- they all replace the same stock costume, so
+    installing one over another in ~mods swaps them cleanly.
+
+    `out_base` overrides where the output folder goes: beside the mod's own
+    folder normally, but a mod unpacked from an archive lives in a temp
+    folder, so its output belongs beside the archive instead.
+    """
+    plugin = os.path.splitext(os.path.basename(uplugin))[0]
+
+    # Undeclared library dependencies (a shared skin mod): inline their
+    # packages by planning over a MERGED container, so cross-plugin imports
+    # become internal and every rewrite fixes them like any other.
+    libraries, merged_toc, merge_tmp = [], None, None
+    lib_roots = foreign_roots(toc, plugin)
+    found = {}
+    if lib_roots:
+        found, missing = locate_libraries(lib_roots, uplugin)
+        # A missing library is how the mod ITSELF behaves when the other
+        # mod is not installed -- convert what is here, say what is not.
+        for root in missing:
+            print(f"  note: {plugin} references {root}, which is not here "
+                  "-- converting without it, as the game would run it")
+        # Repeated at the END too (see below). At the top of a long
+        # conversion this line scrolls away, and what the player sees for it
+        # is a grey checkerboard costume with nothing to explain why.
+    if found:
+        print(f"  {plugin} needs "
+              f"{'these mods' if len(found) > 1 else 'another mod'}, and "
+              f"{'they ride' if len(found) > 1 else 'it rides'} along:")
+        for root, (_utoc, _up, where) in found.items():
+            print(f"      + {root}   ({where})")
+        merge_tmp = tempfile.mkdtemp(prefix="dcdep-")
+        merged_utoc = merge_loose(
+            [toc.path] + [utoc for utoc, _up, _w in found.values()],
+            merge_tmp, f"{plugin}Merged_P")
+        merged_toc = iostore.Toc(merged_utoc)
+        libraries = [(root, utoc, up)
+                     for root, (utoc, up, _w) in found.items()]
+        orig_toc, toc = toc, merged_toc
+    else:
+        orig_toc = toc
+
+    plans, toggles, ctx = plan_variants(
+        toc, plugin, extra_roots=tuple(r for r, _u, _p in libraries))
+
+    source_root = os.path.abspath(os.path.dirname(uplugin)).rstrip("\\/")
+    mod_out = (os.path.join(out_base, os.path.basename(source_root) + " (pak)")
+               if out_base else source_root + " (pak)")
+    base = f"{plugin}_P"
+
+    # One scannable block per mod: what it is, where it goes, and the variant
+    # list -- per-variant paths and package details would drown a multi-mod
+    # drop. Characters are named per variant only when they differ.
+    n = len(plans)
+    chars = [o["player_type"].split("::")[-1].title() for o, *_ in plans]
+    mixed = len(set(chars)) > 1
+    guns = [o.get("weapon") for o, *_ in plans]
+    # Tiles this tool built are handed back further down rather than planned,
+    # so a mod made only of them plans nothing and still has content.
+    weapon_backs, _elsewhere = weapon_tiles_back(toc, ctx["packages"])
+    own_tiles = len(weapon_backs) if not n else 0
+    head = f"  {plugin}  (Dresscode"
+    if n > 1:
+        head += f", {n} " + ("weapons" if all(guns) else "outfits")
+    elif own_tiles:
+        head += f", {own_tiles} weapon{'s' if own_tiles != 1 else ''}"
+    if chars and not mixed:
+        what = ("weapon" if all(guns) else
+                "outfit and weapon" if any(guns) else "standard outfit")
+        head += f", replaces {chars[0]}'s {what}"
+    print()
+    print(head + ")")
+    print(f"      -> {mod_out}{os.sep}")
+
+    runners, used, layout = [], set(), []
+    for k, (outfit, target, renames, objects, drop) in enumerate(plans):
+        if n == 1:
+            out_dir, label = mod_out, os.path.basename(mod_out)
+        else:
+            # Named for the outfit; authors reuse display names across
+            # variants, so a clash falls back to the mesh's own name -- and
+            # when even the meshes share a name (four rows all called the
+            # same, every mesh "PC0003_00"), a counter. Without it, variants
+            # silently overwrote each other's folders.
+            sub = folder_name(outfit["name"])
+            if not sub or sub.lower() in used:
+                mesh_leaf = outfit["skeletal_mesh"].split(".")[-1]
+                sub = folder_name(f"{outfit['name']} ({mesh_leaf})".strip())
+            stem, dup = sub, 1
+            while sub.lower() in used:
+                dup += 1
+                sub = f"{stem} {dup}"
+            used.add(sub.lower())
+            # Under Variants\, which is what the folder means on the way
+            # back: several costumes that belong to ONE mod. Plain
+            # subfolders would come back as separate mods, one per outfit,
+            # which is not the mod that went in.
+            out_dir = os.path.join(mod_out, VARIANTS_DIR_OUT, sub)
+            label = f"{VARIANTS_DIR_OUT}/{sub}"
+            print(f"      {k + 1}. {sub}"
+                  + (f"   ({chars[k]})" if mixed else ""))
+        layout.append(("." if n == 1 else label,
+                       (outfit, target, renames, objects, drop)))
+
+        lroot = loose_root_of(target)
+
+        def run(renames=renames, objects=objects, drop=drop,
+                out_dir=out_dir, label=label, lroot=lroot):
+            written = rename.rename_container(toc, renames,
+                                              mount_of_common(lroot),
+                                              loose_path_under(lroot),
+                                              out_dir, base,
+                                              container_name=base,
+                                              object_renames=objects,
+                                              drop=drop, fix_arcs=True,
+                                              quiet=True)
+            with open(os.path.join(out_dir, base + ".pak"), "wb") as f:
+                f.write(pakfile.build(pakfile.LOOSE_MOUNT))
+
+            problems = rename.verify(written)
+            if problems:
+                print()
+                print(f"  PROBLEM -- {label} is not sound, do not install it:")
+                for p in problems[:8]:
+                    print(f"    {p}")
+                if len(problems) > 8:
+                    print(f"    ... and {len(problems) - 8} more")
+                return 1
+            mb = os.path.getsize(os.path.splitext(written)[0] + ".ucas") \
+                / (1024 * 1024)
+            print(f"    converted  {label}   ({mb:,.1f} MB, verified)")
+            return 0
+
+        runners.append(run)
+
+    # ---- optional paks, the pre-Dresscode modular style ------------------
+    packages = ctx["packages"]
+    by_low = {p["name"].lower(): pid for pid, p in packages.items()}
+    mesh_rel = {}                       # mesh pid -> variant folder label
+    for rel, (o, *_r) in layout:
+        pid = by_low.get(o["skeletal_mesh"].split(".")[0].lower())
+        if pid is not None:
+            mesh_rel[pid] = rel
+    opt_layout, taken = [], {}
+    for k, t in enumerate(toggles):
+        # An extra sits next to what it applies to: inside an outfit's own
+        # folder when it belongs to that outfit alone -- a mesh-carrying one
+        # always does -- and at the top when it fits any of them.
+        home = (mesh_rel.get(t["mesh_pid"], ".")
+                if len(t["bases"]) == 1 and len(layout) > 1 else ".")
+        label = folder_name(t["row"]["name"]) or \
+            folder_name(t["bp"].rsplit("/", 1)[-1].replace("_", " ")) or "extra"
+        here = taken.setdefault(home, set())
+        stem, dup = label, 1
+        while label.lower() in here:
+            dup += 1
+            label = f"{stem} {dup}"
+        here.add(label.lower())
+        parent = mod_out if home == "." else os.path.join(mod_out, home)
+        out_dir = os.path.join(parent, "Optional", label)
+        rel = "/".join(([] if home == "." else [home]) + ["Optional", label])
+        # A digit prefix sorts before the base pak's name, which is the
+        # load order the modular standard relies on for overrides to win.
+        opt_base = f"0{chr(65 + (k % 26))}_{plugin_id(label)}_P"
+        print(f"      + optional: {label}"
+              + (f"   (for {home})" if home != "." else "")
+              + f"   ({len(t['swaps'])} material "
+              f"swap{'s' if len(t['swaps']) != 1 else ''}"
+              + (", carries the outfit mesh" if t["kind"] == "mesh" else "")
+              + ")")
+
+        if t["kind"] == "mesh":
+            # Clean slots swap by PACKAGE OVERRIDE (proven in game); a
+            # shared slot repoints at a clean slot's EXISTING material
+            # import -- a 4-byte patch in the mesh's material table, which
+            # then picks up the same override. Renames are the BASE
+            # variant's own plus the overrides, so the mesh overrides the
+            # base's and everything else lines up.
+            plan = next((p for rel, p in layout
+                         if by_low.get(p[0]["skeletal_mesh"].split(".")[0]
+                                       .lower()) == t["mesh_pid"]), None)
+            if plan is None:
+                print(f"          skipped: {label}: no base outfit carries "
+                      "its mesh")
+                continue
+            _o, _target, renames, objects, _drop = plan
+            renames = dict(renames)
+            objects = {k2: dict(v) for k2, v in objects.items()}
+            for base_pkg, repl_pkg in t["overrides"].items():
+                renames[repl_pkg.lower()] = renames.get(
+                    base_pkg.lower(),
+                    converted_name(base_pkg, ctx["roots"],
+                                   t["costume_root"]))
+            for k2, v in t["objects"].items():
+                objects.setdefault(k2, {}).update(v)
+
+            mesh_low = packages[t["mesh_pid"]]["name"].lower()
+            repoint = {}
+            for slot, anchor in t["repoint"].items():
+                new_pkg = renames.get(anchor[0].lower(), anchor[0])
+                repoint[slot] = cityhash.object_id(new_pkg, anchor[1])
+            post_edit = {mesh_low:
+                         (lambda d, r=repoint: matpack.repoint_slots(d, r))}
+            extra_deps = None
+        else:
+            # EVERY package gets its base-conversion name -- dropped ones
+            # too, so the kept materials' texture references and dependency
+            # records point where the base pak actually serves them.
+            # Override sources then land on the package they replace.
+            renames = {p["name"].lower():
+                       converted_name(p["name"], ctx["roots"],
+                                      t["costume_root"])
+                       for p in packages.values()}
+            for base_pkg, repl_pkg in t["overrides"].items():
+                renames[repl_pkg.lower()] = converted_name(
+                    base_pkg, ctx["roots"], t["costume_root"])
+            # The carried parent takes a side name, which repoints every
+            # reference the replacement holds on the package it replaces --
+            # left at the base name they would point at the replacement
+            # itself.
+            for base_pkg in t["carry"]:
+                renames[base_pkg.lower()] = converted_name(
+                    base_pkg, ctx["roots"], t["costume_root"]) + PARENT_ASIDE
+            objects = dict(t["objects"])
+            post_edit = None
+            extra_deps = None
+
+        keep_names = {packages[pid]["name"] for pid in t["keep"]}
+        drop = {p["name"] for p in packages.values()
+                if p["name"] not in keep_names}
+        new_names = list(renames[n.lower()] for n in keep_names)
+        common = os.path.commonprefix([n + "/" for n in new_names])
+        common = common[:common.rfind("/") + 1]
+        if not common.startswith("/Game/"):
+            print(f"          skipped: {label} changes files a pak cannot carry")
+            continue
+
+        def opt_run(renames=renames, objects=objects, drop=drop,
+                    out_dir=out_dir, opt_base=opt_base, label=label,
+                    common=common, post_edit=post_edit,
+                    extra_deps=extra_deps):
+            written = rename.rename_container(
+                toc, renames, mount_of_common(common), lambda n,
+                c=common: n[len(c):], out_dir, opt_base,
+                container_name=opt_base, object_renames=objects,
+                drop=drop, fix_arcs=True, quiet=True, cross_pak=True,
+                post_edit=post_edit, extra_deps=extra_deps)
+            with open(os.path.join(out_dir, opt_base + ".pak"), "wb") as f:
+                f.write(pakfile.build(pakfile.LOOSE_MOUNT))
+            problems = rename.verify(written)
+            if problems:
+                print(f"  PROBLEM -- optional {label} is not sound:")
+                for p in problems[:6]:
+                    print(f"    {p}")
+                return 1
+            mb = os.path.getsize(os.path.splitext(written)[0] + ".ucas") \
+                / (1024 * 1024)
+            print(f"    optional   {label}   ({mb:,.2f} MB, verified)")
+            return 0
+
+        runners.append(opt_run)
+        opt_layout.append((rel, opt_base, t))
+
+    # ---- weapons-menu tiles, back to override paks -----------------------
+    # Their registration asset is dropped like every other one, so nothing
+    # downstream would ever see them: mapped back here or lost entirely.
+    for w, (wlabel, wrenames, wobjects, wkeep) in enumerate(weapon_backs):
+        label = folder_name(wlabel) or f"weapon {w + 1}"
+        out_dir = os.path.join(mod_out, "Optional", label)
+        wdrop = {p["name"] for p in packages.values()
+                 if p["name"] not in wkeep}
+        wbase = f"0W{chr(65 + (w % 26))}_{plugin_id(label)}_P"
+        print(f"      + weapon: {label}   ({len(wkeep)} file"
+              f"{'s' if len(wkeep) != 1 else ''})")
+
+        def weapon_run(renames=wrenames, objects=wobjects, drop=wdrop,
+                       out_dir=out_dir, wbase=wbase, label=label):
+            written = rename.rename_container(
+                toc, renames, mount_of_common(weapons.WEAPON_ROOT_PROPER),
+                lambda n: n[len(weapons.WEAPON_ROOT_PROPER):],
+                out_dir, wbase, container_name=wbase,
+                object_renames=objects, drop=drop, fix_arcs=True,
+                quiet=True, cross_pak=True)
+            with open(os.path.join(out_dir, wbase + ".pak"), "wb") as f:
+                f.write(pakfile.build(pakfile.LOOSE_MOUNT))
+            problems = rename.verify(written)
+            if problems:
+                print(f"  PROBLEM -- weapon {label} is not sound:")
+                for p in problems[:6]:
+                    print(f"    {p}")
+                return 1
+            mb = os.path.getsize(os.path.splitext(written)[0] + ".ucas") \
+                / (1024 * 1024)
+            print(f"    weapon     {label}   ({mb:,.2f} MB, verified)")
+            return 0
+
+        runners.append(weapon_run)
+
+    if len(plans) > 1 or opt_layout:
+        print("      install: one outfit folder's three files go in ~mods; "
+              "extras from its Optional folder go in alongside")
+
+    def warn_missing():
+        """The last thing printed, because it decides whether the result
+        works: a mod whose partner is absent converts fine and then renders
+        as a grey checkerboard in game."""
+        if not lib_roots or not missing:
+            return 0
+        print()
+        print("  !! THIS MOD NEEDS ANOTHER MOD, and it was not here:")
+        for root in missing:
+            print(f"       {root}")
+        print("     Converted without it -- what it provides (skin, usually)")
+        print("     shows as grey checkers. To fix, put that mod's folder")
+        print("     next to this one and convert again.")
+        return 0
+
+    def record():
+        code = record_roundtrip(toc, uplugin, plugin, plans, ctx, mod_out,
+                                layout, opt_layout, orig=orig_toc,
+                                libraries=libraries)
+        if merged_toc is not None:
+            merged_toc.close()
+            shutil.rmtree(merge_tmp, ignore_errors=True)
+        return code
+
+    runners.append(record)
+    runners.append(warn_missing)
+    return runners
+
+
+def mount_of_common(common):
+    """The container mount for a common /Game/ folder prefix."""
+    return "../../../End/Content/" + common[len("/Game/"):]
+
+
+# Set once a prompt has handled the final keypress, so the end-of-run pause
+# does not demand a second Enter.
+_INTERACTED = False
+
+
+def confirm(assume_yes, count):
+    global _INTERACTED
+    if assume_yes:
+        return True
+    word = "these" if count > 1 else "this"
+    try:
+        ans = input(f"  Convert {word}?  [y/N] ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        _INTERACTED = True
+        return False
+    if ans in ("y", "yes"):
+        return True
+    _INTERACTED = True
+    return False
+
+
+def gather(source, temps):
+    """
+    Yield (utoc, uplugin, out_base) for every mod a dropped `source` holds.
+
+    Archives -- dropped directly, or found inside a dropped folder -- are
+    unpacked to a temp folder (nested archives included), scanned there, and
+    their conversions anchored beside the archive they came from. Mods already
+    on disk are anchored beside their own folder.
+    """
+    if drops.is_archive(source):
+        tmp = tempfile.mkdtemp(prefix="convert-")
+        temps.append(tmp)
+        print(f"  Unpacking {os.path.basename(source)} ...")
+        drops.extract_archive(source, tmp)
+        drops.expand_archives(tmp)
+        for utoc, uplugin in find_mods(tmp):
+            yield utoc, uplugin, os.path.dirname(source)
+        return
+
+    for utoc, uplugin in find_mods(source):
+        yield utoc, uplugin, None
+    for arc in drops.archives_in(source):
+        yield from gather(arc, temps)
+
+
+def unpack_loose_archive(source, temps, assume_yes):
+    """
+    A dropped ARCHIVE of a pak mod. The folder flow needs a real folder
+    -- dresscode.json lives there, pictures go there, the person edits
+    there -- so the archive is unpacked once BESIDE ITSELF and that folder
+    is the mod from then on. Dropping the archive again just uses it, so
+    zip-drop-twice behaves exactly like folder-drop-twice. Returns the
+    flow's exit code, or None when the archive is not a pak mod (a
+    Dresscode mod's flow reads archives directly).
+    """
+    tmp = tempfile.mkdtemp(prefix="convert-")
+    temps.append(tmp)
+    print(f"  Unpacking {os.path.basename(source)} ...")
+    drops.extract_archive(source, tmp)
+    drops.expand_archives(tmp)
+    mods = find_mods(tmp)
+    if not mods or any(up for _u, up in mods):
+        return None
+    dest = os.path.splitext(source)[0]
+    if os.path.exists(dest):
+        print(f"  Using the folder already beside it: "
+              f"{os.path.basename(dest)}{os.sep}")
+    else:
+        inner = tmp
+        entries = os.listdir(tmp)
+        if len(entries) == 1 and os.path.isdir(os.path.join(tmp, entries[0])):
+            inner = os.path.join(tmp, entries[0])
+        shutil.move(inner, dest)
+        print(f"  Unpacked beside the archive: "
+              f"{os.path.basename(dest)}{os.sep}")
+        print("  Use that folder from here on -- dresscode.json is "
+              "generated inside it.")
+    handled = loose_to_dresscode(dest, find_mods(dest), assume_yes)
+    return 1 if handled is None else handled
+
+
+def unpack_archive_folder(source, temps, assume_yes):
+    """
+    A dropped FOLDER of archives -- authors ship modular mods as one zip
+    per piece. Everything unpacks into ONE new folder beside it, each
+    archive into its own subfolder, and that folder becomes the mod --
+    the same flow as dropping a single zip. Returns the flow's exit code,
+    or None when this is not a pak mod (Dresscode archives already read
+    fine from their zips).
+    """
+    archives = drops.archives_in(source)
+    if not archives:
+        return None
+    tmp = tempfile.mkdtemp(prefix="convert-")
+    temps.append(tmp)
+    print(f"  Unpacking {len(archives)} archive"
+          f"{'s' if len(archives) != 1 else ''} from "
+          f"{os.path.basename(source)} ...")
+    for a in archives:
+        sub = os.path.join(tmp, folder_name(
+            os.path.splitext(os.path.basename(a))[0]) or "mod")
+        os.makedirs(sub, exist_ok=True)
+        drops.extract_archive(a, sub)
+    drops.expand_archives(tmp)
+    mods = find_mods(tmp)
+    if not mods or any(up for _u, up in mods):
+        return None
+    dest = source.rstrip("\\/") + " (unpacked)"
+    if os.path.exists(dest):
+        print(f"  Using the folder already beside it: "
+              f"{os.path.basename(dest)}{os.sep}")
+    else:
+        shutil.move(tmp, dest)
+        print(f"  Unpacked beside it: {os.path.basename(dest)}{os.sep}")
+        print("  Use that folder from here on -- dresscode.json is "
+              "generated inside it.")
+    handled = loose_to_dresscode(dest, find_mods(dest), assume_yes)
+    return 1 if handled is None else handled
+
+
+def main(argv):
+    global KEEP_REGISTRATION
+    args = [a for a in argv if not a.startswith("-")]
+    assume_yes = "-y" in argv or "--yes" in argv
+    KEEP_REGISTRATION = "--keep-registration" in argv
+    if not args:
+        print(__doc__.strip())
+        return 2
+
+    runners, code, temps, tocs = [], 0, [], []
+    handled_any = False
+    try:
+        for raw in args:
+            source = os.path.abspath(raw.rstrip("\\/"))
+            if not os.path.exists(source):
+                print(f"  Not found: {source}")
+                code = 1
+                continue
+            if os.path.isdir(source):
+                # A bad template in one dropped folder must not abort the rest.
+                try:
+                    handled = loose_to_dresscode(source, find_mods(source),
+                                                 assume_yes)
+                except RuntimeError as ex:
+                    print(f"  {ex}")
+                    code = max(code, 1)
+                    continue
+                if handled is not None:
+                    handled_any = True
+                    code = max(code, handled)
+                    continue
+                result = unpack_archive_folder(source, temps, assume_yes)
+                if result is not None:
+                    handled_any = True
+                    code = max(code, result)
+                    continue
+            elif drops.is_archive(source):
+                result = unpack_loose_archive(source, temps, assume_yes)
+                if result is not None:
+                    handled_any = True
+                    code = max(code, result)
+                    continue
+            found = False
+            for utoc, uplugin, out_base in gather(source, temps):
+                found = True
+                if not uplugin:
+                    print()
+                    print(f"  {os.path.basename(utoc)}  (pak -- drop "
+                          "its own folder to convert toward Dresscode)")
+                    code = max(code, 1)
+                    continue
+                try:
+                    # Before the container is opened: patching rewrites it.
+                    preflight_meshes([utoc], assume_yes,
+                                     os.path.dirname(uplugin))
+                    toc = iostore.Toc(utoc)
+                    tocs.append(toc)
+                    runners += prepare_to_loose(toc, uplugin, out_base)
+                except RuntimeError as ex:
+                    print(f"  {os.path.basename(utoc)}: {ex}")
+                    code = max(code, 1)
+                except Exception as ex:
+                    print(f"  Could not read {os.path.basename(utoc)}: {ex}")
+                    code = max(code, 1)
+            if not found:
+                print(f"  No mod files (.utoc) found in {source}")
+                code = max(code, 1)
+
+        if not runners:
+            # "Nothing found at all" is a failure; a drop fully handled by
+            # the template flow is not.
+            return code if handled_any else (code or 1)
+
+        print()
+        if not confirm(assume_yes, len(runners)):
+            print("  Nothing converted.")
+            return code
+        for run in runners:
+            code = max(code, run())
+        print()
+        print("  Done. Copy the three files from the folder you want into "
+              "the game's")
+        print("  End\\Content\\Paks\\~mods folder.")
+        return code
+    finally:
+        for toc in tocs:                # open handles block temp deletion
+            toc.close()
+        for tmp in temps:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
+if __name__ == "__main__":
+    _code = 1
+    try:
+        _code = main(sys.argv[1:])
+    except RuntimeError as ex:
+        print(f"  {ex}")
+    except Exception:
+        # Anything unexpected must still leave a readable window: a
+        # drag-and-drop console closes with the process, taking the
+        # traceback with it.
+        import traceback
+        print()
+        print("  Unexpected error -- nothing was harmed, but please report "
+              "this:")
+        print()
+        traceback.print_exc(file=sys.stdout)
+    drops.pause_before_exit(sys.argv[1:], _INTERACTED)
+    sys.exit(_code)

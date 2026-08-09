@@ -2,10 +2,10 @@
 patch.py -- FFVII Rebirth mesh patcher.
 
 Fixes mods that were built before game patch V1.005 and no longer load. Works on
-costume mods and loose pak mods -- anything containing a skeletal mesh. (Dresscode
+costume mods and pak mods -- anything containing a skeletal mesh. (Dresscode
 itself now has an official V1.005 update, so it is no longer patched here.) Mods
 are found in End\\Mods (the FF7RML loader) and in
-End\\Content\\Paks\\~mods (loose paks the game loads directly); see find_mods.
+End\\Content\\Paks\\~mods (paks the game loads directly); see find_mods.
 
     python patch.py --list             show every mod and whether it needs fixing
     python patch.py --all              patch everything that needs it
@@ -26,6 +26,10 @@ send on -- point the tool at any folder instead:
 without FFVII Rebirth installed. A folder given as a bare argument (or dropped
 onto patch.py) is treated the same as --path; a dropped .zip/.7z/.rar is
 unpacked first, archives nested inside it included.
+
+unpatch.py is this tool in REVERSE -- same flows, same flags -- for players
+still on game version 1.004. It flips MODE to BACKWARD (see FORWARD/BACKWARD
+below) and keeps its own backups folder; nothing else differs.
 
 Names cut both ways. A mod's .utoc/.ucas/.pak names are never changed -- the
 loader keys off them, so a rename makes the mod undetectable. A loader mod's
@@ -76,20 +80,49 @@ import os
 import shutil
 import struct
 import sys
-import zipfile
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "lib"))
 
 import config
 import deps
-import dirindex
+import drops
 import iostore
 import meshfix
+import repack
 import skm
-import writer
 import zen
 
 BACKUP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "backups")
+
+# The two directions this tool runs in. patch.py converts 1.004 mods up to the
+# V1.005 mesh layout; unpatch.py sets MODE = BACKWARD (and its own BACKUP_DIR)
+# and converts back down, for players still on the old game version. Everything
+# else -- discovery, drops, backups, restore -- is shared and direction-blind.
+FORWARD = dict(
+    tool="patch.py", verb="Patched", menu_verb="patch",
+    wrapper="Patched Mods", local_backups="_patch_backups",
+    needs=meshfix.old_format, convert=meshfix.convert_payload,
+    needs_label="needs patching", done_label="patched",
+    already="nothing to fix (already new-format)",
+    done_inside="already patched",
+    dresscode_ok=["installed -- not patched by this tool "
+                  "(it has its own official updates)"],
+    dresscode_skip=["Dresscode has an official V1.005 update; install",
+                    "it from its author instead of patching it here."],
+)
+BACKWARD = dict(
+    tool="unpatch.py", verb="Unpatched", menu_verb="unpatch",
+    wrapper="Unpatched Mods", local_backups="_unpatch_backups",
+    needs=meshfix.new_format, convert=meshfix.unconvert_payload,
+    needs_label="needs unpatching", done_label="1.004 already",
+    already="nothing to do (already the old 1.004 format)",
+    done_inside="already back to the old 1.004 format",
+    dresscode_ok=["installed -- not touched by this tool "
+                  "(use its author's release for your game version)"],
+    dresscode_skip=["Dresscode is not converted here; for the 1.004",
+                    "game install the author's original release."],
+)
+MODE = FORWARD
 
 # Mods that are part of the loader framework, not content -- never touch these.
 SKIP = {"FF7RML", "FF7RModMenu"}
@@ -122,15 +155,33 @@ def _is_skipped(name):
     return name.lower() in {s.lower() for s in SKIP} or name.lower() == _SELF.lower()
 
 
+def _central_backup_dirs():
+    """The central backup folders -- this tool's, its reverse twin's, and
+    whatever BACKUP_DIR currently points at. People unzip the tool INSIDE
+    ~mods, which puts these inside the scan: the backed-up original then
+    lists as a mod needing patching and gets patched over -- the pristine
+    copy destroyed by the very tool that made it (real 1.4.0 field report,
+    'it also tries to patch and read its own backup folder')."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    return {os.path.normcase(os.path.abspath(p))
+            for p in (BACKUP_DIR,
+                      os.path.join(here, "backups"),
+                      os.path.join(here, "unpatch_backups"))}
+
+
 def _find_pak_utocs(root, max_depth=5):
     """Every .utoc under `root`, depth-limited. The game loads paks recursively
     beneath ~mods, and some users nest each mod in its own subfolder. Skips our
-    _patch_backups folders so backed-up originals don't resurface as mods."""
+    backup folders so backed-up originals don't resurface as mods."""
     root = os.path.abspath(root)
+    central = _central_backup_dirs()
     out = []
     for dirpath, dirnames, filenames in os.walk(root):
         dirnames[:] = [d for d in dirnames
-                       if d.lower() != "_patch_backups"]
+                       if d.lower() not in ("_patch_backups",
+                                            "_unpatch_backups")
+                       and os.path.normcase(os.path.join(dirpath, d))
+                       not in central]
         if dirpath[len(root):].count(os.sep) >= max_depth:
             dirnames[:] = []
         for f in filenames:
@@ -297,7 +348,7 @@ def scan(utoc_path):
                     after, info = skm.parse_head(payload, 0, len(payload),
                                                  skm.NoNames(), verbose=False)
                     lod = skm.parse_lod_header(payload, after)
-                    needs = meshfix.old_format(
+                    needs = MODE["needs"](
                         payload, lod["sections_at"], lod["n_sections"])
                     found.append(dict(chunk=i, path=toc.paths[i], export=e["name"],
                                       size=e["size"], n_lods=lod["n_lods"],
@@ -313,8 +364,8 @@ def scan(utoc_path):
     if read_ok and not parsed and not found:
         found.append(dict(
             chunk=-1, path="", export="", size=0,
-            error="packages did not decode -- the Oodle DLL is likely the "
-                  "wrong version for this game"))
+            error="files did not decode -- the Oodle DLL is likely the "
+                  "wrong version for this game (need oo2core_6 or newer)"))
     return toc, found
 
 
@@ -340,7 +391,21 @@ def patch_package(data):
     for k, e in enumerate(pkg.exports):
         removed_before[k] = running
         if e["cls"] == skm.SKELETAL_MESH:
-            new_payload, report = meshfix.convert_payload(bytes(payloads[k]))
+            # Convert only what the scan called out. The converter also
+            # normalizes traits that are legal either way (the dup-vert
+            # arrays), and running it unconditionally rewrote mods the
+            # listing had just called [ok].
+            payload = bytes(payloads[k])
+            try:
+                after, _info = skm.parse_head(payload, 0, len(payload),
+                                              skm.NoNames(), verbose=False)
+                lod = skm.parse_lod_header(payload, after)
+                if not MODE["needs"](payload, lod["sections_at"],
+                                     lod["n_sections"]):
+                    continue
+            except Exception:
+                pass                # let the converter raise its clear error
+            new_payload, report = MODE["convert"](payload)
             if report.get("changed"):
                 running += report["bytes_removed"]
                 payloads[k] = bytearray(new_payload)
@@ -388,29 +453,6 @@ def rebuild_header(header_bytes, size_deltas):
     return bytes(out)
 
 
-def _pack_blocks(payload, block_size, comp_method):
-    """Split `payload` into <=block_size .ucas blocks, Oodle-compressing each so a
-    patched mesh does not bloat the container (uncompressed it can double it).
-
-    Every compressed block is verified to round-trip -- decompress back to the
-    exact original -- before it is used. Anything that has no compressor, does
-    not shrink, or does not round-trip is stored raw (method 0), so the output is
-    always valid whatever the DLL does.
-    """
-    out = []
-    for k in range(0, len(payload), block_size):
-        raw = payload[k:k + block_size]
-        comp = iostore.oodle_compress(raw) if comp_method else None
-        ok = comp is not None and len(comp) < len(raw)
-        if ok:
-            try:
-                ok = iostore.oodle_decompress(comp, len(raw)) == raw
-            except Exception:
-                ok = False
-        out.append((comp, len(raw), comp_method) if ok else (raw, len(raw), 0))
-    return out
-
-
 def _mod_rel(utoc_path):
     """The mod's own on-disk wrapping (loader mods live under
     Content\\Paks\\WindowsNoEditor), mirrored into its backup so the backup
@@ -452,10 +494,19 @@ def patch_mod(name, utoc_path, out_dir=None, backup_dir=None, no_backup=False):
     # --- Convert every package that needs it.
     pkg_indices = [i for i in sorted(toc.paths)
                    if toc.paths[i].endswith(".uasset")]
-    print(f"    scanning {len(pkg_indices)} packages")
+    print(f"    scanning {len(pkg_indices)} files")
+    live = sys.stdout.isatty()
+
+    def clear():
+        if live:
+            print("\r" + " " * 46 + "\r", end="", flush=True)
+
     new_data = {}
     size_deltas = {}
-    for i in pkg_indices:
+    for n, i in enumerate(pkg_indices):
+        if live and n % 10 == 0:
+            print(f"\r    scanning file {n + 1}/{len(pkg_indices)}...",
+                  end="", flush=True)
         data = toc.read(i)
         try:
             pkg = zen.ZenPackage(data)
@@ -470,14 +521,15 @@ def patch_mod(name, utoc_path, out_dir=None, backup_dir=None, no_backup=False):
             size_deltas[toc.package_id(i)] = removed
             for export_name, rep in reports:
                 if rep.get("changed"):
-                    print(f"    {toc.paths[i]} :: {export_name}")
-                    print(f"      {rep['n_sections']} sections, "
-                          f"{rep['n_bones']} bones, "
-                          f"removed {rep['bytes_removed']:,} bytes "
-                          f"({len(data):,} -> {len(patched):,})")
+                    delta = rep["bytes_removed"]
+                    clear()
+                    print(f"    fixed  {toc.paths[i]}  "
+                          f"({'removed' if delta >= 0 else 'added'} "
+                          f"{abs(delta):,} bytes)")
+    clear()
 
     if not new_data:
-        print("    nothing to fix (already new-format)")
+        print(f"    {MODE['already']}")
         return False
 
     # Back up before writing anything (in-place only).
@@ -505,74 +557,17 @@ def patch_mod(name, utoc_path, out_dir=None, backup_dir=None, no_backup=False):
                         if toc.chunk_type(i) == 10)
     new_data[header_index] = rebuild_header(toc.read(header_index), size_deltas)
 
-    print(f"    rebuilding container ({toc.n} chunks)")
-    progress = sys.stdout.isatty()
-    # Oodle's index in THIS container's method table -- a wrong index would make
-    # the game misdecode our blocks. No Oodle in the table -> store raw.
-    comp_method = next((m for m, method_name in enumerate(toc.methods)
-                        if method_name.lower() == "oodle"), None)
-    if comp_method is None and len(toc.methods) > 1:
-        print(f"    note: container compresses with "
-              f"{', '.join(toc.methods[1:])}, not Oodle -- "
-              "storing patched chunks uncompressed")
-    ucas_in = open(os.path.join(src_dir, base + ".ucas"), "rb")
-    chunks = []
-    new_paths = []
-    for i in range(toc.n):
-        if progress and i % 25 == 0:
-            print(f"\r    reading chunk {i}/{toc.n}...", end="", flush=True)
-        if i in new_data:
-            payload = new_data[i]
-            blocks = _pack_blocks(payload, toc.block_size, comp_method)
-            size = len(payload)
-        else:
-            # Untouched chunk: reuse its compressed blocks as-is. build_metas_from
-            # reuses the source checksum row, so its uncompressed bytes are never
-            # needed -- skipping this decompress is the main speedup.
-            offset, length = toc.offlen[i]
-            b = offset // toc.block_size
-            remaining = length
-            blocks = []
-            while remaining > 0:
-                pos, csize, usize, method = toc.blocks[b]
-                ucas_in.seek(pos)
-                blocks.append((ucas_in.read(csize), usize, method))
-                remaining -= usize
-                b += 1
-            size = length
-        chunks.append(dict(id=toc.chunk_ids[i], blocks=blocks, size=size))
-        if i in toc.paths:
-            new_paths.append((toc.paths[i], len(chunks) - 1))
-
-    if progress:
-        print("\r" + " " * 40 + "\r", end="", flush=True)
-
-    directory = dirindex.build_dir_index(toc.mount, new_paths)
-    body, ucas, offlen, block_table = writer.build_container(
-        toc, chunks, toc.block_size)
-    head = writer.build_toc_header(toc, len(chunks), len(block_table),
-                                   len(directory), toc.block_size)
-    metas = writer.build_metas_from(toc, new_data)
-
-    print(f"    writing {len(ucas) / (1024 * 1024):,.0f} MB to disk...", flush=True)
-    with open(os.path.join(dst_dir, base + ".utoc"), "wb") as f:
-        f.write(head + bytes(body) + directory + metas)
-    with open(os.path.join(dst_dir, base + ".ucas"), "wb") as f:
-        f.write(ucas)
-    # The .pak is never rewritten, but the game loads a mod as a triple -- copy
-    # it across whenever the original is not being overwritten in place.
-    if not in_place:
-        pak_src = os.path.join(src_dir, base + ".pak")
-        if os.path.exists(pak_src):
-            shutil.copy(pak_src, os.path.join(dst_dir, base + ".pak"))
+    print("    rebuilding the mod file")
+    repack.write(toc, new_data, dst_dir, base, src_dir,
+                 copy_pak=not in_place)
 
     if not in_place:
         print(f"    written {base}.utoc/.ucas/.pak  in  {dst_dir}")
     elif no_backup:
-        print(f"    written; .ucas now {len(ucas):,} bytes")
+        print("    written")
     else:
         # The full backup path is stated once, in the closing summary.
-        print(f"    written; .ucas now {len(ucas):,} bytes  (original backed up)")
+        print("    written  (original backed up)")
     return True
 
 
@@ -716,11 +711,11 @@ def show_list(mods, debug=False, sources=None):
             print("          Costume mods have no menu without it. Install Dresscode")
             print("          from its author first, then run this again.")
         else:
-            # Dresscode ships its own official V1.005 build, so this tool never
-            # patches it and makes no claim about its format.
-            print("    [ok]  installed -- not patched by this tool")
-            print("          If Dresscode itself crashes, get the author's official")
-            print("          V1.005 release.")
+            # Dresscode ships its own official builds, so this tool never
+            # converts it and makes no claim about its format.
+            print(f"    [ok]  {MODE['dresscode_ok'][0]}")
+            for line in MODE["dresscode_ok"][1:]:
+                print(f"          {line}")
 
     # ---- everything else ------------------------------------------------
     others = {k: v for k, v in results.items() if not _is_dresscode(k)}
@@ -734,7 +729,8 @@ def show_list(mods, debug=False, sources=None):
         width = max(len(k) for k in withmesh) + 2
         for name in sorted(withmesh):
             state, n, _ = withmesh[name]
-            label = "needs patching" if state == "needs_fix" else "patched"
+            label = (MODE["needs_label"] if state == "needs_fix"
+                     else MODE["done_label"])
             print(f"    {MARK[state]}  {name:<{width}} {label:<15} "
                   f"{n} mesh{_plural(n)}{src_tag(mods[name])}")
 
@@ -774,12 +770,14 @@ def show_list(mods, debug=False, sources=None):
     if need:
         s = "s" if len(need) != 1 else ""
         verb = "" if len(need) != 1 else "s"
-        print(f"  {len(need)} mod{s} need{verb} patching:  {', '.join(need)}")
+        what = MODE["needs_label"].split(" ", 1)[1]      # "patching"/"unpatching"
+        print(f"  {len(need)} mod{s} need{verb} {what}:  {', '.join(need)}")
         scope = "".join(f' --path "{os.path.abspath(s)}"' for s in sources)
-        print(f"  Run:  python patch.py{scope} --all")
+        print(f"  Run:  python {MODE['tool']}{scope} --all")
     else:
         s = "s" if len(done) != 1 else ""
-        print(f"  Nothing to do -- {len(done)} mod{s} already patched.")
+        print(f"  Nothing to do -- {len(done)} mod{s} already "
+              f"{'patched' if MODE is FORWARD else 'in the 1.004 format'}.")
     print()
 
     if debug:
@@ -809,81 +807,11 @@ def show_list(mods, debug=False, sources=None):
                       f"other unresolved: {ids or 'none'}")
         print()
 
-
-# Names (lowercase) of interactive shells / terminals. If one of these is
-# sharing our console, we were launched from it rather than owning the window.
-_SHELLS = {"cmd.exe", "powershell.exe", "pwsh.exe", "wt.exe",
-           "windowsterminal.exe", "openconsole.exe", "bash.exe", "sh.exe",
-           "zsh.exe", "fish.exe", "conemu64.exe", "conemuc64.exe",
-           "mintty.exe", "alacritty.exe", "wezterm-gui.exe"}
+    return bool(need)
 
 
-def _console_proc_names():
-    """Lowercase exe names of every process attached to this console, or None if
-    there is no console (output redirected/piped) or it cannot be queried."""
-    import ctypes
-    from ctypes import wintypes
-
-    k32 = ctypes.windll.kernel32
-    k32.GetConsoleProcessList.restype = wintypes.DWORD
-    count = k32.GetConsoleProcessList((wintypes.DWORD * 1)(), 1)
-    if not count:
-        return None
-    buf = (wintypes.DWORD * (count + 4))()
-    count = k32.GetConsoleProcessList(buf, len(buf))
-    if not count:
-        return None
-    pids = set(buf[:count])
-
-    class PE(ctypes.Structure):
-        _fields_ = [("dwSize", wintypes.DWORD),
-                    ("cntUsage", wintypes.DWORD),
-                    ("th32ProcessID", wintypes.DWORD),
-                    ("th32DefaultHeapID", ctypes.c_void_p),
-                    ("th32ModuleID", wintypes.DWORD),
-                    ("cntThreads", wintypes.DWORD),
-                    ("th32ParentProcessID", wintypes.DWORD),
-                    ("pcPriClassBase", ctypes.c_long),
-                    ("dwFlags", wintypes.DWORD),
-                    ("szExeFile", ctypes.c_char * 260)]
-
-    # restype MUST be HANDLE -- the default c_int truncates the handle on 64-bit
-    # and the snapshot walk silently finds nothing.
-    k32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
-    snap = k32.CreateToolhelp32Snapshot(0x2, 0)     # TH32CS_SNAPPROCESS
-    if snap == ctypes.c_void_p(-1).value:
-        return None
-    names = []
-    try:
-        e = PE()
-        e.dwSize = ctypes.sizeof(PE)
-        ok = k32.Process32First(snap, ctypes.byref(e))
-        while ok:
-            if e.th32ProcessID in pids:
-                names.append(e.szExeFile.decode("mbcs", "replace").lower())
-            ok = k32.Process32Next(snap, ctypes.byref(e))
-    finally:
-        k32.CloseHandle(snap)
-    return names
-
-
-def _owns_console():
-    """
-    True when this process owns the console window -- double-clicked or a
-    folder dropped on it, so the window vanishes on exit and the user needs a
-    pause to read the output. Decided by WHAT is attached, not how many:
-    counting fails because the py.exe launcher stays attached, making a
-    double-clicked script two processes with no shell among them.
-    """
-    if os.name != "nt":
-        return False
-    try:
-        names = _console_proc_names()
-    except Exception:
-        return False
-    if not names:
-        return False
-    return not any(n in _SHELLS for n in names)
+# Console-ownership detection lives in lib/drops.py, shared with convert.py.
+_owns_console = drops.owns_console
 
 
 def _finish(summary):
@@ -913,169 +841,89 @@ def _pause_before_exit(argv):
 
 
 def _wrapper_dir(source):
-    """The "Patched Mods" folder placed beside a dropped folder (or zip) to hold
-    its patched copies."""
+    """The "Patched Mods" (or "Unpatched Mods") folder placed beside a dropped
+    folder (or zip) to hold its converted copies."""
     return os.path.join(os.path.dirname(os.path.abspath(source.rstrip("\\/"))),
-                        "Patched Mods")
+                        MODE["wrapper"])
 
 
-# Archives a drop may contain; unpacked by _extract_archive.
-_ARCHIVE_EXTS = (".zip", ".7z", ".rar")
+# Archive handling -- detection, extraction, nested unpacking -- lives in
+# lib/drops.py, shared with convert.py. Aliased so call sites read the same.
+_ARCHIVE_EXTS = drops.ARCHIVE_EXTS
+_is_archive = drops.is_archive
+_archives_in = drops.archives_in
+_contains_archive = drops.contains_archive
+_show_archive = drops.show_archive
+_archive_summary = drops.archive_summary
+_extract_archive = drops.extract_archive
+_expand_archives = drops.expand_archives
 
 
-def _is_archive(source):
-    return source.lower().endswith(_ARCHIVE_EXTS)
+# Archives unpacked to be looked inside, keyed by absolute path. Unpacking
+# is the only way to see what a mod is, and answering "yes" would unpack the
+# same archive again -- so the copy is kept and patched in place instead.
+_UNPACKED = {}
 
 
-def _archives_in(source):
-    """Every archive inside a dropped FOLDER -- mods are often shared as a
-    folder of per-mod archives, whose contents only appear once unpacked."""
-    if not os.path.isdir(source):
-        return []
-    return sorted(os.path.join(dp, f)
-                  for dp, _dn, fn in os.walk(source) for f in fn
-                  if _is_archive(f))
-
-
-def _contains_archive(source):
-    return bool(_archives_in(source))
-
-
-def _tar_exe():
-    """Windows 10 and 11 bundle tar (libarchive), which reads zip, 7z and rar
-    with nothing installed."""
-    tar = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"),
-                       "System32", "tar.exe")
-    if os.path.exists(tar):
-        return tar
-    import shutil as _sh
-    return _sh.which("tar")
-
-
-def _archive_listing(src):
-    """Every path inside `src`, read from its index without unpacking -- fast
-    even on a multi-gigabyte archive. Empty if the index cannot be read; the
-    extraction attempt is what reports why."""
-    if src.lower().endswith(".zip"):
-        try:
-            with zipfile.ZipFile(src) as z:
-                return z.namelist()
-        except Exception:
-            pass                        # fall through to tar, which may cope
-    tar = _tar_exe()
-    if not tar:
-        return []
-    import subprocess
-    try:
-        r = subprocess.run([tar, "-tf", src], capture_output=True, text=True)
-    except OSError:
-        return []
-    return r.stdout.splitlines() if r.returncode == 0 else []
-
-
-def _archive_summary(src):
-    """What an archive holds, as (mod names, archives nested inside).
-
-    Lets a drop show its contents before anything is unpacked. A loader mod is
-    named by its .uplugin -- the name Dresscode looks for, and the one it will
-    be renamed to, which is often not the name the download arrived under.
+def _unpack_to_look(arc):
     """
-    mods, inner = set(), set()
-    for entry in _archive_listing(src):
-        path = entry.replace("\\", "/").rstrip("/")
-        stem, ext = os.path.splitext(path.rsplit("/", 1)[-1])
-        ext = ext.lower()
-        if ext == ".uplugin":
-            mods.add(stem)
-        elif ext == ".utoc":
-            # A loader mod's container sits under Content/Paks/WindowsNoEditor
-            # and is named for the container, not the mod -- its .uplugin above
-            # is the real name, so only loose paks are named from the .utoc.
-            if "content/paks/windowsnoeditor" not in path.lower():
-                mods.add(stem)
-        elif _is_archive(path):
-            inner.add(path.rsplit("/", 1)[-1])
-    return sorted(mods), sorted(inner)
+    An unpacked copy of `arc` in a temporary folder, or None if it will not
+    open. Unpacked once per run: the scan reads it, and the patch that may
+    follow moves this very copy into place rather than repeating the work.
+    """
+    key = os.path.normcase(os.path.abspath(arc))
+    if key in _UNPACKED:
+        return _UNPACKED[key]
+    import tempfile
+    dst = tempfile.mkdtemp(prefix="modscan-")
+    try:
+        _extract_archive(arc, dst)
+        _expand_archives(dst)
+    except Exception:
+        shutil.rmtree(dst, ignore_errors=True)
+        _UNPACKED[key] = None
+        return None
+    _UNPACKED[key] = dst
+    return dst
 
 
-def _show_archive(src, indent):
-    """Print what `src` holds, for the listing shown before the drop menu."""
-    mods, inner = _archive_summary(src)
-    for m in mods:
-        print(f"{indent}{m}")
-    for i in inner:
-        print(f"{indent}{i}   (unpacks to more)")
-    if not mods and not inner:
-        print(f"{indent}(cannot see inside this one until it is unpacked)")
+def _discard_unpacked():
+    """Drop what the scan unpacked and nothing took over."""
+    for dst in _UNPACKED.values():
+        if dst:
+            shutil.rmtree(dst, ignore_errors=True)
+    _UNPACKED.clear()
 
 
-def _archive_tools(src, dst):
-    """Command lines that can unpack `src` into `dst`, best first. tar handles
-    all three formats with nothing installed; a 7-Zip install is the fallback
-    for anything older than Windows 10."""
-    import shutil as _sh
-    tar = _tar_exe()
-    if tar:
-        yield tar, [tar, "-xf", src, "-C", dst]
-    seven = (_sh.which("7z") or _sh.which("7za")
-             or next((p for p in (r"C:\Program Files\7-Zip\7z.exe",
-                                   r"C:\Program Files (x86)\7-Zip\7z.exe")
-                      if os.path.exists(p)), None))
-    if seven:
-        yield seven, [seven, "x", src, f"-o{dst}", "-y"]
+def _archive_needs(arc):
+    """
+    Whether anything inside `arc` still needs work: True, False, or None
+    when it cannot be looked into. None is NOT "nothing to do" -- an archive
+    no tool here can open is offered as before, and the extraction attempt
+    is what reports why.
+    """
+    dst = _unpack_to_look(arc)
+    if dst is None:
+        return None
+    found = find_mods([dst])
+    if not found:
+        return None
+    try:
+        return any(mod_status(u)[0] == "needs_fix" for u in found.values())
+    except Exception:
+        return None
 
 
-def _extract_archive(src, dst):
-    """Extract `src` into `dst`. A .zip goes through the standard library first,
-    then falls back to the same tools as .7z/.rar -- tar reads zip too, and
-    copes with ones zipfile rejects. Raises with a readable reason, and a way
-    forward, if nothing can unpack it."""
-    os.makedirs(dst, exist_ok=True)
-    reasons = []
-    if src.lower().endswith(".zip"):
-        try:
-            with zipfile.ZipFile(src) as z:
-                z.extractall(dst)
-            return
-        except Exception as ex:
-            reasons.append(str(ex))
-    import subprocess
-    for tool, argv in _archive_tools(src, dst):
-        try:
-            r = subprocess.run(argv, capture_output=True, text=True)
-        except OSError as ex:
-            reasons.append(str(ex))
-            continue
-        if r.returncode == 0 and any(os.scandir(dst)):
-            return
-        reasons.append(r.stderr.strip() or r.stdout.strip() or "nothing extracted")
-    raise RuntimeError(
-        "could not unpack it -- " + ("; ".join(reasons) if reasons else
-        f"no tool for {os.path.splitext(src)[1]} files") +
-        ". You can unpack it yourself and drop the folder instead.")
-
-
-def _expand_archives(root, max_depth=4):
-    """Unpack archives inside `root`, repeatedly -- mods are often shared as an
-    archive (or folder) of per-mod archives, which a single pass would leave
-    unopened. Each archive becomes a folder and is removed. Runs only on our
-    own copy, never the original."""
-    failed = set()
-    for _ in range(max_depth):
-        found = [p for p in (os.path.join(dp, f)
-                             for dp, _dn, fn in os.walk(root) for f in fn)
-                 if _is_archive(p) and p not in failed]
-        if not found:
-            return
-        for arc in found:
-            print(f"  Unpacking {os.path.basename(arc)} ...")
-            try:
-                _extract_archive(arc, os.path.splitext(arc)[0])
-            except Exception as ex:
-                print(f"  Could not unpack {os.path.basename(arc)}: {ex}")
-                failed.add(arc)
-                continue
-            os.remove(arc)
+def _archive_covered(arc, mod_names):
+    """True when every mod inside `arc` already appears in the scan -- the
+    archive was extracted and handled on an earlier run, so offering it again
+    would only duplicate mods the user already has."""
+    names, inner = _archive_summary(arc)
+    if inner or not names:
+        return False
+    have = [k.lower() for k in mod_names]
+    return all(any(k == m.lower() or k.startswith(m.lower() + " (")
+                   for k in have) for m in names)
 
 
 def _dresscode_stem(folder):
@@ -1124,12 +972,14 @@ def _folder_menu(sources):
     job. Returns an exit code."""
     global _INTERACTED
     print("  ----------------------------------------------------------------")
-    print("  This will patch every mod in what you dropped (archives are")
-    print("  extracted first) and save the patched copies -- originals")
-    print("  untouched -- to a \"Patched Mods\" folder beside "
+    print(f"  This will {MODE['menu_verb']} every mod in what you dropped"
+          " (archives are")
+    print(f"  extracted first) and save the {MODE['menu_verb']}ed copies --"
+          " originals")
+    print(f"  untouched -- to a \"{MODE['wrapper']}\" folder beside "
           + ("it:" if len(sources) == 1 else "each:"))
-    for s in sources:
-        print(f"      {_wrapper_dir(s)}{os.sep}")
+    for d in dict.fromkeys(_wrapper_dir(s) for s in sources):
+        print(f"      {d}{os.sep}")
     try:
         ans = input("  Proceed?  [y/N] ").strip().lower()
     except (EOFError, KeyboardInterrupt):
@@ -1156,14 +1006,27 @@ def _patch_copy(source):
 
     if _is_archive(src):
         dst = os.path.join(wrapper, os.path.splitext(os.path.basename(src))[0])
-        print(f"  Extracting {os.path.basename(src)} to {dst} ...")
-        try:
-            _extract_archive(src, dst)
-        except Exception as ex:
-            print(f"  Could not extract: {ex}")
-            _INTERACTED = True
-            return 0
-        _expand_archives(dst)
+        ready = _UNPACKED.pop(os.path.normcase(src), None)
+        if ready:
+            # Already unpacked to see inside it; move that copy into place.
+            print(f"  Extracting {os.path.basename(src)} to {dst} ...")
+            os.makedirs(os.path.dirname(dst) or ".", exist_ok=True)
+            if os.path.isdir(dst):
+                shutil.rmtree(dst, ignore_errors=True)
+            try:
+                shutil.move(ready, dst)
+            except Exception:
+                shutil.copytree(ready, dst, dirs_exist_ok=True)
+                shutil.rmtree(ready, ignore_errors=True)
+        else:
+            print(f"  Extracting {os.path.basename(src)} to {dst} ...")
+            try:
+                _extract_archive(src, dst)
+            except Exception as ex:
+                print(f"  Could not extract: {ex}")
+                _INTERACTED = True
+                return 0
+            _expand_archives(dst)
         dst = _fix_loader_names(dst)
         return main(["--path", dst, "--all", "--no-backup"])
 
@@ -1190,7 +1053,8 @@ def _confirm_game_folder(sources):
     global _INTERACTED
     print("  ----------------------------------------------------------------")
     print("  That is inside your game install -- these are your installed mods.")
-    print("  This patches the ones that need it, in place. Your originals are")
+    print(f"  This {MODE['menu_verb']}es the ones that need it, in place. "
+          "Your originals are")
     print("  backed up first, to:")
     print(f"      {os.path.abspath(BACKUP_DIR)}{os.sep}")
     try:
@@ -1281,12 +1145,26 @@ def _backup_root(sources):
     root = os.path.abspath(sources[0])
     if root.lower().endswith(".utoc"):
         root = os.path.dirname(root)
-    return os.path.join(root, "_patch_backups")
+    return os.path.join(root, MODE["local_backups"])
 
 
 def main(argv):
     """Run the requested action. Returns a process exit code."""
     sources, out_dir, named, flags = _parse_args(argv)
+
+    if any(f in flags for f in ("-h", "--help")):
+        t = MODE["tool"]
+        print(f"python {t} --list               list mods and what needs fixing")
+        print(f"python {t} --all                {MODE['menu_verb']} everything "
+              "that needs it (backups kept)")
+        print(f"python {t} ModName              just one mod")
+        print(f"python {t} --restore --all      undo everything")
+        print(f'python {t} --path "D:\\mods"     work on a folder '
+              "(add --all, --out, --restore)")
+        print(f"Or just drag mod folders or archives onto {t}.")
+        print("More: --debug adds detail to --list; --pause / --no-pause "
+              "control the exit prompt.")
+        return 0
 
     # Archives can't be scanned in place -- they are extracted and patched by
     # the drop menu -- so keep them out of find_mods but still count as work.
@@ -1308,7 +1186,9 @@ def main(argv):
                 print("   ", os.path.abspath(s))
         else:
             print("No mods found under", config.MODS_DIR)
-            print("                or", config.MODS_PAKS_DIR)
+            paks = getattr(config, "MODS_PAKS_DIR", "")
+            if paks:
+                print("                or", paks)
         return 1
 
     want_all = "--all" in flags
@@ -1322,12 +1202,44 @@ def main(argv):
         listing = True
 
     if listing:
+        needs_work = False
         if mods:
-            show_list(mods, debug, sources=scan_sources)
-        if archives or packed:
+            needs_work = show_list(mods, debug, sources=scan_sources)
+        # An archive is the one source that cannot be read where it lies, so
+        # it used to be offered on faith. Look inside instead: one that needs
+        # nothing is nothing to do, exactly as the same folder unpacked would
+        # be. (The copy is kept, so saying yes does not unpack it twice.)
+        # One already extracted and handled on an earlier run is reported as
+        # the duplicate it is, which says more than "nothing to do" when the
+        # unpacked copies are sitting right there -- so that is settled
+        # first. Only when the scan itself is clean: with work pending the
+        # menu processes the whole drop, archives included.
+        every = archives + [arc for p in packed for arc in _archives_in(p)]
+        dupe = set()
+        if not needs_work:
+            dupe = {os.path.normcase(os.path.abspath(a)) for a in every
+                    if _archive_covered(a, mods)}
+        settled = set()
+        for a in every:
+            if os.path.normcase(os.path.abspath(a)) in dupe:
+                continue
+            if _archive_needs(a) is False:
+                settled.add(os.path.normcase(os.path.abspath(a)))
+
+        def _handled(a):
+            return os.path.normcase(os.path.abspath(a)) in (settled | dupe)
+
+        def _settled(a):
+            return os.path.normcase(os.path.abspath(a)) in settled
+
+        live_archives = [a for a in archives if not _handled(a)]
+        live_packed = [p for p in packed
+                       if not all(_handled(a) for a in _archives_in(p))]
+        if live_archives or live_packed:
             print()
             print("  Archives to unpack and patch:")
-            for a in archives + [p for p in packed if p not in archives]:
+            for a in live_archives + [p for p in live_packed
+                                      if p not in live_archives]:
                 print(f"    {os.path.abspath(a)}")
                 if _is_archive(a):
                     _show_archive(a, " " * 8)
@@ -1335,29 +1247,58 @@ def main(argv):
                     for arc in _archives_in(a):
                         print(f"        {os.path.basename(arc)}")
                         _show_archive(arc, " " * 12)
+        skipped = ([a for a in archives if a not in live_archives]
+                   + [arc for p in packed if p not in live_packed
+                      for arc in _archives_in(p)])
+        done = [a for a in skipped if _settled(a)]
+        dupes = [a for a in skipped if not _settled(a)]
+        if done:
+            which = "this archive" if len(done) == 1 else "these archives"
+            print()
+            print(f"  Nothing to do in {which} -- what is inside is "
+                  f"{MODE['done_inside']}:")
+            for arc in done:
+                print(f"    {os.path.basename(arc)}")
+        if dupes:
+            print()
+            print("  Skipped -- the mods in these archives are already "
+                  "listed above:")
+            for arc in dupes:
+                print(f"    {os.path.basename(arc)}")
         # A drop owns its window, so a bare listing would dead-end at the exit
         # pause -- offer the follow-up: in-place confirm for installed mods, the
         # copy flow for anything else (an archive is always the copy flow).
+        # With nothing to do and nothing to unpack, there is nothing to offer.
         if sources and not (want_all or do_restore or named) and _owns_console():
-            if (scan_sources and not archives and not packed
+            if not (live_archives or live_packed) and not needs_work:
+                return 0
+            if (scan_sources and not live_archives and not live_packed
                     and _all_under_game(scan_sources)):
                 return _confirm_game_folder(scan_sources)
-            return _folder_menu(sources)
+            menu_sources = sources
+            if not needs_work:
+                # The scanned folders are done; only the archives hold
+                # anything unknown, so the offer covers just those.
+                menu_sources = [s for s in sources
+                                if s in live_archives or s in live_packed]
+            return _folder_menu(menu_sources)
         return 0
 
     # Archives are handled by the drop menu, not this direct-action path.
     if (archives or packed) and not mods:
-        print("An archive is extracted and patched by dragging it onto patch.py,")
-        print("not with flags. Drop it on patch.py, or unpack it and use --path.")
+        tool = MODE["tool"]
+        print(f"An archive is extracted and patched by dragging it onto {tool},")
+        print(f"not with flags. Drop it on {tool}, or unpack it and use --path.")
         return 1
 
     targets = mods if want_all else {k: v for k, v in mods.items() if k in named}
     unknown = [n for n in named if n not in mods]
     if unknown:
-        print("No mod called:", ", ".join(unknown), " (check the spelling)")
+        print(f"No mod called: {', '.join(unknown)} (check the spelling)")
     if not targets:
         print("Nothing selected. Use --list, --all, or name a mod.")
-        print("Installed mods:", ", ".join(mods))
+        print("Installed mods:" if not sources else "Mods found:",
+              ", ".join(mods))
         return 1
 
     backup_base = _backup_root(scan_sources)
@@ -1366,8 +1307,9 @@ def main(argv):
     for name, utoc in targets.items():
         print(name)
         if _is_dresscode(name) and not do_restore:
-            print("    skipped -- Dresscode has an official V1.005 update; install")
-            print("    it from its author instead of patching it here.")
+            print(f"    skipped -- {MODE['dresscode_skip'][0]}")
+            for line in MODE["dresscode_skip"][1:]:
+                print(f"    {line}")
             continue
         if do_restore:
             if restore(name, utoc, backup_base):
@@ -1381,13 +1323,13 @@ def main(argv):
             else:
                 unchanged.append(name)
             for r in _missing_reqs(utoc):
-                print(f"    note: this mod also needs {r}, which is not")
-                print("    installed -- without it, textures show as grey checkers.")
+                print(f"    note: still needs {r} installed -- "
+                      "textures stay grey without it")
         except Exception as ex:
             print(f"    FAILED: {type(ex).__name__}: {ex}")
             failed.append(name)
 
-    verb = "Restored" if do_restore else "Patched"
+    verb = "Restored" if do_restore else MODE["verb"]
     summary = []
     if failed:
         summary.append(f"  {verb} {len(changed)}, skipped {len(unchanged)}, "
@@ -1404,22 +1346,21 @@ def main(argv):
         summary.append("")
         if no_backup:
             if sources:
-                summary.append("  Patched copy is ready (your original was left"
-                               " untouched):")
+                summary.append(f"  {MODE['verb']} copy is ready (your original"
+                               " was left untouched):")
                 summary.append(f"      {os.path.abspath(sources[0])}{os.sep}")
             else:
-                summary.append("  Patched in place; no backup was taken"
+                summary.append(f"  {MODE['verb']} in place; no backup was taken"
                                " (--no-backup).")
         elif out_dir and not all(_same_path(out_dir, os.path.dirname(u))
                                  for u in targets.values()):
-            summary.append(f"  Patched copies written to  {os.path.abspath(out_dir)}")
+            summary.append(f"  {MODE['verb']} copies written to  "
+                           f"{os.path.abspath(out_dir)}")
             summary.append("  Your original files were left exactly as they were.")
         else:
             summary.append("  Your untouched originals are backed up in:")
-            summary.append(f"    {os.path.abspath(backup_base)}{os.sep}"
-                           "   (one folder per mod)")
-            summary.append("  Keep it to undo later with --restore, or just delete")
-            summary.append("  it once the game looks right -- your call.")
+            summary.append(f"    {os.path.abspath(backup_base)}{os.sep}")
+            summary.append("  Undo anytime with --restore.")
 
     if not failed:
         summary.append("")
@@ -1470,11 +1411,20 @@ def startup(require_game=True):
     return False
 
 
-if __name__ == "__main__":
+def run(argv):
+    """Full command-line entry: startup checks, the run, the exit pause.
+    Shared with unpatch.py, which flips MODE first."""
     # Folder mode (--path or dropped folders) needs only Oodle, not the game.
-    _sources = _parse_args(sys.argv[1:])[0]
+    _sources = _parse_args(argv)[0]
     code = 0 if startup(require_game=not _sources) else 1
-    if code == 0:
-        code = main(sys.argv[1:])
-    _pause_before_exit(sys.argv[1:])
-    sys.exit(code)
+    try:
+        if code == 0:
+            code = main(argv)
+    finally:
+        _discard_unpacked()     # whatever the scan opened and nothing claimed
+    _pause_before_exit(argv)
+    return code
+
+
+if __name__ == "__main__":
+    sys.exit(run(sys.argv[1:]))
