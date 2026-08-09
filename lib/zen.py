@@ -153,6 +153,18 @@ class ZenPackage:
         return s if number == 0 else f"{s}_{number - 1}"
 
 
+    def bundle_count(self):
+        """
+        How many export bundles this package has -- the number a container's
+        store entry records beside the export count.
+
+        The block is one 8-byte header per bundle followed by two 8-byte
+        entries per export (create, then serialize), so the headers are
+        whatever is left over once the entries are accounted for.
+        """
+        slots = (self.graph_off - self.bundles_off) // 8
+        return max(1, slots - 2 * len(self.exports))
+
     def export_data_start(self):
         """
         Where the actual object data begins inside this package.

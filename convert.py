@@ -1932,15 +1932,7 @@ def merge_loose(utocs, out_dir, base):
         packages = rename.read_packages(toc)
         if not packages:
             continue        # a mips-only pak: its chunks are in bulks_all
-        hdr = next(toc.read(i) for i in range(toc.n)
-                   if toc.chunk_ids[i][11] == 10)
-        info = conheader.parse(hdr)
-        entry_meta = {}
-        for j, pid in enumerate(conheader.package_ids(hdr, info)):
-            _sz, exp, bun = struct.unpack_from(
-                "<Qii", hdr, info["store_off"] + j * 32)[:3]
-            entry_meta[pid] = (exp, bun,
-                               conheader.imported_packages(hdr, info, j))
+        entry_meta = conheader.store_meta(toc, packages)
         for pid, pkg in packages.items():
             if pid in merged:
                 continue

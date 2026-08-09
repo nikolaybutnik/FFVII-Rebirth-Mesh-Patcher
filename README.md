@@ -408,11 +408,6 @@ Everything below is reference — you don't need any of it for an ordinary mod.
 - **Don't want to compose tiles at all?** Set `"stackable": true` and the parts
   stay drop-in files: you get a "Put in ~mods" folder that works as always,
   with only the costume in the menu.
-- **A weapon's moving parts may not move in Dresscode.** During testing, a weapon
-  with physics — a dangling chain, a strap — keeps its shape and textures
-  and looks right in the menus, but loses physics during gameplay. The conversion is
-  not the cause: the same weapon as a pak in `~mods` moves fine. If the
-  physics matter to you, keep that weapon as a pak.
 - **Weapon paks become weapon tiles, and the WEAPONS menu is its own.** A
   weapon tile belongs to a character, not a costume, so it stays on whatever
   they are wearing. A weapon mod therefore needs no costume — drop a folder of

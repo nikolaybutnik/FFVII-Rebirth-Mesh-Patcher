@@ -219,19 +219,11 @@ def stock_for(mesh_name, names):
     return None
 
 
-def _part_meta(toc):
-    """{pid: (exports, bundles, imported pids)} from a part pak's header."""
-    out = {}
-    hdr = next((toc.read(i) for i in range(toc.n)
-                if toc.chunk_ids[i][11] == 10), None)
-    info = conheader.parse(hdr) if hdr else None
-    if info is None:            # some packers write an unreadable header
-        return out
-    for j, pid in enumerate(conheader.package_ids(hdr, info)):
-        _sz, exp, bun = struct.unpack_from(
-            "<Qii", hdr, info["store_off"] + j * 32)[:3]
-        out[pid] = (exp, bun, conheader.imported_packages(hdr, info, j))
-    return out
+def _part_meta(toc, pkgs=None):
+    """{pid: (exports, bundles, imported pids)} from a part pak's header --
+    or counted off its packages when it has no readable one."""
+    return conheader.store_meta(toc, pkgs if pkgs is not None
+                                else rename.read_packages(toc))
 
 
 def replaces_stock_mesh(tile_data, stock_name):
@@ -284,7 +276,7 @@ def build_tile(plugin, safe, parts, say=print, label=None):
     """
     overrides, metas = {}, {}
     for toc, pkgs in parts:
-        pm = _part_meta(toc)
+        pm = _part_meta(toc, pkgs)
         for pid, p in pkgs.items():
             n = p["name"].lower()
             if not (n.startswith(WEAPON_ROOT) and n.count("/") >= 5):

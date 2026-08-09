@@ -800,16 +800,7 @@ def build(meta, outfits, plugin, out_root, say=print, extras=(),
                 "character's standard costume -- only costume mods convert")
         old_mesh_pid = cityhash.package_id(mesh_name)
 
-        hdr = next(toc.read(i) for i in range(toc.n)
-                   if toc.chunk_ids[i][11] == 10)
-        info = conheader.parse(hdr)
-        ids = conheader.package_ids(hdr, info)
-        raw_meta = {}
-        for j, pid in enumerate(ids):
-            _sz, exp, bun = struct.unpack_from(
-                "<Qii", hdr, info["store_off"] + j * 32)[:3]
-            raw_meta[pid] = (exp, bun,
-                             conheader.imported_packages(hdr, info, j))
+        raw_meta = conheader.store_meta(toc, packages)
         grafts = stockgraft.plan(packages, raw_meta, {old_mesh_pid}, say_once)
         borrowed, orphaned = _needs_elsewhere(packages, raw_meta, carried)
         if orphaned:
@@ -961,12 +952,6 @@ def build(meta, outfits, plugin, out_root, say=print, extras=(),
                 entries_weapons.append(dict(
                     label=row_label, mesh=mesh_path, player=player,
                     stock=stock_name))
-            # Same files move as a pak and hold still as a tile (menus
-            # fine), so the conversion is faithful; cause not yet pinned.
-            if rows:
-                say_once("      note: in testing, a weapon's moving parts "
-                         "hold still during gameplay. In tile preview and menus it looks fine).")
-                say_once("      Keep the pak in ~mods if the physics matter to you.")
         if not parts:
             continue
         for w in wearers:

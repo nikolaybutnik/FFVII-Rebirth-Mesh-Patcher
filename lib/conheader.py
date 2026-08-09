@@ -40,6 +40,9 @@ import struct
 
 COUNT_OFFSET = 0x20
 
+# The chunk type this module is about.
+HEADER_CHUNK = 10
+
 # The package count is stored TWICE -- here and at COUNT_OFFSET -- and both must
 # agree. Changing only one leaves a header that parses and then misbehaves.
 COUNT_ECHO_OFFSET = 0x08
@@ -62,6 +65,59 @@ def set_container_id(data, container_id):
     out = bytearray(data)
     struct.pack_into("<Q", out, 0, container_id)
     return bytes(out)
+
+
+def read(toc):
+    """
+    A container's header chunk, or None when there isn't a readable one.
+
+    Not every mod has one worth reading. A texture-only override pak works
+    from ~mods purely by chunk ID -- nothing is ever looked up in its header
+    -- so packers get away with writing 40-odd bytes that are not even valid
+    compressed data, and one did (field report: a weapon retexture crashed
+    the conversion inside zlib). A caller that can carry on without the
+    header should, rather than the whole mod dying on a chunk the game
+    itself never reads.
+    """
+    for i in range(toc.n):
+        if toc.chunk_ids[i][11] != HEADER_CHUNK:
+            continue
+        try:
+            return toc.read(i)
+        except Exception:
+            return None
+    return None
+
+
+def store_meta(toc, packages):
+    """
+    {pid: (exports, bundles, imported pids)} for a container -- read from the
+    header, or counted off the packages themselves when there is no readable
+    one.
+
+    The counts are not optional detail: a store entry claiming one export for
+    a package that has three produces a plugin the build's own verify
+    refuses. Dependency lists cannot be recovered this way, so they come back
+    empty -- everything such a pak imports is resolved by ID anyway.
+    """
+    hdr = read(toc)
+    info = parse(hdr) if hdr else None
+    if info is not None:
+        out = {}
+        for j, pid in enumerate(package_ids(hdr, info)):
+            _sz, exp, bun = struct.unpack_from(
+                "<Qii", hdr, info["store_off"] + j * 32)[:3]
+            out[pid] = (exp, bun, imported_packages(hdr, info, j))
+        return out
+    from zen import ZenPackage
+    out = {}
+    for pid, pkg in packages.items():
+        try:
+            z = ZenPackage(toc.read(pkg["chunk"]))
+            out[pid] = (len(z.exports), z.bundle_count(), [])
+        except Exception:
+            out[pid] = (1, 1, [])
+    return out
 
 
 def parse(data):
