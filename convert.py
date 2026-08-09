@@ -1794,17 +1794,24 @@ def classify_companions(outfit_utocs, candidates):
         progress("sorting companions from options",
                  len(outfit_utocs) + k, total)
         toc = iostore.Toc(u)
-        infos.append((u, rename.read_packages(toc)))
+        bulk_pids = {int.from_bytes(toc.chunk_ids[i][:8], "little")
+                     for i in range(toc.n) if toc.chunk_ids[i][11] in (3, 4)}
+        infos.append((u, rename.read_packages(toc), bulk_pids))
         toc.close()
     progress("sorting companions from options", total, total)
 
     options, kind = [], []
-    for u, pkgs in infos:
+    for u, pkgs, bulk_pids in infos:
         pids = set(pkgs)
         if pids & own:
             options.append(u)               # overrides the outfit itself
         elif pids & deps or retouches(outfits, pkgs):
             kind.append((u, pids))
+        elif not pids and bulk_pids & own:
+            # No packages at all, only bulk data belonging to the outfit's
+            # own: the separate "optional" pak of top texture mips. It is
+            # part of the outfit, never a thing to choose in a menu.
+            kind.append((u, bulk_pids))
         else:
             options.append(u)               # nothing of this mod's at all
     # Load order settled choose-one sets in ~mods; the alphabetical first is
@@ -1906,8 +1913,25 @@ def merge_loose(utocs, out_dir, base):
     tocs = [iostore.Toc(u) for u in utocs]
     template = tocs[0]
     merged, order = {}, []
+    # Bulk data for one package can live in a DIFFERENT pak: authors ship the
+    # top texture mips as a separate "optional" container of .uptnl chunks
+    # with no packages of its own. Collect across every pak first, or the
+    # merge keeps only what sat beside the .uasset and the mod loses detail.
+    bulks_all, seen_chunks = {}, set()
+    for toc in tocs:
+        for i in range(toc.n):
+            if toc.chunk_ids[i][11] not in (3, 4):
+                continue
+            cid12 = bytes(toc.chunk_ids[i])
+            if cid12 in seen_chunks:
+                continue
+            seen_chunks.add(cid12)
+            pid = int.from_bytes(cid12[:8], "little")
+            bulks_all.setdefault(pid, []).append((toc, i))
     for toc in tocs:
         packages = rename.read_packages(toc)
+        if not packages:
+            continue        # a mips-only pak: its chunks are in bulks_all
         hdr = next(toc.read(i) for i in range(toc.n)
                    if toc.chunk_ids[i][11] == 10)
         info = conheader.parse(hdr)
@@ -1917,18 +1941,13 @@ def merge_loose(utocs, out_dir, base):
                 "<Qii", hdr, info["store_off"] + j * 32)[:3]
             entry_meta[pid] = (exp, bun,
                                conheader.imported_packages(hdr, info, j))
-        bulks = {}
-        for i in range(toc.n):
-            if toc.chunk_ids[i][11] in (3, 4):
-                pid = int.from_bytes(toc.chunk_ids[i][:8], "little")
-                bulks.setdefault(pid, []).append(i)
         for pid, pkg in packages.items():
             if pid in merged:
                 continue
             exp, bun, deps = entry_meta.get(pid, (1, 1, []))
             merged[pid] = dict(name=pkg["name"], toc=toc, data=toc.read(
                 pkg["chunk"]), exp=exp, bun=bun, deps=list(deps),
-                bulks=bulks.get(pid, []))
+                bulks=bulks_all.get(pid, []))
             order.append(pid)
 
     cid = cityhash.package_id(base)
@@ -1975,12 +1994,12 @@ def merge_loose(utocs, out_dir, base):
                            size=len(rec["data"])))
         payloads.append(rec["data"])
         paths.append((rel + ".uasset", len(chunks) - 1))
-        for i in rec["bulks"]:
-            data = rec["toc"].read(i)
-            chunks.append(dict(id=bytes(rec["toc"].chunk_ids[i]),
+        for btoc, i in rec["bulks"]:
+            data = btoc.read(i)
+            chunks.append(dict(id=bytes(btoc.chunk_ids[i]),
                                blocks=blocks_of(data), size=len(data)))
             payloads.append(data)
-            ext = ".uptnl" if rec["toc"].chunk_ids[i][11] == 4 else ".ubulk"
+            ext = ".uptnl" if btoc.chunk_ids[i][11] == 4 else ".ubulk"
             paths.append((rel + ext, len(chunks) - 1))
 
     directory = dirindex.build_dir_index("../../../End/Content/", paths)

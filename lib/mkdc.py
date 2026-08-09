@@ -612,6 +612,62 @@ def restore(rt, parts, out_root, optionals=None, say=print):
     return root
 
 
+def _needs_elsewhere(packages, raw_meta, carried):
+    """
+    ({pid: package} another pak in this mod carries, {pids} nobody has) for
+    the packages this pak imports but does not ship.
+
+    Mods that ship as a series share one body: every outfit's mesh imports
+    the skin materials, and exactly one pak in the download defines them at
+    a /Game/ path the game itself has no such file at. In ~mods that
+    resolves because both paks are mounted; in a plugin the import has to be
+    repointed at the copy the sibling brings, or the slot renders grey.
+
+    Only packages the GAME does not serve are linked. A pak's override of a
+    real stock file must keep resolving to the game's own copy for every
+    other outfit -- borrowing that would silently dress one outfit in
+    another's materials.
+    """
+    missing = set()
+    for _pid, (_exp, _bun, deps) in raw_meta.items():
+        for d in deps:
+            if d not in packages:
+                missing.add(d)
+    if not missing:
+        return {}, set()
+    missing -= set(stockgraft._locate(missing))
+    borrowed = {d: carried[d] for d in missing if d in carried}
+    return borrowed, missing - set(borrowed)
+
+
+def _say_missing(toc, packages, orphaned, say):
+    """Name the files nothing in this mod can supply. Package IDs are
+    hashes, so the names come from the name tables that mention them --
+    read only when there is something to report."""
+    found = set()
+    for p in packages.values():
+        try:
+            names = ZenPackage(toc.read(p["chunk"])).names
+        except Exception:
+            continue
+        for n in names:
+            if n.startswith("/Game/") \
+                    and cityhash.package_id(n.lower()) in orphaned:
+                found.add(n.rsplit("/", 1)[-1])
+        if len(found) >= len(orphaned):
+            break
+    if not found:
+        return
+    listed = sorted(found)
+    shown = ", ".join(listed[:3])
+    if len(listed) > 3:
+        shown += f" and {len(listed) - 3} more"
+    say(f"      note: this outfit uses {shown} from another mod that is "
+        "not here.")
+    say("      Those parts will look grey. Put that mod's pak folder "
+        "in with the others.")
+
+
 def build(meta, outfits, plugin, out_root, say=print, extras=(),
           external=(), weapon_tiles=True):
     """
@@ -675,6 +731,13 @@ def build(meta, outfits, plugin, out_root, say=print, extras=(),
         tick(f"reading outfit {len(pre) + 1}/{len(outfits)}")
         ptoc = iostore.Toc(outfit["utoc"])
         pre.append((ptoc, rename.read_packages(ptoc)))
+    # Everything the whole mod carries, so one outfit can use a file another
+    # outfit's pak brings -- a series sharing one body, say. See
+    # _needs_elsewhere.
+    carried = {}
+    for _ptoc, ppkgs in pre:
+        for pid, p in ppkgs.items():
+            carried.setdefault(pid, p)
     shared = {}
     for k, (_ptoc, ppkgs) in enumerate(pre):
         for p in ppkgs.values():
@@ -748,6 +811,9 @@ def build(meta, outfits, plugin, out_root, say=print, extras=(),
             raw_meta[pid] = (exp, bun,
                              conheader.imported_packages(hdr, info, j))
         grafts = stockgraft.plan(packages, raw_meta, {old_mesh_pid}, say_once)
+        borrowed, orphaned = _needs_elsewhere(packages, raw_meta, carried)
+        if orphaned:
+            _say_missing(toc, packages, orphaned, say_once)
 
         safe = safe_id(outfit["name"], used_names, f"Outfit{k + 1}")
         mesh_new = f"/{plugin}/Outfits/{safe}"
@@ -774,6 +840,16 @@ def build(meta, outfits, plugin, out_root, say=print, extras=(),
                     continue
                 extra_imports[e["gimp"]] = cityhash.object_id(
                     new_name, pkgedit.export_object_path(gp, e))
+        for bpid, bp in borrowed.items():
+            low = bp["name"].lower()
+            if low in renames or low in external:
+                continue
+            tail = bp["name"][6:] if low.startswith("/game/") \
+                else bp["name"].lstrip("/")
+            renames[low] = f"/{plugin}/{tail}"
+            for path in bp["exports"]:
+                extra_imports[cityhash.object_id(bp["name"], path)] = \
+                    cityhash.object_id(renames[low], path)
         new_data, new_ids = rename.rewrite_chunks(
             toc, packages, renames, fix_arcs=True,
             extra_imports=extra_imports)
@@ -783,6 +859,10 @@ def build(meta, outfits, plugin, out_root, say=print, extras=(),
                    if pkg["name"].lower() in renames}
         for gpid, g in grafts.items():
             pid_map[gpid] = cityhash.package_id(renames[g["name"].lower()])
+        for bpid, bp in borrowed.items():
+            new_name = renames.get(bp["name"].lower())
+            if new_name:
+                pid_map[bpid] = cityhash.package_id(new_name)
         entry_meta = {pid: (exp, bun, [pid_map.get(p, p) for p in deps])
                       for pid, (exp, bun, deps) in raw_meta.items()}
 
