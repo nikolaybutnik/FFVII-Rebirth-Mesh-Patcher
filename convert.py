@@ -3031,11 +3031,13 @@ def unpack_archive_folder(source, temps, assume_yes):
     print(f"  Unpacking {len(archives)} archive"
           f"{'s' if len(archives) != 1 else ''} from "
           f"{os.path.basename(source)} ...")
-    for a in archives:
+    for n, a in enumerate(archives, 1):
+        drops.progress("unpacking", n, len(archives), a)
         sub = os.path.join(tmp, folder_name(
             os.path.splitext(os.path.basename(a))[0]) or "mod")
         os.makedirs(sub, exist_ok=True)
         drops.extract_archive(a, sub)
+    drops.progress_done()
     drops.expand_archives(tmp)
     mods = find_mods(tmp)
     if not mods or any(up for _u, up in mods):

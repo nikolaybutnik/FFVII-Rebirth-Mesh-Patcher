@@ -8,7 +8,22 @@ archives nested inside archives, which is how mods are commonly shared.
 """
 
 import os
+import sys
 import zipfile
+
+
+def progress(verb, n, total, path):
+    """Name the archive being worked on, in place. Opening one means unpacking
+    it, and a folder of big downloads is minutes of that -- unannounced, the
+    window looks hung (field report). Quiet when output is not a console."""
+    if sys.stdout.isatty():
+        print(f"\r  {verb} {n}/{total}  "
+              f"{os.path.basename(path)[:44]:<44}", end="", flush=True)
+
+
+def progress_done():
+    if sys.stdout.isatty():
+        print("\r" + " " * 70 + "\r", end="", flush=True)
 
 
 # ---------------------------------------------------------------------------

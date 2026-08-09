@@ -857,6 +857,8 @@ _show_archive = drops.show_archive
 _archive_summary = drops.archive_summary
 _extract_archive = drops.extract_archive
 _expand_archives = drops.expand_archives
+_peek_line = drops.progress
+_peek_done = drops.progress_done
 
 
 # Archives unpacked to be looked inside, keyed by absolute path. Unpacking
@@ -878,6 +880,8 @@ def _unpack_to_look(arc):
     dst = tempfile.mkdtemp(prefix="modscan-")
     try:
         _extract_archive(arc, dst)
+        if _contains_archive(dst):
+            _peek_done()        # nested unpacking prints lines of its own
         _expand_archives(dst)
     except Exception:
         shutil.rmtree(dst, ignore_errors=True)
@@ -1220,11 +1224,13 @@ def main(argv):
             dupe = {os.path.normcase(os.path.abspath(a)) for a in every
                     if _archive_covered(a, mods)}
         settled = set()
-        for a in every:
+        for n, a in enumerate(every, 1):
             if os.path.normcase(os.path.abspath(a)) in dupe:
                 continue
+            _peek_line("looking inside", n, len(every), a)
             if _archive_needs(a) is False:
                 settled.add(os.path.normcase(os.path.abspath(a)))
+        _peek_done()
 
         def _handled(a):
             return os.path.normcase(os.path.abspath(a)) in (settled | dupe)
