@@ -917,7 +917,7 @@ def build(meta, outfits, plugin, out_root, say=print, extras=(),
     for label, utocs, only_on in extras:
         tick(f"reading part: {label}")
         parts, parts_index = [], {}
-        weapon_parts = []
+        weapon_parts, part_stems = [], []
         for utoc in utocs:
             key = os.path.normcase(os.path.abspath(utoc))
             if key not in opened:
@@ -938,6 +938,7 @@ def build(meta, outfits, plugin, out_root, say=print, extras=(),
                 weapon_parts.append((etoc, epkgs))
                 continue
             parts.append((etoc, epkgs))
+            part_stems.append(os.path.splitext(os.path.basename(utoc))[0])
             parts_index.update(eindex)
         if weapon_parts and weapon_tiles:
             wsafe = safe_id(f"{label}", used_names,
@@ -962,16 +963,24 @@ def build(meta, outfits, plugin, out_root, say=print, extras=(),
                 w["toc"], w["packages"], w["mesh_chunk"], parts,
                 refs=w.setdefault(
                     "refs", toggles.references(w["toc"], w["packages"])))
+            # A part carrying its own costume mesh is a whole outfit filed
+            # as an add-on: a toggle swaps materials and cannot reshape a
+            # model. Said per PAK and whether or not the entry still makes a
+            # tile -- an entry mixing one of these with a material pak used
+            # to build quietly, and every tile came out wearing the base
+            # body (field report: no underwear and one figure, on all of
+            # them, while the material half worked).
+            for stem, (_et, ep) in zip(part_stems, parts):
+                if find_stock_mesh(ep)[0]:
+                    say_once(f"      note: {stem} is a whole body, not a "
+                             "material -- it cannot ride a tile and is "
+                             "left out.")
+                    say_once("      Move its folder beside the outfit "
+                             "folders to make it a costume of its own.")
             if not slots:
                 names = [p["name"] for _et, ep in parts for p in ep.values()]
-                # A part carrying its own costume mesh is a whole outfit
-                # filed as an add-on: Optional swaps materials, and no
-                # toggle can reshape a model.
                 if any(find_stock_mesh(ep)[0] for _et, ep in parts):
-                    say_once(f"      note: {label} replaces the model, not "
-                             "just materials -- no tile. Move its folder "
-                             "beside the outfit folders to make it an "
-                             "outfit of its own.")
+                    pass                # already said which pak, and why
                 elif names and all(n.lower().startswith("/game/")
                                    for n in names):
                     say_once(f"      note: {label} changes game files this "
