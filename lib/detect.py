@@ -46,7 +46,11 @@ def _oodle_version_ok(path):
 # ---------------------------------------------------------------------------
 
 def steam_root():
-    """Steam's install folder, from the registry, falling back to usual spots."""
+    """
+    Steam's install folder, from the registry, falling back to usual spots.
+    Registry only works on Windows, otherwise for Linux the symlinks let us
+    keep chasing down the Steam directory.
+    """
     try:
         import winreg
         keys = (
@@ -68,7 +72,18 @@ def steam_root():
     except ImportError:
         pass
 
-    for guess in (r"C:\Program Files (x86)\Steam", r"C:\Program Files\Steam"):
+    home = os.path.expanduser("~")
+    # On Linux order matters, read through the steam managed symlinks first then native address.
+    # Flatpak at the end, even if its order is less important.
+    guesses = (
+        os.path.join(home, ".steam", "steam"),
+        os.path.join(home, ".steam", "root"),
+        os.path.join(home, ".local", "share", "Steam"),
+        os.path.join(home, ".var", "app", "com.valvesoftware.Steam", ".local", "share", "Steam"),
+        r"C:\Program Files (x86)\Steam",
+        r"C:\Program Files\Steam"
+    )
+    for guess in guesses:
         if os.path.isdir(guess):
             return guess
     return None
@@ -96,7 +111,7 @@ def steam_libraries():
 
     out, seen = [], set()
     for p in libs:
-        key = os.path.normcase(os.path.abspath(p))
+        key = os.path.normcase(os.path.realpath(p))
         if key not in seen:
             seen.add(key)
             out.append(p)

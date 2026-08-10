@@ -132,9 +132,7 @@ cmake -S third_party -B third_party/build -DCMAKE_BUILD_TYPE=Debug
 cmake --build third_party/build --target linoodle
 ```
 
-**Steam-registry lookup in the auto-detection above is Windows-only.**
-It can only find the game by sitting inside its folder,
-and the Oodle DLL has to be sitting next to `patch.py`.
+**Steam is the only storefront detected, Epic, GOG, and Unreal Engine are not auto detected**
 
 ---
 
