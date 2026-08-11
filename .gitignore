@@ -7,3 +7,7 @@ releases/
 assets/
 tests/
 parts out/
+
+# Linux
+*.dll
+third_party/build/

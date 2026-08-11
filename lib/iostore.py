@@ -58,6 +58,44 @@ import config
 # to import this module and get a helpful error, not a raw ctypes OSError.
 _oodle = None
 
+# Third party dependency linoodle hardcodes the name oo2core_8_win64.dll
+LINOODLE_REQUIRED_DLL_NAME = "oo2core_8_win64.dll"
+
+
+def _linoodle_paths(dll_path):
+    build_dir = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "third_party", "build")
+    so_path = os.path.join(build_dir, "liblinoodle.so")
+    if not os.path.isfile(so_path):
+        raise RuntimeError(
+            "linoodle has not been built,\n"
+            f"{so_path}\n"
+            "please make sure to run the following commands found in the README\n"
+            "   cmake -S third_party -B third_party/build -DCMAKE_BUILD_TYPE=Debug\n"
+            "   cmake --build third_party/build --target linoodle"
+        )
+    # Build the symlink to say that it is "oo2core_8_win64.dll",
+    # in reality we can put any version of the oodle dll that we have
+    dll_link = os.path.join(build_dir, LINOODLE_REQUIRED_DLL_NAME)
+    # os.path.lexists() is true for regular files as well as symlinks, so
+    # os.remove() would unlink a real oo2core_8_win64.dll a user had put there.
+    if os.path.lexists(dll_link) and not os.path.islink(dll_link):
+        return so_path, build_dir
+    if not os.path.lexists(dll_link) or os.path.realpath(dll_link) != os.path.realpath(dll_path):
+        if os.path.lexists(dll_link):
+            os.remove(dll_link)
+        os.symlink(os.path.abspath(dll_path), dll_link)
+    return so_path, build_dir
+
+
+def _oodle_load_target(dll_path):
+    if sys.platform.startswith("win"):
+        return dll_path, None
+    if sys.platform.startswith("linux"):
+        return _linoodle_paths(dll_path)
+    raise RuntimeError(f"Unsupported platform: {sys.platform}")
+
 
 def _load_oodle():
     global _oodle
@@ -70,13 +108,21 @@ def _load_oodle():
     if not os.path.exists(path):
         raise RuntimeError(f"Oodle library not found: {path}")
 
+    load_path, load_dir = _oodle_load_target(path)
+
+    prev_cwd = os.getcwd()
+    if load_dir is not None:
+        os.chdir(load_dir)
     try:
-        lib = ctypes.CDLL(path)
+        lib = ctypes.CDLL(load_path)
     except OSError as ex:
-        raise RuntimeError(f"Could not load {path}: {ex}") from None
+        raise RuntimeError(f"Could not load {load_path}: {ex}") from None
+    finally:
+        if load_dir is not None:
+            os.chdir(prev_cwd)
     if not hasattr(lib, "OodleLZ_Decompress"):
         raise RuntimeError(
-            f"{os.path.basename(path)} has no OodleLZ_Decompress -- "
+            f"{os.path.basename(load_path)} has no OodleLZ_Decompress -- "
             "it does not look like an Oodle core library.")
 
     lib.OodleLZ_Decompress.restype = ctypes.c_int64

@@ -46,7 +46,11 @@ def _oodle_version_ok(path):
 # ---------------------------------------------------------------------------
 
 def steam_root():
-    """Steam's install folder, from the registry, falling back to usual spots."""
+    """
+    Steam's install folder, from the registry, falling back to usual spots.
+    Registry only works on Windows, otherwise for Linux the symlinks let us
+    keep chasing down the Steam directory.
+    """
     try:
         import winreg
         keys = (
@@ -68,7 +72,18 @@ def steam_root():
     except ImportError:
         pass
 
-    for guess in (r"C:\Program Files (x86)\Steam", r"C:\Program Files\Steam"):
+    home = os.path.expanduser("~")
+    # On Linux order matters, read through the steam managed symlinks first then native address.
+    # Flatpak at the end, even if its order is less important.
+    guesses = (
+        os.path.join(home, ".steam", "steam"),
+        os.path.join(home, ".steam", "root"),
+        os.path.join(home, ".local", "share", "Steam"),
+        os.path.join(home, ".var", "app", "com.valvesoftware.Steam", ".local", "share", "Steam"),
+        r"C:\Program Files (x86)\Steam",
+        r"C:\Program Files\Steam"
+    )
+    for guess in guesses:
         if os.path.isdir(guess):
             return guess
     return None
@@ -96,7 +111,7 @@ def steam_libraries():
 
     out, seen = [], set()
     for p in libs:
-        key = os.path.normcase(os.path.abspath(p))
+        key = os.path.normcase(os.path.realpath(p))
         if key not in seen:
             seen.add(key)
             out.append(p)
@@ -202,7 +217,8 @@ def _oodle_in_dir(folder):
 
 def _oodle_in_engine(engine_root):
     """
-    A usable Oodle DLL inside one Unreal Engine install, or None.
+    A usable Oodle DLL under `engine_root`\\Engine\\Binaries, or None. 
+    An engine install or a shipped Unreal game, both carry that layout.
 
     The location and filename changed across engine versions, so this searches
     rather than assuming a fixed path. Older engines keep a versioned
@@ -274,7 +290,8 @@ def _oodle_candidates(extra_dirs=()):
     """
     Yield every usable Oodle DLL, best first: beside the tool, then one per
     installed game, then one per Unreal Engine install. Game folders are scanned
-    depth-limited -- a full disk walk would be far too slow.
+    depth-limited -- a full disk walk would be far too slow -- then their
+    Engine\\Binaries, if they have one.
     """
     here = os.path.dirname(os.path.abspath(__file__))
     for d in (here, os.path.dirname(here)) + tuple(extra_dirs):
@@ -292,10 +309,13 @@ def _oodle_candidates(extra_dirs=()):
         except OSError:
             continue
         for g in games:
-            hit = _oodle_in_tree(os.path.join(root, g), 2)
+            game = os.path.join(root, g)
+            hit = _oodle_in_tree(game, 2) or _oodle_in_engine(game)
             if hit:
                 yield hit
 
+    # Standalone UE_* engine installs, already reached by the loop above since
+    # they sit in the same roots. This pass yields the newest engine first.
     for root in roots:
         for engine in sorted(glob.glob(os.path.join(root, "UE_*")), reverse=True):
             hit = _oodle_in_engine(engine)
@@ -317,6 +337,7 @@ def find_all_oodle(extra_dirs=()):
 # Games known to ship a WORKING DLL loose, for the "could not find it" message.
 # FFVII Rebirth needs oo2core_6 or newer; oo2core_5 and older can't decode it.
 KNOWN_OODLE_GAMES = [
+    "FINAL FANTASY VII REMAKE",
     "ELDEN RING",
     "DOOM Eternal",
     "DEATH STRANDING DIRECTOR'S CUT",
