@@ -442,6 +442,46 @@ Everything below is reference — you don't need any of it for an ordinary mod.
 
 ---
 
+## Aiming a pak at another costume or weapon (repoint.py)
+
+A `~mods` pak replaces one particular costume — whichever one the author built
+it on. `repoint.py` moves it to a different one.
+
+Drag a pak mod's folder onto `repoint.py`, or run:
+
+```
+python repoint.py "D:\mods\Some Pak Mod"
+```
+
+It says what each pak replaces now, lists that character's other costumes (or
+weapons), and asks which you want instead. Answer with numbers — `3`, `2,5,7`,
+`2-5`, or `all`. Repointed copies go into a `(Repointed)` folder beside the original, which is never touched.
+
+- **Paks only.** A Dresscode mod already lets you pick in its menu. Run
+  `convert.py` on one first if you want it as paks.
+- **Same character only.** Another character's costume is built on another
+  skeleton, so it isn't offered.
+- **Picking several gives you one pak, not several.** The mesh is copied onto
+  each costume and everything else stays in one place, so three costumes cost
+  barely more than one.
+- **Drop the whole mod folder**, not one pak at a time. When a mod comes as
+  several paks — a main one plus optional extras — the extras override files
+  that sit inside the costume's folder. Move the main pak and those files move
+  with it, so an extra left on the old costume is pointing at files nothing
+  uses any more, and quietly does nothing. Dropping the folder asks you once
+  and moves all of them together.
+- **It tells you what won't carry over.** Some mods replace one of the game's
+  own files — a skin texture, say — that only exists on the costume they were
+  built for. Move the mod and the game has no such file on the new costume, so
+  that one replacement stops doing anything. The outfit still works; the tool
+  just lists what dropped out, so a small unexplained difference isn't a
+  mystery. This is the one part that needs the game installed.
+- **No game install needed** otherwise. The list of costumes and weapons is
+  the same on every copy of the game, so it ships with the tool — you only
+  need the Oodle DLL, same as `patch.py --path`.
+
+---
+
 ## Leaving parts out (devtools\parts.py)
 
 A workbench tool, separate from patching. Drag a pak mod — folder, `.utoc`

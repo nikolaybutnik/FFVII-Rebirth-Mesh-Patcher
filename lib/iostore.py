@@ -334,6 +334,32 @@ class Toc:
 
         return bytes(out[:length])
 
+    def raw_blocks(self, index):
+        """
+        Chunk `index`'s compressed blocks exactly as stored, as
+        [(bytes, uncompressed size, method)] -- the shape writer.py wants.
+
+        For copying a chunk into another container unchanged. Nothing is
+        decompressed, so a mod's texture mips -- most of its bytes, and
+        never edited by anything here -- cost a file read rather than a
+        decompress and a re-compress.
+        """
+        offset, length = self.offlen[index]
+        block = offset // self.block_size
+        out, remaining = [], length
+        while remaining > 0:
+            pos, csize, usize, method = self.blocks[block]
+            self.ucas.seek(pos)
+            out.append((self.ucas.read(csize), usize, method))
+            remaining -= usize
+            block += 1
+        return out
+
+    def meta_row(self, index):
+        """A chunk's whole 33-byte checksum row: SHA-1, padding and flags."""
+        o = self.meta_off + index * 33
+        return bytes(self.d[o:o + 33])
+
     # -- small helpers -------------------------------------------------------
 
     def close(self):

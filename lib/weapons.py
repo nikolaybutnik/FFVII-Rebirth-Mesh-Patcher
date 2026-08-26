@@ -40,6 +40,7 @@ import moddata
 import pkgedit
 import rename
 import stockgraft
+import stockslots
 from zen import ZenPackage
 
 WEAPON_ROOT = "/game/character/weapon/"
@@ -161,8 +162,8 @@ def stock_index():
     Read from the GAME's own container directory first: it lists every
     weapon (208 of them, against the 54 Dresscode's menu covers) and is
     there whenever the game is. Dresscode's weapon list is the fallback for
-    a machine with the mod but not the game. Neither is required -- with
-    no source at all, the row is skipped with a note rather than guessed at.
+    a machine with the mod but not the game. When neither source can name
+    the weapon, the conversion uses that character's default instead.
     """
     global _stock_index
     if _stock_index is not None:
@@ -217,6 +218,42 @@ def stock_for(mesh_name, names):
             if tail.startswith(k):
                 return index[k]
     return None
+
+
+def default_weapon_folder(player_type):
+    """
+    The stock weapon folder a character starts the game with.
+
+    Zack has no WE0009 tree -- he uses Cloud's swords -- so his default
+    is the Buster Sword. Everyone else is the first `_00` weapon whose
+    folder names them.
+    """
+    key = player_type.split("::")[-1].upper()
+    if key == "ZACK":
+        key = "CLOUD"
+    info = moddata.PLAYER_TYPES.get(key)
+    if not info:
+        return None
+    tag = info[1].split("_")[2]
+    for folder in stockslots.WEAPONS:
+        bits = folder.split("_")
+        if len(bits) >= 4 and bits[1] == "00" and bits[2].startswith(tag):
+            return folder
+    return None
+
+
+def default_weapon_package(player_type):
+    """
+    The stock mesh package the character's default weapon lives in.
+
+    Used when a Dresscode weapon row names no WE####_## -- authors often
+    ship `/Mod/Assets/BatteringSword` and still mean the Buster Sword.
+    """
+    folder = default_weapon_folder(player_type)
+    if not folder:
+        return None
+    slot = "_".join(folder.split("_")[:2])
+    return f"{WEAPON_ROOT_PROPER}{folder}/Model/{slot}"
 
 
 def _part_meta(toc, pkgs=None):

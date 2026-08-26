@@ -48,9 +48,9 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "lib
 
 import cityhash                                                 # noqa: E402
 import conheader                                                # noqa: E402
-import dirindex                                                 # noqa: E402
 import drops                                                    # noqa: E402
 import iostore                                                  # noqa: E402
+import loosepak                                                 # noqa: E402
 import matpack                                                  # noqa: E402
 import mkdc                                                     # noqa: E402
 import moddata                                                  # noqa: E402
@@ -61,7 +61,6 @@ import stockgraft                                               # noqa: E402
 import texread                                                  # noqa: E402
 import toggles                                                  # noqa: E402
 import weapons                                                  # noqa: E402
-import writer                                                   # noqa: E402
 import zen                                                      # noqa: E402
 
 # Diagnostic switch (--keep-registration): convert without dropping the two
@@ -311,8 +310,15 @@ def plan_variants(toc, plugin, extra_roots=()):
     base_meshes = {o["skeletal_mesh"].split(".")[0].lower()
                    for o in meshed if not o.get("actor")}
     wearable = []
+    seen_weapon_meshes = set()
     for o in meshed:
         mesh_low = o["skeletal_mesh"].split(".")[0].lower()
+        # Dresscode lists the same sword once per character so it appears
+        # in each weapons menu. A pak only needs one override of that mesh.
+        if o.get("weapon"):
+            if mesh_low in seen_weapon_meshes:
+                continue
+            seen_weapon_meshes.add(mesh_low)
         if not o.get("actor"):
             wearable.append(o)
         elif mesh_low not in base_meshes:
@@ -427,12 +433,17 @@ def plan_variants(toc, plugin, extra_roots=()):
         if not target:
             if outfit.get("weapon"):
                 print(f"  skipping {outfit['name'] or mesh!r}: cannot tell "
-                      "which weapon it replaces (its files carry no weapon "
-                      "id, or Dresscode is not installed to look one up)")
+                      "which weapon it replaces (unknown character "
+                      f"{outfit['player_type']!r})")
             else:
                 print(f"  skipping {outfit['name'] or mesh!r}: unknown "
                       f"character {outfit['player_type']!r}")
             continue
+        if outfit.get("weapon") and not weapons.stock_for(mesh, own):
+            who = outfit["player_type"].split("::")[-1].title()
+            print(f"  note: {outfit['name'] or mesh!r} names no stock "
+                  f"weapon -- replacing {who}'s default "
+                  f"({target.rsplit('/', 1)[-1]})")
 
         others = set().union(*(c for j, c in enumerate(closures) if j != k)) \
             if len(closures) > 1 else set()
@@ -489,7 +500,9 @@ def stock_target(row, own):
     """
     if not row.get("weapon"):
         return moddata.default_costume_package(row["player_type"])
-    return weapons.stock_for(row["skeletal_mesh"].split(".")[0], own)
+    mesh = row["skeletal_mesh"].split(".")[0]
+    return (weapons.stock_for(mesh, own)
+            or weapons.default_weapon_package(row["player_type"]))
 
 
 def converted_name(name, plugin, costume_root):
@@ -1953,82 +1966,20 @@ def merge_loose(utocs, out_dir, base):
             if pid in merged:
                 continue
             exp, bun, deps = entry_meta.get(pid, (1, 1, []))
-            merged[pid] = dict(name=pkg["name"], toc=toc, data=toc.read(
-                pkg["chunk"]), exp=exp, bun=bun, deps=list(deps),
-                bulks=bulks_all.get(pid, []))
+            # Plugin-rooted names occur when merging Dresscode containers
+            # with their libraries; the merged container is a conversion
+            # INPUT only, so its index paths just have to be self-consistent.
+            merged[pid] = dict(
+                name=pkg["name"], data=toc.read(pkg["chunk"]),
+                exp=exp, bun=bun, deps=list(deps),
+                bulks=[loosepak.copied(bt, i, template=template)
+                       for bt, i in bulks_all.get(pid, [])])
             order.append(pid)
 
-    cid = cityhash.package_id(base)
-    hdr_out = struct.pack("<QIIIIQ", cid, len(order), 0, 0, 8, 0xC1640000)
-    hdr_out += struct.pack("<I", len(order))
-    hdr_out += b"".join(p.to_bytes(8, "little") for p in order)
-    store = bytearray()
-    for j, pid in enumerate(order):
-        rec = merged[pid]
-        store += struct.pack("<QiiII", len(rec["data"]), rec["exp"],
-                             rec["bun"], j, 0xFFFFFFFF)
-        store += struct.pack("<II", 0, 0)
-    for j, pid in enumerate(order):
-        rec = merged[pid]
-        view = j * 32 + 24
-        if rec["deps"]:
-            struct.pack_into("<II", store, view, len(rec["deps"]),
-                             len(store) - view)
-            store += struct.pack(f"<{len(rec['deps'])}Q", *rec["deps"])
-    hdr_out += struct.pack("<I", len(store)) + store
-    if len(hdr_out) % 65536:
-        hdr_out += b"\0" * (65536 - len(hdr_out) % 65536)
-
-    comp = next((m for m, n in enumerate(template.methods)
-                 if n.lower() == "oodle"), None)
-
-    def blocks_of(payload):
-        return rename.pack_blocks(payload, template.block_size, comp)
-
-    chunks = [dict(id=cid.to_bytes(8, "little") + b"\0\0\0\x0a",
-                   blocks=blocks_of(hdr_out), size=len(hdr_out))]
-    payloads = [hdr_out]
-    paths = []
-    for pid in order:
-        rec = merged[pid]
-        # Plugin-rooted names occur when merging Dresscode containers with
-        # their libraries; the merged container is a conversion INPUT only,
-        # so the index path just has to be self-consistent.
-        rel = rec["name"][len("/Game/"):] \
-            if rec["name"].lower().startswith("/game/") \
-            else rec["name"].lstrip("/")
-        chunks.append(dict(id=pid.to_bytes(8, "little") + b"\0\0\0\x02",
-                           blocks=blocks_of(rec["data"]),
-                           size=len(rec["data"])))
-        payloads.append(rec["data"])
-        paths.append((rel + ".uasset", len(chunks) - 1))
-        for btoc, i in rec["bulks"]:
-            data = btoc.read(i)
-            chunks.append(dict(id=bytes(btoc.chunk_ids[i]),
-                               blocks=blocks_of(data), size=len(data)))
-            payloads.append(data)
-            ext = ".uptnl" if btoc.chunk_ids[i][11] == 4 else ".ubulk"
-            paths.append((rel + ext, len(chunks) - 1))
-
-    directory = dirindex.build_dir_index("../../../End/Content/", paths)
-    body, ucas, _offlen, block_table = writer.build_container(
-        template, chunks, template.block_size)
-    head = bytearray(writer.build_toc_header(
-        template, len(chunks), len(block_table), len(directory),
-        template.block_size))
-    struct.pack_into("<Q", head, 0x38, cid)
-    metas = b"".join(hashlib.sha1(p).digest() + b"\0" * 12 + b"\x01"
-                     for p in payloads)
-    os.makedirs(out_dir, exist_ok=True)
-    with open(os.path.join(out_dir, base + ".utoc"), "wb") as f:
-        f.write(bytes(head) + bytes(body) + directory + metas)
-    with open(os.path.join(out_dir, base + ".ucas"), "wb") as f:
-        f.write(ucas)
-    with open(os.path.join(out_dir, base + ".pak"), "wb") as f:
-        f.write(pakfile.build(pakfile.LOOSE_MOUNT))
+    written = loosepak.write(order, merged, out_dir, base, template)
     for toc in tocs:
         toc.close()
-    return os.path.join(out_dir, base + ".utoc")
+    return written
 
 
 def progress(label, done, total):

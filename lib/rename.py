@@ -133,6 +133,46 @@ def build_maps(packages, renames, object_renames=None, extra_imports=None):
     return pkgid_map, import_map, string_map
 
 
+def rewrite_package(data, old_name, renames, maps, objects=None,
+                    fix_arcs=False):
+    """
+    One package's bytes with every path in it repointed.
+
+        old_name  what this package is called now
+        maps      build_maps' (pkgid_map, import_map, string_map)
+        objects   {old export name -> new one} for this package alone
+
+    Split out of rewrite_chunks so a caller working from package bytes rather
+    than a whole container -- one duplicating a package onto a second name,
+    say -- renames it exactly the same way.
+    """
+    pkgid_map, import_map, string_map = maps
+    pkg = ZenPackage(data)
+    objects = objects or {}
+    names = [map_path(n, renames, string_map) for n in pkg.names]
+    export_names = {e["idx"]: objects[e["name"]]
+                    for e in pkg.exports if e["name"] in objects}
+    # A package with an FName number stores its own path unsuffixed, so the
+    # prefix rewrite above never matched it. Store the NEW name's base --
+    # not the old suffix stripped off the new name, which came back whole
+    # whenever the leaf changed shape (".../PC0002_11" -> "/Mod/Outfits/Foo")
+    # and left the stale number turning it into "Foo_11". pkgedit.rewrite
+    # re-encodes the number to match.
+    for mapped in (pkg.name, pkg.srcname):
+        idx, number = mapped & 0x3FFFFFFF, mapped >> 32
+        if number and idx < len(names):
+            resolved = pkg.name_at(mapped & 0xFFFFFFFF, number)
+            moved = renames.get(resolved.lower())
+            if moved:
+                names[idx] = pkgedit.split_name_number(moved)[0]
+    source = pkgedit.source_name_of(pkg)
+    return pkgedit.rewrite(
+        data, names=names, import_map=import_map, pkgid_map=pkgid_map,
+        new_package_name=renames.get(old_name.lower(), old_name),
+        new_source_name=renames.get(source.lower(), source),
+        export_names=export_names, fix_arcs=fix_arcs)
+
+
 def _chunk_id_with(chunk_id, package_id):
     return package_id.to_bytes(8, "little") + bytes(chunk_id[8:])
 
@@ -162,32 +202,10 @@ def rewrite_chunks(toc, packages, renames, object_renames=None, dropped=None,
         if progress:
             progress(i)
         data = toc.read(i)
-        pkg = ZenPackage(data)
-        new_name = renames.get(info["name"].lower(), info["name"])
-        names = [map_path(n, renames, string_map) for n in pkg.names]
-        objects = object_renames.get(info["name"].lower(), {})
-        export_names = {e["idx"]: objects[e["name"]]
-                        for e in pkg.exports if e["name"] in objects}
-        # A package with an FName number stores its own path unsuffixed, so the
-        # prefix rewrite above never matched it. Store the NEW name's base --
-        # not the old suffix stripped off the new name, which came back whole
-        # whenever the leaf changed shape (".../PC0002_11" -> "/Mod/Outfits/Foo")
-        # and left the stale number turning it into "Foo_11". pkgedit.rewrite
-        # re-encodes the number to match.
-        for mapped in (pkg.name, pkg.srcname):
-            idx, number = mapped & 0x3FFFFFFF, mapped >> 32
-            if number and idx < len(names):
-                resolved = pkg.name_at(mapped & 0xFFFFFFFF, number)
-                moved = renames.get(resolved.lower())
-                if moved:
-                    names[idx] = pkgedit.split_name_number(moved)[0]
-        source = pkgedit.source_name_of(pkg)
-        out = pkgedit.rewrite(
-            data, names=names,
-            import_map=import_map, pkgid_map=pkgid_map,
-            new_package_name=new_name,
-            new_source_name=renames.get(source.lower(), source),
-            export_names=export_names, fix_arcs=fix_arcs)
+        out = rewrite_package(data, info["name"], renames,
+                              (pkgid_map, import_map, string_map),
+                              object_renames.get(info["name"].lower()),
+                              fix_arcs=fix_arcs)
         edit = (post_edit or {}).get(info["name"].lower())
         if edit:
             out = edit(out)

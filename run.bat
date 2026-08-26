@@ -32,5 +32,7 @@ echo                                           game version 1.004. EVERY patch.p
 echo                                           command above works the same on it;
 echo                                           its backups live in unpatch_backups.
 echo     python convert.py                    convert mods between Dresscode and pak
+echo     python repoint.py                    aim a pak at a different costume or
+echo                                           weapon
 echo.
 cmd /k
