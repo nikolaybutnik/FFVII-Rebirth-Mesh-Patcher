@@ -132,6 +132,11 @@ cmake -S third_party -B third_party/build -DCMAKE_BUILD_TYPE=Release
 cmake --build third_party/build --target linoodle
 ```
 
+**Or skip the build.** Unreal Engine on Linux ships a native
+`liboo2corelinux64.so.9`. Rename it to `oo2core_9_win64.dll`, put it next to
+`patch.py`, and it loads directly -- no linoodle, no cmake. Credit to riffews
+on Nexus Mods for the workaround.
+
 Only Steam is found automatically on Linux. For anything else, point
 `OODLE_DLL` in `config.py` at the DLL yourself.
 

@@ -100,10 +100,20 @@ def _linoodle_paths(dll_path):
     return so_path, build_dir
 
 
+def _is_elf(path):
+    try:
+        with open(path, "rb") as f:
+            return f.read(4) == b"\x7fELF"
+    except OSError:
+        return False
+
+
 def _oodle_load_target(dll_path):
     if sys.platform.startswith("win"):
         return dll_path, None
     if sys.platform.startswith("linux"):
+        if _is_elf(dll_path):
+            return dll_path, None   # a native Linux Oodle under a .dll name
         return _linoodle_paths(dll_path)
     raise RuntimeError(f"Unsupported platform: {sys.platform}")
 
