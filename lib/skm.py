@@ -220,14 +220,13 @@ def parse_section(data, o):
     n_cloth = struct.unpack_from("<I", data, o)[0]; o += 4
     o += 4                                                  # unidentified field
     n_bonemap = struct.unpack_from("<I", data, o)[0]; o += 4
-    bone_map = [struct.unpack_from("<H", data, o + 2 * i)[0] for i in range(n_bonemap)]
-    o += n_bonemap * 2
+    o += n_bonemap * 2      # never read, and a desynced parse lands a huge one here
     n_vertices = struct.unpack_from("<I", data, o)[0]; o += 4
     max_influences = struct.unpack_from("<I", data, o)[0]; o += 4
     cloth_asset = struct.unpack_from("<h", data, o)[0]; o += 2
 
     return dict(strip=strip, material_index=material_index, base_index=base_index,
                 n_triangles=n_triangles, cast_shadow=cast_shadow,
-                base_vertex=base_vertex, bone_map=bone_map,
+                base_vertex=base_vertex, n_bonemap=n_bonemap,
                 n_vertices=n_vertices, max_influences=max_influences,
                 cloth_asset=cloth_asset), o
