@@ -797,7 +797,7 @@ def build(meta, outfits, plugin, out_root, say=print, extras=(),
         if not mesh_name:
             raise RuntimeError(
                 f"{os.path.basename(outfit['utoc'])} does not replace any "
-                "character's standard costume -- only costume mods convert")
+                "character's standard costume or weapon")
         old_mesh_pid = cityhash.package_id(mesh_name)
 
         raw_meta = conheader.store_meta(toc, packages)
