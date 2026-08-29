@@ -121,6 +121,21 @@ Dragging the DLL onto the window pastes its path, and it is copied next to
 
 ---
 
+## Linux
+
+In order to run on Linux you need [linoodle](https://github.com/McSimp/linoodle),
+which is fetched at build time. Needs `cmake`, `g++`, and `git`.
+Build once:
+
+```
+cmake -S third_party -B third_party/build -DCMAKE_BUILD_TYPE=Debug
+cmake --build third_party/build --target linoodle
+```
+
+**Steam is the only storefront detected, Epic, GOG, and Unreal Engine are not auto detected**
+
+---
+
 ## Usage
 
 ### Drag and drop
