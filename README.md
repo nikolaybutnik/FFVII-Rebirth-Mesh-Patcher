@@ -128,11 +128,12 @@ which is fetched at build time. Needs `cmake`, `g++`, and `git`.
 Build once:
 
 ```
-cmake -S third_party -B third_party/build -DCMAKE_BUILD_TYPE=Debug
+cmake -S third_party -B third_party/build -DCMAKE_BUILD_TYPE=Release
 cmake --build third_party/build --target linoodle
 ```
 
-**Steam is the only storefront detected, Epic, GOG, and Unreal Engine are not auto detected**
+Only Steam is found automatically on Linux. For anything else, point
+`OODLE_DLL` in `config.py` at the DLL yourself.
 
 ---
 

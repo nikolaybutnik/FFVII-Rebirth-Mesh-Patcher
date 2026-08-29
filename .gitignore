@@ -1,13 +1,12 @@
 __pycache__/
 *.pyc
 backups/
-oo2core*.dll
+*.dll
 config_local.py
 releases/
 assets/
 tests/
 parts out/
 
-# Linux
-*.dll
+# linoodle, built locally
 third_party/build/

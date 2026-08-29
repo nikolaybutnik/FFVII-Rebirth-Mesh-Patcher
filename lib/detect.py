@@ -224,7 +224,8 @@ def _oodle_in_engine(engine_root):
     rather than assuming a fixed path. Older engines keep a versioned
     oo2core_*_win64.dll somewhere under Engine\\Binaries; 5.6+ ships an
     unversioned oo2core.dll in the .NET tooling runtimes, alongside a 32-bit
-    sibling -- hence the win-x64 filter and the load-test. A full walk of
+    sibling -- hence the win-x64 filter and the load-test. That load-test can
+    only pass on Windows, so Linux finds the versioned names only. A full walk of
     Engine\\Binaries is ~15k files, well under a second, so breadth is fine.
     """
     binaries = os.path.join(engine_root, "Engine", "Binaries")
@@ -309,13 +310,16 @@ def _oodle_candidates(extra_dirs=()):
         except OSError:
             continue
         for g in games:
+            if g.startswith("UE_"):
+                continue        # engines get their own pass, below
             game = os.path.join(root, g)
             hit = _oodle_in_tree(game, 2) or _oodle_in_engine(game)
             if hit:
                 yield hit
 
-    # Standalone UE_* engine installs, already reached by the loop above since
-    # they sit in the same roots. This pass yields the newest engine first.
+    # Standalone UE_* engine installs, newest first. They sit in the same roots
+    # as the games, so the loop above skips them: reaching them there would walk
+    # every engine's Engine\Binaries twice AND yield the oldest one first.
     for root in roots:
         for engine in sorted(glob.glob(os.path.join(root, "UE_*")), reverse=True):
             hit = _oodle_in_engine(engine)

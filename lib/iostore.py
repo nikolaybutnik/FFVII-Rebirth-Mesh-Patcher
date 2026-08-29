@@ -81,11 +81,22 @@ def _linoodle_paths(dll_path):
     # os.path.lexists() is true for regular files as well as symlinks, so
     # os.remove() would unlink a real oo2core_8_win64.dll a user had put there.
     if os.path.lexists(dll_link) and not os.path.islink(dll_link):
+        # Whatever is sitting there wins, so say so -- it is loaded instead
+        # of the DLL that was detected or configured.
+        print(f"    note: using the {LINOODLE_REQUIRED_DLL_NAME} already in {build_dir}")
         return so_path, build_dir
     if not os.path.lexists(dll_link) or os.path.realpath(dll_link) != os.path.realpath(dll_path):
-        if os.path.lexists(dll_link):
-            os.remove(dll_link)
-        os.symlink(os.path.abspath(dll_path), dll_link)
+        try:
+            if os.path.lexists(dll_link):
+                os.remove(dll_link)
+            os.symlink(os.path.abspath(dll_path), dll_link)
+        except OSError as ex:
+            # A filesystem with no symlinks -- an NTFS partition shared with a
+            # Windows install is the common one. Copying the DLL in works too.
+            raise RuntimeError(
+                f"Could not link the Oodle DLL into {build_dir}: {ex}"
+                f" -- copy it there as {LINOODLE_REQUIRED_DLL_NAME} instead."
+            ) from None
     return so_path, build_dir
 
 
