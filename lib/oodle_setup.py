@@ -28,6 +28,7 @@ GUIDANCE = """
 
   If you own any of these, you already have a working one:
 
+      FINAL FANTASY VII REMAKE             Engine\\...\\Win64\\oo2core_7_win64.dll
       ELDEN RING                           Game\\oo2core_6_win64.dll
       DOOM Eternal                         oo2core_8_win64.dll
       DEATH STRANDING DIRECTOR'S CUT       oo2core_7_win64.dll
