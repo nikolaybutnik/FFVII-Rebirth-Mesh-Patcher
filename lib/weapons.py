@@ -104,39 +104,77 @@ def weapon_name(folder):
     return bits[3] if len(bits) > 3 else folder
 
 
+# Weapon numbers mirror the PC numbers, except where they do not: Sephiroth
+# is PC0010 and his Masamune is WE1021. He is the only playable character
+# the mirror misses, so the menu list below is what settles the rest.
+WEAPON_NUMBERS = {"1021": "SEPHIROTH"}
+
+
 def player_for(folder):
-    """WE0002_15_Tifa_... -> TIFA. Weapon numbering mirrors the PC numbers."""
+    """WE0002_15_Tifa_... -> TIFA, from the game's own menu list where it
+    has the weapon and from the PC numbering otherwise."""
     num = folder[2:6]
+    mirrored = None
     for key, (prefix, _folder) in moddata.PLAYER_TYPES.items():
         if prefix[2:6] == num:
-            return key
-    return None
+            mirrored = key
+    # One weapon can belong to two characters -- Zack and Cloud share the
+    # Buster Sword -- so the mirror breaks the tie where it has an answer.
+    menu = menu_weapons().get(folder.lower())
+    if menu:
+        return mirrored if mirrored in menu else sorted(menu)[0]
+    return mirrored or WEAPON_NUMBERS.get(num)
 
 
 _previews = None
+_menu = None
+
+
+def _read_dresscode():
+    """Dresscode's own weapon list: the billboard per stock weapon, and
+    which characters equip it. Empty when Dresscode is not readable here."""
+    global _previews, _menu
+    if _previews is not None:
+        return
+    _previews, _menu = {}, {}
+    pat = os.path.join(getattr(config, "MODS_DIR", "") or "", "Dresscode",
+                       "Content", "Paks", "WindowsNoEditor", "*.utoc")
+    for u in glob.glob(pat):
+        try:
+            toc = iostore.Toc(u)
+            for pid, p in rename.read_packages(toc).items():
+                if not p["name"].endswith("DA_ModData_WeaponDefaults"):
+                    continue
+                for row in moddata.read_outfits(toc.read(p["chunk"])):
+                    mesh = (row["skeletal_mesh"] or "").split(".")[0]
+                    if not mesh:
+                        continue
+                    if row["preview_image"]:
+                        _previews[mesh.lower()] = row["preview_image"]
+                    if mesh.count("/") >= 4:
+                        who = (row.get("player_type") or "").split("::")[-1]
+                        if who:
+                            _menu.setdefault(
+                                mesh.split("/")[4].lower(), set()).add(who)
+            toc.close()
+        except Exception:
+            pass
+
+
+def menu_weapons():
+    """{stock weapon folder (lower) -> {character}} for every weapon the
+    game equips, read from the installed Dresscode. The game ships far more
+    weapon folders than it equips -- cutscene variants, and the first
+    game's weapons carried over unused -- and none of those belong in a
+    menu. Empty when Dresscode is not readable: then nothing is filtered."""
+    _read_dresscode()
+    return _menu
 
 
 def stock_preview(mesh_name):
     """The billboard Dresscode's own weapon list shows for this stock weapon,
     from the installed Dresscode -- None when that is not readable here."""
-    global _previews
-    if _previews is None:
-        _previews = {}
-        pat = os.path.join(getattr(config, "MODS_DIR", "") or "", "Dresscode",
-                           "Content", "Paks", "WindowsNoEditor", "*.utoc")
-        for u in glob.glob(pat):
-            try:
-                toc = iostore.Toc(u)
-                for pid, p in rename.read_packages(toc).items():
-                    if not p["name"].endswith("DA_ModData_WeaponDefaults"):
-                        continue
-                    for row in moddata.read_outfits(toc.read(p["chunk"])):
-                        mesh = (row["skeletal_mesh"] or "").split(".")[0]
-                        if mesh and row["preview_image"]:
-                            _previews[mesh.lower()] = row["preview_image"]
-                toc.close()
-            except Exception:
-                pass
+    _read_dresscode()
     return _previews.get(mesh_name.lower())
 
 
@@ -348,6 +386,11 @@ def build_tile(plugin, safe, parts, say=print, label=None):
         if not player:
             say(f"      note: {folder} is not a weapon this tool knows "
                 "-- skipped")
+            continue
+        menu = menu_weapons()
+        if menu and folder.lower() not in menu:
+            say(f"      note: {weapon_name(folder)} is not a weapon the "
+                "game equips -- no tile")
             continue
         if mod_mesh:
             ment = (metas[mesh_pid][0], metas[mesh_pid][1],

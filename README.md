@@ -434,7 +434,9 @@ Everything below is reference — you don't need any of it for an ordinary mod.
   they are wearing. A weapon mod therefore needs no costume — drop a folder of
   weapon paks on their own and each weapon becomes a tile, including when one
   pak covers a character's whole set; `"outfits"` stays empty and the menu is
-  written for you. A weapon that ships its own model converts with nothing
+  written for you. Only weapons the game actually equips get a tile — the
+  data also holds cutscene variants and the first game's weapons, and a tile
+  each for those would bury the real one. A weapon that ships its own model converts with nothing
   installed; one that only recolours the stock model borrows it from the game,
   so that pak needs the game and is otherwise skipped with a note and keeps
   working from `~mods`. Coming back, a tile this tool made returns to an
