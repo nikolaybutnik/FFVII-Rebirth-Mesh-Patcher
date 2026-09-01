@@ -455,7 +455,12 @@ Everything below is reference — you don't need any of it for an ordinary mod.
   same as in game.
 - **Pictures**: one next to `dresscode.json` is the mod's thumbnail; one inside
   an outfit's folder is that outfit's preview. Name them `icon.png` /
-  `preview.png` if a folder holds several.
+  `preview.png` if a folder holds several. An **add-on pak** — a costume
+  toggle or a weapon tile — takes a `.png` named after the pak, beside the
+  pak (`Recolor_P.utoc` → `Recolor_P.png`); paks share a folder, so the name
+  is what says which is which. Without one a weapon tile shows the game's
+  picture of the weapon it replaces, and a toggle shows the plain
+  placeholder.
 - **What gets refused**: several different costume paks loose in the top folder
   with nothing saying which is which — give each its own subfolder, or one
   shared `Main\`. Also a folder with no costume pak in it, unless what's in

@@ -1037,6 +1037,18 @@ def find_image(folder, preferred):
     return os.path.join(folder, pics[0]) if pics else None
 
 
+def pak_image(utoc):
+    """The picture an add-on PAK nominates: one of the same name, beside it.
+    No alphabetical fallback like find_image -- add-on paks share a folder,
+    and the mod's own icon.png sits in one."""
+    folder = os.path.dirname(utoc) or "."
+    want = os.path.splitext(os.path.basename(utoc))[0].lower()
+    for p in images_in(folder):
+        if os.path.splitext(p)[0].lower() == want:
+            return os.path.join(folder, p)
+    return None
+
+
 def write_template(source, mod_name, parts, prefill=None, restore=None,
                    extras=()):
     """Prefill dresscode.json with the little a build needs. Pictures are on
@@ -1067,7 +1079,8 @@ def write_template(source, mod_name, parts, prefill=None, restore=None,
         intro += [
             "Pictures: icon.png next to this file becomes the mod's",
             "thumbnail; preview.png inside an outfit's folder becomes that",
-            "outfit's tile picture.",
+            "outfit's tile picture. An add-on pak's picture is a .png",
+            "named after the pak, beside the pak.",
             "",
             "Leave the 'folder' lines alone -- they say where the files",
             "live.",
@@ -1080,7 +1093,9 @@ def write_template(source, mod_name, parts, prefill=None, restore=None,
             "and stays that way.",
             "",
             "Pictures: icon.png next to this file becomes the mod's",
-            "thumbnail. Weapon tiles use the game's own picture.",
+            "thumbnail. A weapon tile shows the game's picture of the",
+            "weapon it replaces -- to change that, put a .png named after",
+            "the pak beside the pak.",
         ]
     template = {
         "_how_this_works": intro,
@@ -1296,7 +1311,7 @@ def unpack_restore(text):
         return None
 
 
-def restore_matches(rt, meta, outfits):
+def restore_matches(rt, meta, outfits, extras=()):
     """
     True when nothing the person can see was changed since the conversion
     recorded the original -- names, descriptions, pictures. Any edit means
@@ -1335,6 +1350,16 @@ def restore_matches(rt, meta, outfits):
         # with no preview of its own, the outfit picks the icon up as its
         # folder's image. Seeing the icon twice is not an edit.
         if got != want and not (want is None and got == rt.get("icon_md5")):
+            return False
+
+    # An add-on's picture sits beside its pak instead of in a folder, so it
+    # is compared by pak name -- unique across a mod (check_part_names).
+    # Only the paks the record knows are weighed: a picture beside some
+    # other pak does nothing, and must not read as an edit.
+    recorded = rt.get("part_pngs") or {}
+    for u in extras:
+        stem = os.path.splitext(os.path.basename(u))[0]
+        if stem in recorded and md5_of(pak_image(u)) != recorded[stem]:
             return False
     return md5_of(meta.get("icon")) == rt.get("icon_md5")
 
@@ -1434,14 +1459,16 @@ def library_record(root, lib_utoc, lib_uplugin, variants, optionals,
 
 
 def record_roundtrip(toc, uplugin, plugin, plans, ctx, mod_out, layout,
-                     opt_layout=(), orig=None, libraries=()):
+                     opt_layout=(), gun_layout=(), orig=None, libraries=()):
     """
     Leave everything beside the written paks that converting BACK will
     need: a prefilled dresscode.json, each outfit's preview as a PNG a person
     can see and swap, the plugin icon -- and the opaque restore record.
 
     `layout` is [(rel_folder, plan)], "." meaning the mod's root folder;
-    `opt_layout` is [(label, toggle)] for the generated Optional paks.
+    `opt_layout` is [(folder, pak stem, toggle)] for the generated Optional
+    paks, and `gun_layout` [(folder, pak stem, preview ref)] for the
+    weapons-menu tiles handed back as override paks.
 
     When library mods were inlined, `toc` is the MERGED container the plans
     were made against, `orig` the dependent's own, and `libraries` is
@@ -1467,9 +1494,11 @@ def record_roundtrip(toc, uplugin, plugin, plans, ctx, mod_out, layout,
     pngs = {}
 
     def put_png(folder, stem, chunk):
+        """The picture's md5, or None when the texture is in a format
+        texread cannot read."""
         got = texread.extract(toc.read(chunk))
         if not got:
-            return
+            return None
         w, h, bgra = got
         data = pngfile.encode(w, h, bgra)
         os.makedirs(folder, exist_ok=True)
@@ -1478,6 +1507,7 @@ def record_roundtrip(toc, uplugin, plugin, plans, ctx, mod_out, layout,
             f.write(data)
         rel = os.path.relpath(path, mod_out).replace("\\", "/")
         pngs[rel] = hashlib.md5(data).hexdigest()
+        return pngs[rel]
 
     for rel, (outfit, *_rest) in layout:
         ref = outfit.get("preview_image")
@@ -1488,12 +1518,16 @@ def record_roundtrip(toc, uplugin, plugin, plans, ctx, mod_out, layout,
         if chunk is not None:
             put_png(mod_out if rel == "." else os.path.join(mod_out, rel),
                     "preview", chunk)
-    for rel, _stem, t in opt_layout:
-        ref = t["row"].get("preview_image")
+    # An add-on's picture goes beside its pak, under the pak's own name,
+    # which is where a rebuild looks for it. Recorded even when there is
+    # none, so adding one later reads as the edit it is.
+    part_pngs = {}
+    for rel, stem, ref in ([(r, s, t["row"].get("preview_image"))
+                            for r, s, t in opt_layout] + list(gun_layout)):
         pid = by_name.get(ref.split(".")[0].lower()) if ref else None
-        if pid in packages:
-            put_png(os.path.join(mod_out, *rel.split("/")), "preview",
-                    packages[pid]["chunk"])
+        part_pngs[stem] = (
+            put_png(os.path.join(mod_out, *rel.split("/")), stem,
+                    packages[pid]["chunk"]) if pid in packages else None)
 
     icon_md5 = None
     icon_file = os.path.join(os.path.dirname(uplugin), "Resources",
@@ -1714,6 +1748,7 @@ def record_roundtrip(toc, uplugin, plugin, plans, ctx, mod_out, layout,
         variants=variants,
         optionals=optionals,
         pngs=pngs,
+        part_pngs=part_pngs,
         visible=visible,
         libraries=lib_records,
     )
@@ -2187,8 +2222,8 @@ def resolve_variants(meta, extras, outfits=()):
 
 def weapon_tiles_back(toc, packages):
     """
-    ([(label, renames, objects, keep)], elsewhere) turning the weapons-menu
-    tiles THIS TOOL built back into ordinary override paks.
+    ([(label, renames, objects, keep, preview)], elsewhere) turning the
+    weapons-menu tiles THIS TOOL built back into ordinary override paks.
 
     `elsewhere` names the rows laid out some other way -- an author's own
     weapon mod keeps its files under its plugin's own folders. Those are
@@ -2250,7 +2285,8 @@ def weapon_tiles_back(toc, packages):
             if not keep:
                 unmapped.append(label or folder)
                 continue
-            out.append((label or folder, renames, objects, keep))
+            out.append((label or folder, renames, objects, keep,
+                        row.get("preview_image")))
     return out, unmapped
 
 
@@ -2347,7 +2383,7 @@ def loose_to_dresscode(source, mods, assume_yes=False):
     # whose every row was a weapon tile this tool built hands those back as
     # override paks, which the fresh build turns into the same tiles again.
     restorable = bool(rt and (rt.get("variants") or rt.get("optionals")))
-    exact = restorable and restore_matches(rt, meta, outfits) \
+    exact = restorable and restore_matches(rt, meta, outfits, extras) \
         and not variants_edited
     plugin = rt["plugin"] if exact else plugin_id(meta["name"])
     # Several outfits, each with its own toggles, in one mod make a menu
@@ -2391,10 +2427,13 @@ def loose_to_dresscode(source, mods, assume_yes=False):
         pic = (os.path.basename(o["preview"]) if o["preview"]
                else "no picture (optional)")
         print(f"      {k + 1}. {o['name']}   [{pic}]")
-    for k, (name, _us, _only) in enumerate(variants if guns else ()):
+    for k, (name, us, _only) in enumerate(variants if guns else ()):
         n_t = gun_tiles[k]
+        pic = next((os.path.basename(p) for u in reversed(us)
+                    for p in [pak_image(u)] if p), None)
         print(f"      {k + 1}. {name}   "
-              + (f"[{n_t} weapons]" if n_t != 1 else "[weapon]"))
+              + (f"[{n_t} weapons" if n_t != 1 else "[weapon")
+              + (f", {pic}]" if pic else "]"))
     # Aiming a weapon entry at a costume reads as if it would work.
     aimed = [n for n, us, only in variants
              if only and all(weapon_tiles_in(u) for u in us)]
@@ -2471,6 +2510,11 @@ def loose_to_dresscode(source, mods, assume_yes=False):
                                             f"Merged{k + 1}_P")
         ex = [] if stackable else variants
         ext = stack_tree(outfits, extras) if stackable else ()
+        pics = {}
+        for u in extras:
+            pic = pak_image(u)
+            if pic:
+                pics[os.path.normcase(os.path.abspath(u))] = pic
         used, roots = set(), []
         # One plugin per outfit means every note repeats per plugin, and the
         # notes are about the paks, not the outfit. Say each once.
@@ -2488,10 +2532,12 @@ def loose_to_dresscode(source, mods, assume_yes=False):
                 roots.append(mkdc.build(dict(meta, name=sub_name), [o],
                                         sub, out_root, extras=ex,
                                         external=ext, say=once,
-                                        weapon_tiles=o is outfits[0]))
+                                        weapon_tiles=o is outfits[0],
+                                        part_previews=pics))
             else:
                 roots.append(mkdc.build(meta, outfits, plugin, out_root,
-                                        extras=ex, external=ext))
+                                        extras=ex, external=ext,
+                                        part_previews=pics))
     mods_dir = None
     if stackable:
         # One masks pak serves every outfit -- they share the tree. The
@@ -2839,7 +2885,9 @@ def prepare_to_loose(toc, uplugin, out_base=None):
     # ---- weapons-menu tiles, back to override paks -----------------------
     # Their registration asset is dropped like every other one, so nothing
     # downstream would ever see them: mapped back here or lost entirely.
-    for w, (wlabel, wrenames, wobjects, wkeep) in enumerate(weapon_backs):
+    gun_layout = []
+    for w, (wlabel, wrenames, wobjects, wkeep,
+            wpreview) in enumerate(weapon_backs):
         label = folder_name(wlabel) or f"weapon {w + 1}"
         out_dir = os.path.join(mod_out, "Optional", label)
         wdrop = {p["name"] for p in packages.values()
@@ -2847,6 +2895,7 @@ def prepare_to_loose(toc, uplugin, out_base=None):
         wbase = f"0W{chr(65 + (w % 26))}_{plugin_id(label)}_P"
         print(f"      + weapon: {label}   ({len(wkeep)} file"
               f"{'s' if len(wkeep) != 1 else ''})")
+        gun_layout.append((f"Optional/{label}", wbase, wpreview))
 
         def weapon_run(renames=wrenames, objects=wobjects, drop=wdrop,
                        out_dir=out_dir, wbase=wbase, label=label):
@@ -2892,8 +2941,8 @@ def prepare_to_loose(toc, uplugin, out_base=None):
 
     def record():
         code = record_roundtrip(toc, uplugin, plugin, plans, ctx, mod_out,
-                                layout, opt_layout, orig=orig_toc,
-                                libraries=libraries)
+                                layout, opt_layout, gun_layout,
+                                orig=orig_toc, libraries=libraries)
         if merged_toc is not None:
             merged_toc.close()
             shutil.rmtree(merge_tmp, ignore_errors=True)

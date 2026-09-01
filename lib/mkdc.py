@@ -668,8 +668,14 @@ def _say_missing(toc, packages, orphaned, say):
         "in with the others.")
 
 
+def last_pic(pics):
+    """The picture an entry's paks offer -- the LAST one, the same way a
+    later pak wins a collision of content."""
+    return next((p for p in reversed(pics) if p), None)
+
+
 def build(meta, outfits, plugin, out_root, say=print, extras=(),
-          external=(), weapon_tiles=True):
+          external=(), weapon_tiles=True, part_previews=None):
     """
     Write the plugin folder. `meta` and `outfits` come from the dresscode.json
     template (read_template's output shapes); each outfit carries its utoc.
@@ -681,6 +687,11 @@ def build(meta, outfits, plugin, out_root, say=print, extras=(),
     but only when `weapon_tiles` is set: a multi-outfit mod builds one
     plugin per outfit from the SAME extras, and only the first may carry the
     weapon tiles, or every plugin would register an identical row.
+
+    `part_previews` is {pak path: picture file} for the add-on paks with a
+    picture beside them -- toggles and weapon tiles alike. A toggle without
+    one falls back to the template icon, a weapon tile to the game's own
+    picture of the weapon it replaces.
 
     `external` is lowercase package names to leave at their original /Game/
     paths and NOT ship: the stackable-masks design serves them from ~mods
@@ -913,11 +924,13 @@ def build(meta, outfits, plugin, out_root, say=print, extras=(),
     # are a user-composed combination applied as one row.
     entries_toggles = []
     entries_weapons = []
+    part_pics = part_previews or {}
     opened = {}
     for label, utocs, only_on in extras:
         tick(f"reading part: {label}")
         parts, parts_index = [], {}
-        weapon_parts, part_stems = [], []
+        weapon_parts, weapon_pics = [], []
+        part_stems, part_pics_here = [], []
         for utoc in utocs:
             key = os.path.normcase(os.path.abspath(utoc))
             if key not in opened:
@@ -936,9 +949,11 @@ def build(meta, outfits, plugin, out_root, say=print, extras=(),
                 # never references the weapon -- but it CAN become a tile in
                 # Dresscode's WEAPONS menu.
                 weapon_parts.append((etoc, epkgs))
+                weapon_pics.append(part_pics.get(key))
                 continue
             parts.append((etoc, epkgs))
             part_stems.append(os.path.splitext(os.path.basename(utoc))[0])
+            part_pics_here.append(part_pics.get(key))
             parts_index.update(eindex)
         if weapon_parts and weapon_tiles:
             wsafe = safe_id(f"{label}", used_names,
@@ -949,10 +964,11 @@ def build(meta, outfits, plugin, out_root, say=print, extras=(),
                                                say, label=label)
             for pid, rec in carried.items():
                 merged.setdefault(pid, rec)
+            pic = last_pic(weapon_pics)
             for row_label, mesh_path, player, stock_name in rows:
                 entries_weapons.append(dict(
                     label=row_label, mesh=mesh_path, player=player,
-                    stock=stock_name))
+                    stock=stock_name, preview=pic))
         if not parts:
             continue
         for w in wearers:
@@ -1008,7 +1024,8 @@ def build(meta, outfits, plugin, out_root, say=print, extras=(),
                     name=item["name"], data=item["data"], deps=item["deps"],
                     exp=len(ZenPackage(item["data"]).exports), bun=1,
                     bulks=item["bulks"])
-            entries_toggles.append((w, label, actor, len(slots)))
+            entries_toggles.append((w, label, actor, len(slots),
+                                    last_pic(part_pics_here)))
             say(f"      toggle  {w['outfit']['name']}: {label}   "
                 f"({len(slots)} slot{'s' if len(slots) != 1 else ''})")
 
@@ -1033,7 +1050,7 @@ def build(meta, outfits, plugin, out_root, say=print, extras=(),
     # registered only previews and metadata, and its toggle actors never
     # loaded in game while a real mod's did.
     registry_assets = []
-    for w, label, actor, _n in entries_toggles:
+    for w, label, actor, _n, _pic in entries_toggles:
         bp_pkg, bp_obj = actor.rsplit(".", 1)
         folder = bp_pkg.rsplit("/", 1)[0]
         registry_assets.append(dict(
@@ -1072,22 +1089,37 @@ def build(meta, outfits, plugin, out_root, say=print, extras=(),
             package_path=mesh_pkg.rsplit("/", 1)[0],
             class_name="SkeletalMesh", package_name=mesh_pkg,
             asset_name=mesh_obj, tags=[]))
-    previews = []
-    for k, (outfit, _mesh, _player) in enumerate(entries_outfits):
-        if not outfit.get("preview"):
-            previews.append(TEMPLATE_ICON)
-            continue
-        w, h, bgra = pngfile.decode(outfit["preview"])
-        name = f"/{plugin}/Previews/Preview{k + 1}"
+
+    def make_preview(png, k):
+        w, h, bgra = pngfile.decode(png)
+        name = f"/{plugin}/Previews/Preview{k}"
         add(name, mkpkg.build_texture(
-            name, f"Preview{k + 1}", w, h, bgra,
+            name, f"Preview{k}", w, h, bgra,
             lighting_guid=hashlib.md5(bgra).digest()), [])
-        previews.append(f"{name}.Preview{k + 1}")
         registry_assets.append(dict(
-            object_path=f"{name}.Preview{k + 1}",
+            object_path=f"{name}.Preview{k}",
             package_path=f"/{plugin}/Previews", class_name="Texture2D",
-            package_name=name, asset_name=f"Preview{k + 1}",
+            package_name=name, asset_name=f"Preview{k}",
             tags=texture_tags(w, h)))
+        return f"{name}.Preview{k}"
+
+    previews = [make_preview(o["preview"], k + 1) if o.get("preview")
+                else TEMPLATE_ICON
+                for k, (o, _mesh, _player) in enumerate(entries_outfits)]
+    # Numbered on past the outfits, which leaves their names -- and the
+    # bytes of every mod built before this -- exactly as they were. One
+    # add-on is a row per outfit it acts on, so its picture is made once
+    # and shared rather than built again for each.
+    n_pics = len(entries_outfits)
+    tog_previews, shared = [], {}
+    for _w, _label, _actor, _slots, pic in entries_toggles:
+        if pic and pic not in shared:
+            shared[pic] = make_preview(pic, n_pics + 1 + len(shared))
+        tog_previews.append(shared.get(pic))
+    n_pics += len(shared)
+    gun_previews = [make_preview(e["preview"], n_pics + 1 + j)
+                    if e.get("preview") else None
+                    for j, e in enumerate(entries_weapons)]
 
     thumb_path = None
     if meta.get("icon"):
@@ -1141,7 +1173,7 @@ def build(meta, outfits, plugin, out_root, say=print, extras=(),
         tags=data_asset_tags("PDA_ModMetaData_C", META_PKG,
                              "DA_ModMetaData")))
 
-    def toggle_body(w, label, actor):
+    def toggle_body(w, label, actor, preview):
         """A toggle row: no mesh of its own, just the actor that applies a
         material pack to the outfit already worn."""
         # Alone with its outfit (the split builds one mod per outfit), a
@@ -1154,7 +1186,7 @@ def build(meta, outfits, plugin, out_root, say=print, extras=(),
                 # The menu shows the DESCRIPTION under a tile, not the name
                 # -- real mods put their row labels there.
                 (F["OutfitDescription"], ("str", row_name)),
-                (F["PreviewImage"], ("softpath", TEMPLATE_ICON)),
+                (F["PreviewImage"], ("softpath", preview or TEMPLATE_ICON)),
             ])),
             (F["SkeletalMeshData"],
              ("struct", "UDS_AssetType_SkeletalMesh", GUID_SKM, [
@@ -1195,9 +1227,10 @@ def build(meta, outfits, plugin, out_root, say=print, extras=(),
         # Its own toggles follow it: every mod observed groups them that
         # way, and a toggle names no outfit, so its position is the only
         # thing tying it to one.
-        for w, label, actor, _n in entries_toggles:
+        for ti, (w, label, actor, _n, _pic) in enumerate(entries_toggles):
             if w["outfit"] is outfit:
-                bodies.append(toggle_body(w, label, actor))
+                bodies.append(toggle_body(w, label, actor,
+                                          tog_previews[ti]))
 
     # A weapon-only mod writes no costume list at all rather than an empty
     # one: no mod ships a list registering nothing, and the weapons list
@@ -1233,8 +1266,9 @@ def build(meta, outfits, plugin, out_root, say=print, extras=(),
         # exactly how Dresscode's own container splits its stock costume and
         # stock weapon lists between two assets.
         wbodies = []
-        for e in entries_weapons:
-            preview = weapons.stock_preview(e["stock"]) or TEMPLATE_ICON
+        for j, e in enumerate(entries_weapons):
+            preview = (gun_previews[j]
+                       or weapons.stock_preview(e["stock"]) or TEMPLATE_ICON)
             wbodies.append([
                 (F["GeneralData"],
                  ("struct", "UDS_ModData_General", GUID_GENERAL, [
