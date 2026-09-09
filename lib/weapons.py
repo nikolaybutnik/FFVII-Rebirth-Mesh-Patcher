@@ -301,6 +301,44 @@ def _part_meta(toc, pkgs=None):
                                 else rename.read_packages(toc))
 
 
+def part_needs(paks):
+    """
+    {pak -> [that pak and every pak it draws on]}, in the order given.
+
+    A mod can split ONE weapon across paks that reference each other -- the
+    materials in one sampling textures that live in another. Built a pak at
+    a time, those references land on nothing and the weapon renders
+    untextured (field report: a grey sword).
+
+    Providers only, never rivals: two recolours that happen to share a
+    texture pak each get their own copy of it rather than being merged into
+    one tile.
+    """
+    owner, refs = {}, {}
+    for u in paks:
+        try:
+            toc = iostore.Toc(u)
+            pkgs = rename.read_packages(toc)
+            meta = _part_meta(toc, pkgs)
+            toc.close()
+        except Exception:
+            continue
+        for pid in pkgs:
+            owner[pid] = u
+        refs[u] = {d for pid in pkgs for d in meta.get(pid, (0, 0, []))[2]}
+    need = {}
+    for u in paks:
+        seen, todo = {u}, [u]
+        while todo:
+            for d in refs.get(todo.pop(), ()):
+                got = owner.get(d)
+                if got and got not in seen:
+                    seen.add(got)
+                    todo.append(got)
+        need[u] = [p for p in paks if p in seen]
+    return need
+
+
 def replaces_stock_mesh(tile_data, stock_name):
     """
     Whether a tile's mesh is the mod's OWN, rather than the stock weapon

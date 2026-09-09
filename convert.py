@@ -887,6 +887,42 @@ def carries_outfit(utoc):
         toc.close()
 
 
+def stem_of(utoc):
+    """A pak's name without its extension -- how every entry names it."""
+    return os.path.splitext(os.path.basename(utoc))[0]
+
+
+def menu_tiles_in(utocs):
+    """The weapons a pak set puts in the menu -- as a SET, since paks in one
+    entry routinely cover the same weapon, and minus the ones the game does
+    not equip, which get no tile."""
+    menu = weapons.menu_weapons()
+    got = set().union(*(weapon_tiles_in(u) for u in utocs)) if utocs else set()
+    return {f for f in got if not menu or f.lower() in menu}
+
+
+def weapon_entries(extras):
+    """
+    [(pak, [pak, ...])] -- one weapon-menu entry per tile worth making.
+
+    An entry covered by another is dropped: a pak that only feeds a second
+    one is carried by it rather than offered as a tile of its own, which it
+    could not render anyway.
+    """
+    need = weapons.part_needs(extras)
+    out, seen = [], set()
+    for u in extras:
+        mine = set(need[u])
+        if any(mine < set(need[v]) for v in extras):
+            continue                    # another entry already carries it
+        key = frozenset(mine)
+        if key in seen:
+            continue                    # two paks that need each other
+        seen.add(key)
+        out.append((u, need[u]))
+    return out
+
+
 def weapon_tiles_in(utoc):
     """The stock weapons a pak covers -- one menu tile each. Empty when the
     pak is not a weapon pak at all."""
@@ -1107,7 +1143,8 @@ def write_template(source, mod_name, parts, prefill=None, restore=None,
         "stackable": False,
         "outfits": outfits,
     }
-    extras = [tuple(e) + (False,) * (3 - len(e)) for e in extras]
+    extras = [tuple(e) + (None,) * (4 - len(e)) for e in extras]
+    extras = [(l, s, w, p or [s]) for l, s, w, p in extras]
     if extras and restore:
         # Reproducing a real mod: its tiles are its own, exactly as they
         # were, or converting back would not give the same mod.
@@ -1117,7 +1154,7 @@ def write_template(source, mod_name, parts, prefill=None, restore=None,
             "as the original mod had them.",
         ]
         template["variants"] = [{"name": label, "parts": [stem]}
-                                for label, stem, _w in extras]
+                                for label, stem, _w, _p in extras]
     elif extras:
         # A modular pak mod. One tile per outfit part would mean thirty
         # tiles that each change one thing, so those are listed and the
@@ -1126,8 +1163,8 @@ def write_template(source, mod_name, parts, prefill=None, restore=None,
         # shape rides as a REAL object ('_example_variant', built from the
         # mod's own parts) -- quotes in the help text would be escaped in
         # the raw file and copy out wrong.
-        combos = [(l, s) for l, s, w in extras if not w]
-        weap = [(l, s) for l, s, w in extras if w]
+        combos = [(l, s) for l, s, w, _p in extras if not w]
+        weap = [(l, p) for l, _s, w, p in extras if w]
         if combos:
             template["_how_this_works"] += [
                 "",
@@ -1181,7 +1218,7 @@ def write_template(source, mod_name, parts, prefill=None, restore=None,
                 "name": " + ".join(l for l, _s in ex),
                 "parts": [s for _l, s in ex]}
             template["parts_you_can_combine"] = [s for _l, s in combos]
-        template["variants"] = [{"name": l, "parts": [s]} for l, s in weap]
+        template["variants"] = [{"name": l, "parts": p} for l, p in weap]
     if restore:
         template["_how_this_works"] += [
             "",
@@ -2334,13 +2371,24 @@ def loose_to_dresscode(source, mods, assume_yes=False):
         # in the weapons menu -- so those entries are written ready-made.
         # The set of weapons a pak covers, not just whether it is one: a
         # single pak routinely does a character's whole set, one tile each.
-        flagged = [(toggles.label_of(u),
-                    os.path.splitext(os.path.basename(u))[0],
-                    weapon_tiles_in(u)) for u in extras]
+        covers = {u: weapon_tiles_in(u) for u in extras}
+        guns = [u for u in extras if covers[u]]
+        # A weapon entry is written ready to build, so it has to be written
+        # WHOLE: a pak whose textures another pak's materials sample belongs
+        # in the same entry or the weapon comes out untextured.
+        grouped = dict(weapon_entries(guns)) if guns else {}
+        flagged = []
+        for u in extras:
+            if covers[u] and u not in grouped:
+                continue                # carried by the entry that needs it
+            flagged.append((toggles.label_of(u),
+                            stem_of(u), covers[u],
+                            [stem_of(p) for p in grouped.get(u, [u])]))
         path = write_template(source, mod_name, parts, extras=flagged)
-        n_combo = sum(1 for _l, _s, w in flagged if not w)
+        n_combo = sum(1 for _l, _s, w, _p in flagged if not w)
         n_weap = len(flagged) - n_combo
-        n_tiles = sum(len(w) for _l, _s, w in flagged if w)
+        n_tiles = sum(len(menu_tiles_in(grouped.get(u, [u])))
+                      for u in grouped)
         print()
         print(f"  {mod_name}  (pak -> Dresscode)")
         made = (f"{len(parts)} outfit{'s' if len(parts) > 1 else ''}"
@@ -2398,7 +2446,7 @@ def loose_to_dresscode(source, mods, assume_yes=False):
     # A weapon mod's rows ARE its variants -- nothing about it is per-outfit,
     # so the lines below count weapons instead. One entry is not one tile:
     # a pak covering a character's whole set becomes a tile per weapon.
-    gun_tiles = ([sum(len(weapon_tiles_in(u)) for u in us)
+    gun_tiles = ([len(menu_tiles_in(us))
                   for _n, us, _o in variants] if not outfits else [])
     guns = sum(gun_tiles)
     print()
