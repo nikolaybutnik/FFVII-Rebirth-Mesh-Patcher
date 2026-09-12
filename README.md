@@ -23,17 +23,12 @@ crashes. This patcher is for the costume and weapon mods that still need it.
 
 ## Quick start
 
-1. **Install Python 3.9 or newer** from <https://www.python.org/downloads/>.
-   If the installer shows a PATH tickbox — **"Add python.exe to PATH"** on
-   recent versions, "Add Python 3.x to PATH" on older ones — tick it; missing
-   it is the usual cause of `'python' is not recognized`. Newer Windows
-   installs use the **Python install manager**, which doesn't do that by
-   default: there, type **`py`** wherever this README says `python`.
-2. **Extract this tool**, then open a terminal in its folder — type `cmd` in
-   File Explorer's address bar while in the folder, or right-click the folder
-   and choose "Open in Terminal". Run `pip install numpy`. Once, ever. (If that
-   says `'pip' is not recognized`, use `python -m pip install numpy` — or
-   `py -m pip install numpy` with the install manager.)
+1. **Install Python 3.9 or newer** from <https://www.python.org/downloads/>,
+   ticking **"Add python.exe to PATH"** if the installer offers it. If
+   `python` isn't recognised afterwards, try `py` instead — see
+   [Troubleshooting](#troubleshooting).
+2. **Extract this tool**, open a terminal in its folder (type `cmd` in File
+   Explorer's address bar), and run `pip install numpy`. Once, ever.
 3. **Drag your mod folder — or its `.zip` — onto `patch.py`.** It lists what it
    found and offers to fix it, writing patched copies into a `Patched Mods`
    folder beside the original. Your files are not touched.
@@ -80,16 +75,13 @@ sitting inside the game folder — so dropping it anywhere under the install wor
 too, whether that's the base game folder or `End\Mods\`.
 
 **The Oodle library** decompresses mod files. Rebirth builds it into its
-executable, so there is no copy in the game folder to borrow, and it is
-proprietary so it cannot be bundled here — but it ships as a loose
-`oo2core_*_win64.dll` with a number of games. You need **oo2core_6 or newer**.
-The tool looks beside itself, then through your Steam, Epic and GOG games and
-any Unreal Engine install.
+executable and it can't be bundled here, but it ships as a loose
+`oo2core_*_win64.dll` with a number of games — you need **oo2core_6 or newer**.
+The tool searches beside itself, then your Steam, Epic and GOG games and any
+Unreal Engine install.
 
-Only a minority of games include one, but they tend to be big titles, so
-there's a fair chance you already have it. Games reported to ship a working
-copy — search the game's folder for `oo2core`, as the file name and location
-vary:
+Games known to ship one (search the folder for `oo2core` — the name and
+location vary):
 
 - **Final Fantasy VII Remake**
 - **Armored Core VI: Fires of Rubicon**
@@ -103,11 +95,9 @@ vary:
 - **Star Wars Jedi: Survivor**
 - **Warhammer 40,000: Darktide**
 
-If you have none of those, **Unreal Engine ships one** and is free from the Epic
-Games Launcher — a large download for one file, but it always works. The tool
-usually finds it; if not, search the engine folder for `oo2core.dll` (recent) or
-`oo2core_*_win64.dll` (older) and take the copy under a **`win-x64`** folder,
-never `win-x86`.
+If you have none of those, **Unreal Engine ships one** and is free from the
+Epic Games Launcher — a large download for one file, but it always works. Take
+the copy under a **`win-x64`** folder, never `win-x86`.
 
 When the tool can't find one it asks:
 
@@ -147,18 +137,14 @@ Only Steam is found automatically on Linux. For anything else, point
 ### Drag and drop
 
 **Drag mod folders — or `.zip`/`.7z`/`.rar` archives — onto `patch.py`.** No
-terminal, no flags. It lists what it found, then offers to patch everything
-into a `Patched Mods` folder beside the original; your originals are never
-touched. Drop as many as you like at once, and each may hold several mods, or
-archives inside archives — all of it is unpacked. `.7z` and `.rar` need nothing
-installed. An archive is looked inside before anything is offered, so one whose
-mods are already patched says so instead.
+terminal, no flags. It lists what it found, then patches into a `Patched Mods`
+folder beside the original; your originals are never touched. Drop as many as
+you like at once — nested archives and multi-mod folders are unpacked, and
+`.7z`/`.rar` need nothing installed.
 
-Two naming rules are handled for you. The `.utoc`/`.ucas`/`.pak` files keep
-their exact names, because the loader would lose track of a renamed mod. And a
-Dresscode mod's folder is renamed to match the `.uplugin` inside it — Dresscode
-looks a mod up by folder name and silently ignores one that doesn't match,
-which is how some downloads arrive. Correctly packaged mods are left alone.
+Naming is handled for you: the three mod files keep their exact names, and a
+Dresscode mod's folder is renamed to match its `.uplugin` when a download
+arrives mismatched (Dresscode ignores a mod whose folder doesn't match).
 
 Drop folders from inside the game's own `End\Mods` or `~mods` and it recognises
 your installed library: you get the normal in-place patch with backups, not a
@@ -218,9 +204,9 @@ python patch.py --restore --all       put everything back
 python patch.py --restore ModName     put one mod back
 ```
 
-Only mod files are ever modified, never the game's own files. Pak mods
-live under `End\Content\Paks\~mods\`, so those files sit inside the game folder —
-but the game's own `.pak`/`.utoc`/`.ucas` (in `Paks\` itself) are never touched.
+Only mod files are ever modified. Pak mods sit inside the game folder, under
+`End\Content\Paks\~mods\`, but the game's own files in `Paks\` are never
+touched.
 
 ### Mods that aren't installed
 
@@ -259,14 +245,9 @@ python unpatch.py --all               unpatch everything that needs it
 python unpatch.py --path "D:\mods" --out "D:\send"   copies, originals kept
 ```
 
-**Every `patch.py` command works on `unpatch.py` unchanged** — mod names,
-`--restore`, `--path`/`--out`, `--debug`, drag-and-drop of folders and
-archives, all of it. The only difference is where backups go: in-place runs
-back up to `unpatch_backups\` (folder drops to `_unpatch_backups\` inside
-the folder), and each tool's `--restore` undoes its own work from there.
-Patching and unpatching are mutual inverses: a mod taken down to 1.004 and
-back comes out identical, apart from tangent rounding far below anything
-visible.
+**Every `patch.py` command works on `unpatch.py` unchanged.** The only
+difference is that backups go to `unpatch_backups\` (or `_unpatch_backups\`
+for folder drops), and each tool's `--restore` undoes its own work.
 
 ---
 
@@ -301,9 +282,8 @@ converting the folder back later rebuilds it exactly. **Leave
 Put ONE mod in one folder and drop that folder. First drop writes
 `dresscode.json` (open it to set names, or don't); second drop builds.
 
-**Set it up like this.** The converter accepts most shapes, but this is the
-layout I'd recommend — it keeps things clear, and makes any problem easier
-to sort out.
+**Set it up like this.** The converter accepts most shapes; this one is the
+easiest to get right.
 
 ```
 My Mod\
@@ -321,31 +301,25 @@ My Mod\
     └── No Hat\                   copy per costume
 ```
 
-That gives you a single Dresscode entry with a tile per costume. Use it
-even when the mod has only one costume — `Variants\Standard\` on its own
-is fine, and keeps every mod you convert looking the same.
+That gives you a single Dresscode entry with a tile per costume. Use it even
+for a one-costume mod — `Variants\Standard\` on its own is fine.
 
-Habits that save trouble — none of them required:
+Habits that save trouble:
 
 - **Name the folders the way you want the tiles named** — those names go
   straight into the menu. Keep them short; very long ones get shortened.
-- **Unpack down to the three files** (`.utoc`, `.ucas`, `.pak`). A download
-  often arrives with `~mods\` or `Content\Paks\WindowsNoEditor\` inside; lift
-  the files out. Both work, but the flat one is simplest.
+- **Unpack down to the three files** (`.utoc`, `.ucas`, `.pak`). Downloads
+  often arrive wrapped in `~mods\` or `Content\Paks\WindowsNoEditor\`.
 - **Nothing loose at the top** but `icon.png` and `dresscode.json`.
-- **One copy of each add-on** in `Optional\`, never a copy inside each variant.
-- **Tidying is for your sake, not the tool's.** Paks are found however many
-  folders deep they sit, and `~mods\`/`Content\Paks\` wrappers are ignored when
-  naming tiles, so an untouched download converts fine.
+- **None of it is required.** Paks are found however deep they sit, and those
+  wrappers are ignored when naming tiles — an untouched download converts
+  fine.
 
-**Why things go where — is this pak a whole costume, or a change to one?**
-
-A **whole costume** replaces the model — a different body, a hairstyle, a
-part modelled away. Those go under `Variants\`. A **change** only repaints
-or hides what the costume already has (a recolour, a hidden buckle).
-Those go under `Optional\`. Get it wrong and the converter says so: a
-costume filed under `Optional\` is reported as "replaces the model, not
-just materials".
+**Whole costume, or a change to one?** A whole costume replaces the model — a
+different body, a hairstyle, a part modelled away — and goes under
+`Variants\`. A change only repaints or hides what is already there (a recolour,
+a hidden buckle) and goes under `Optional\`. Get it wrong and the converter
+says so.
 
 | What you have | Where it goes | What you get |
 | --- | --- | --- |
@@ -360,18 +334,14 @@ and offers to patch them right there, backups kept.
 
 ### Making your own tiles
 
-A fresh conversion lists every option pak under
-`"parts_you_can_combine"` and leaves `"variants"` for you to fill in —
-option paks do NOT become tiles on their own. That's deliberate: **tiles
-don't stack in game**. Pick "Red" and then "No Hat" and you'd get a
-hatless outfit in the normal colour, because the second tile replaces the
-first — a tile per option would just be clutter that works wrong.
-(Weapon paks are the exception: their tile stands alone in the WEAPONS
-menu, so their entries are written for you.)
+Option paks don't become tiles on their own, because **tiles don't stack in
+game** — pick "Red" and then "No Hat" and you get a hatless outfit in the
+normal colour, as the second tile replaces the first. So you say which
+combinations you want. (Weapon paks are the exception: their tiles stand
+alone, so those entries are written for you.)
 
-Making tiles is a copy-paste job — no tools, just Notepad. Open
-`dresscode.json`, find the `"variants"` list, and give each look you
-actually wear one entry:
+Open `dresscode.json`, find the `"variants"` list, and give each look one
+entry:
 
 ```json
 "variants": [
@@ -395,17 +365,13 @@ red AND hatless tile, copy an entry and list both paks:
 Save, drop the folder on `convert.py` again, done — "Red, no hat" is now
 its own tile. Some notes:
 
-- Combine as many parts in one entry as you want.
-- If two parts change the same thing, the one listed later wins.
+- Combine as many parts in one entry as you like. If two change the same
+  thing, the one listed later wins.
+- The menu shows exactly this list — rename tiles, or delete ones you never use.
 - An entry goes on every outfit. Add `"outfit": "Standard"` (or a list of
-  names) to put one on only some of them. That is for costume add-ons
-  only — a weapon entry is not worn with a costume, so `"outfit"` does
-  nothing on one.
-- The menu shows exactly this list: rename tiles, delete the ones you
-  never use, or replace the whole list with a few favourite combos.
-- Made a mess of the file? Delete `dresscode.json` and drop the folder
-  again for a fresh one. (Only do that if the file has no `"restore"`
-  section — that section is the mod's way back to its original form.)
+  names) to limit it to some. Costume add-ons only; it does nothing on a weapon.
+- Made a mess? Delete `dresscode.json` and drop the folder again — unless it
+  has a `"restore"` section, which is the mod's way back to its original form.
 
 ### Details
 
@@ -431,20 +397,20 @@ Everything below is reference — you don't need any of it for an ordinary mod.
   with only the costume in the menu.
 - **Weapon paks become weapon tiles, and the WEAPONS menu is its own.** A
   weapon tile belongs to a character, not a costume, so it stays on whatever
-  they are wearing. A weapon mod therefore needs no costume — drop a folder of
-  weapon paks on their own and each weapon becomes a tile, including when one
-  pak covers a character's whole set; `"outfits"` stays empty and the menu is
-  written for you — paks that draw on each other are written into one entry,
-  so a weapon split across two paks still comes out whole. Only weapons the game actually equips get a tile — the
-  data also holds cutscene variants and the first game's weapons, and a tile
-  each for those would bury the real one. A weapon that ships its own model converts with nothing
-  installed; one that only recolours the stock model borrows it from the game,
-  so that pak needs the game and is otherwise skipped with a note and keeps
-  working from `~mods`. Coming back, a tile this tool made returns to an
-  override pak by itself, while a weapon mod someone else wrote for Dresscode
-  needs the game (or Dresscode) installed to look up which weapon it stands in
-  for — one whose files carry no id is skipped with a note rather than guessed
-  at.
+  they are wearing. A weapon mod needs no costume: drop the paks on their own,
+  `"outfits"` stays empty, and the menu is written for you — one tile per
+  weapon even when a single pak covers a character's whole set, and paks that
+  draw on each other written into one entry, so a weapon split across two paks
+  comes out whole.
+- **Only weapons the game equips get a tile.** The data also holds cutscene
+  variants and the first game's weapons; a tile each would bury the real one.
+- **A weapon that ships its own model** converts with nothing installed. One
+  that only recolours the stock model borrows it from the game, so that pak
+  needs the game and is otherwise skipped with a note — it keeps working from
+  `~mods`. Coming back, a tile this tool made returns to an override pak by
+  itself; a weapon mod someone else wrote for Dresscode needs the game (or
+  Dresscode) installed to find which weapon it stands in for, and one whose
+  files carry no id is skipped rather than guessed at.
 - **A separate textures pak is detected, not configured.** If the costume needs
   it, it is merged in; one sitting in a costume's folder belongs to that
   costume alone, so mods shipping several versions keep their own.
@@ -493,18 +459,14 @@ weapons), and asks which you want instead. Answer with numbers — `3`, `2,5,7`,
 - **Picking several gives you one pak, not several.** The mesh is copied onto
   each costume and everything else stays in one place, so three costumes cost
   barely more than one.
-- **Drop the whole mod folder**, not one pak at a time. When a mod comes as
-  several paks — a main one plus optional extras — the extras override files
-  that sit inside the costume's folder. Move the main pak and those files move
-  with it, so an extra left on the old costume is pointing at files nothing
-  uses any more, and quietly does nothing. Dropping the folder asks you once
-  and moves all of them together.
-- **It tells you what won't carry over.** Some mods replace one of the game's
-  own files — a skin texture, say — that only exists on the costume they were
-  built for. Move the mod and the game has no such file on the new costume, so
-  that one replacement stops doing anything. The outfit still works; the tool
-  just lists what dropped out, so a small unexplained difference isn't a
-  mystery. This is the one part that needs the game installed.
+- **Drop the whole mod folder**, not one pak at a time. A mod's optional
+  extras override files inside the costume's folder; move the main pak alone
+  and they are left aiming at files nothing uses. Dropping the folder moves
+  them together.
+- **It tells you what won't carry over.** A mod may replace one of the game's
+  own files — a skin texture, say — that only exists on its original costume;
+  that replacement stops applying. The outfit still works, and the tool lists
+  what dropped out. This is the one part that needs the game installed.
 - **No game install needed** otherwise. The list of costumes and weapons is
   the same on every copy of the game, so it ships with the tool — you only
   need the Oodle DLL, same as `patch.py --path`.
