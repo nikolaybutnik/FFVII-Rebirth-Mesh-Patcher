@@ -812,7 +812,10 @@ def build(meta, outfits, plugin, out_root, say=print, extras=(),
         old_mesh_pid = cityhash.package_id(mesh_name)
 
         raw_meta = conheader.store_meta(toc, packages)
-        grafts = stockgraft.plan(packages, raw_meta, {old_mesh_pid}, say_once)
+        # A recolour IS retouched game files; saying so per colour is noise.
+        grafts = stockgraft.plan(packages, raw_meta, {old_mesh_pid},
+                                 (lambda _m: None) if outfit.get("recolour")
+                                 else say_once)
         borrowed, orphaned = _needs_elsewhere(packages, raw_meta, carried)
         if orphaned:
             _say_missing(toc, packages, orphaned, say_once)
@@ -832,8 +835,21 @@ def build(meta, outfits, plugin, out_root, say=print, extras=(),
             else:
                 renames[low] = f"/{plugin}/{tail}"
         extra_imports = {}
-        for g in grafts.values():
-            renames[g["name"].lower()] = f"/{plugin}/{g['name'][6:]}"
+        # A graft sampling this outfit's private textures differs per outfit;
+        # under one shared name the first outfit's won on every tile.
+        private = {pid for pid, pkg in packages.items()
+                   if renames.get(pkg["name"].lower(), "").lower().startswith(
+                       f"/{plugin.lower()}/{safe.lower()}/")}
+        changed = True
+        while changed:
+            changed = False
+            for gpid, g in grafts.items():
+                if gpid not in private and private & set(g["deps"]):
+                    private.add(gpid)
+                    changed = True
+        for gpid, g in grafts.items():
+            where = f"/{plugin}/{safe}/" if gpid in private else f"/{plugin}/"
+            renames[g["name"].lower()] = where + g["name"][6:]
         for g in grafts.values():
             new_name = renames[g["name"].lower()]
             gp = ZenPackage(g["data"])

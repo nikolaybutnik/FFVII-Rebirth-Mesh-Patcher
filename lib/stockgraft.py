@@ -226,6 +226,70 @@ def _survey(packages, raw_meta, mesh_pids, say=None):
     return orphans, real, graft_pids, entries, consumed
 
 
+def _record(place, entry):
+    """A stock package as a carried record: dict(name, data, exp, bun, deps,
+    bulks), `bulks` entries being (12-byte chunk id, payload)."""
+    exp, bun, deps = entry
+    u, k = place["pkg"]
+    data = _toc(u).read(k)
+    bulks = []
+    for bu, bk in place["bulks"]:
+        bt = _toc(bu)
+        bulks.append((bytes(bt.chunk_ids[bk]), bt.read(bk)))
+    return dict(name=pkgedit.package_name_of(ZenPackage(data)), data=data,
+                exp=exp, bun=bun, deps=list(deps), bulks=bulks)
+
+
+def stock_package(name):
+    """The game's own copy of a package, as a carried record -- None when the
+    game's files are not here or do not have it."""
+    pid = cityhash.package_id(name)
+    pl = _locate({pid}).get(pid)
+    if not pl or not pl["pkg"]:
+        return None
+    ent = _entry(pid, pl)
+    return _record(pl, ent) if ent is not None else None
+
+
+def samplers(targets, meshes):
+    """
+    {mesh name: how many of `targets` it samples} for each of the stock
+    `meshes` whose materials reach at least one -- which of the game's
+    costumes a pak of retouched textures can actually show on.
+
+    The same bounded walk plan() makes, so a costume counted here is one
+    plan() will find the materials for. Header data only.
+    """
+    targets = set(targets)
+    by_pid = {cityhash.package_id(m): m for m in meshes}
+    place = _locate(set(by_pid))
+    out = {}
+    for mpid, name in by_pid.items():
+        pl = place.get(mpid)
+        ent = _entry(mpid, pl) if pl and pl["pkg"] else None
+        if ent is None:
+            continue
+        frontier, seen, found = set(ent[2]), {mpid}, set()
+        for _depth in range(3):
+            place.update(_locate({d for d in frontier if d not in place}))
+            nxt = set()
+            for d in frontier - seen:
+                seen.add(d)
+                if d in targets:
+                    found.add(d)
+                    continue
+                dpl = place.get(d)
+                e = _entry(d, dpl) if dpl and dpl["pkg"] else None
+                if e is not None:
+                    nxt |= set(e[2]) - seen
+            frontier = nxt
+            if not frontier:
+                break
+        if found:
+            out[name] = len(found)
+    return out
+
+
 def links(packages, raw_meta, mesh_pids):
     """
     Which of this pak's stock overrides the game's own materials actually
@@ -254,18 +318,7 @@ def plan(packages, raw_meta, mesh_pids, say=print):
     if not orphans:
         return {}
 
-    grafts = {}
-    for pid in sorted(graft_pids):
-        pl, (exp, bun, deps) = entries[pid]
-        u, k = pl["pkg"]
-        data = _toc(u).read(k)
-        bulks = []
-        for bu, bk in pl["bulks"]:
-            bt = _toc(bu)
-            bulks.append((bytes(bt.chunk_ids[bk]), bt.read(bk)))
-        grafts[pid] = dict(name=pkgedit.package_name_of(ZenPackage(data)),
-                           data=data, exp=exp, bun=bun, deps=list(deps),
-                           bulks=bulks)
+    grafts = {pid: _record(*entries[pid]) for pid in sorted(graft_pids)}
 
     if grafts:
         n = len(consumed)

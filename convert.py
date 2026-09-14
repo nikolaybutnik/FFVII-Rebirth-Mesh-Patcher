@@ -57,6 +57,7 @@ import moddata                                                  # noqa: E402
 import pakfile                                                  # noqa: E402
 import pngfile                                                  # noqa: E402
 import rename                                                   # noqa: E402
+import slots                                                    # noqa: E402
 import stockgraft                                               # noqa: E402
 import texread                                                  # noqa: E402
 import toggles                                                  # noqa: E402
@@ -1086,7 +1087,7 @@ def pak_image(utoc):
 
 
 def write_template(source, mod_name, parts, prefill=None, restore=None,
-                   extras=()):
+                   extras=(), costume=None):
     """Prefill dresscode.json with the little a build needs. Pictures are on
     purpose NOT in here -- they are picked up by where they sit.
 
@@ -1219,6 +1220,13 @@ def write_template(source, mod_name, parts, prefill=None, restore=None,
                 "parts": [s for _l, s in ex]}
             template["parts_you_can_combine"] = [s for _l, s in combos]
         template["variants"] = [{"name": l, "parts": p} for l, p in weap]
+    if costume:
+        template["_how_this_works"] += [
+            "",
+            f"These paks recolour {costume_name(costume)}, named in",
+            "'costume' below.",
+        ]
+        template["costume"] = costume
     if restore:
         template["_how_this_works"] += [
             "",
@@ -1285,6 +1293,7 @@ def read_template(source, parts):
         restore=data.get("restore"),
         stackable=bool(data.get("stackable")),
         variants=data.get("variants"),
+        costume=data.get("costume"),
     )
     return meta, outfits
 
@@ -2002,14 +2011,16 @@ def write_masks_pak(outfit_utoc, ext, out_dir, base_name):
     return written
 
 
-def merge_loose(utocs, out_dir, base):
+def merge_loose(utocs, out_dir, base, extra=None):
     """
     One loose container carrying every package of `utocs` -- an outfit that
     ships as several REQUIRED paks (the mesh in one, its materials and
     textures in another) becomes a single container the conversion treats
     as THE outfit. Package bytes, names, arcs and bulk data are carried
     unchanged; only the container header and directory are new. The first
-    pak wins a package two of them carry. Returns the merged .utoc path.
+    pak wins a package two of them carry. `extra` is {pid: record} for
+    packages from elsewhere -- the game's own, say -- added after the paks'.
+    Returns the merged .utoc path.
     """
     tocs = [iostore.Toc(u) for u in utocs]
     template = tocs[0]
@@ -2046,6 +2057,10 @@ def merge_loose(utocs, out_dir, base):
                 exp=exp, bun=bun, deps=list(deps),
                 bulks=[loosepak.copied(bt, i, template=template)
                        for bt, i in bulks_all.get(pid, [])])
+            order.append(pid)
+    for pid, rec in (extra or {}).items():
+        if pid not in merged:
+            merged[pid] = rec
             order.append(pid)
 
     written = loosepak.write(order, merged, out_dir, base, template)
@@ -2116,6 +2131,137 @@ def preflight_meshes(utocs, assume_yes, source_hint):
     else:
         print("     converting as-is -- patch before playing, or the game "
               "will crash")
+
+
+def recolour_layout(source, mods):
+    """
+    (layout, costumes, problem) for a mod that only repaints a costume the
+    game already has -- paks of textures and materials under ONE character's
+    costume folders, with no model of their own. None when this is not one.
+
+    `layout` is loose_layout's shape: an outfit per pak, all of them variants,
+    since colours of one costume belong in one mod. `costumes` is the stock
+    folders the recolour was made for: those showing the most of it, almost
+    always exactly one. A costume merely sharing a file or two with it would
+    show only part of the recolour, so it is not offered. `problem` says why
+    it cannot be built instead.
+    """
+    if not mods or any(up for _u, up in mods):
+        return None
+    root_path = slots.ROOTS[slots.COSTUME].lower()
+    touched, char, folder = set(), None, None
+    for utoc, _up in mods:
+        try:
+            toc = iostore.Toc(utoc)
+            try:
+                pkgs = rename.read_packages(toc)
+            finally:
+                toc.close()
+        except Exception:
+            return None
+        if not pkgs or mkdc.find_stock_mesh(pkgs)[0]:
+            return None
+        for p in pkgs.values():
+            bits = p["name"].split("/")
+            who = (slots.character_of(slots.COSTUME, bits[4])
+                   if len(bits) > 5 and p["name"].lower().startswith(root_path)
+                   else None)
+            if not who or char not in (None, who):
+                return None
+            char, folder = who, bits[4]
+        touched |= set(pkgs)
+
+    if not slots.have_game():
+        return None, [], (
+            "these paks only recolour a costume the game already has. "
+            "Building them borrows that costume from the game, and the "
+            "game's files were not found here.")
+    stock = slots.stock(slots.COSTUME)
+    order = slots.choices_for(slots.COSTUME, folder)
+    meshes = {f"{slots.ROOTS[slots.COSTUME]}{f}/Model/{stock[f]}": f
+              for f in order}
+    used = stockgraft.samplers(touched, meshes)
+    ranked = sorted(used.items(),
+                    key=lambda mn: (-mn[1], order.index(meshes[mn[0]])))
+    costumes = [meshes[m] for m, n in ranked if n == ranked[0][1]]
+    if not costumes:
+        return None, [], (
+            "these paks recolour something none of the game's costumes "
+            "wears -- there is nothing to put them on.")
+
+    root = os.path.normcase(os.path.abspath(source))
+    by_folder = {}
+    for u, _up in mods:
+        d = os.path.normcase(os.path.dirname(os.path.abspath(u)))
+        by_folder.setdefault(d, []).append(u)
+    parts = []
+    for u, _up in mods:
+        d = os.path.dirname(os.path.abspath(u))
+        if len(by_folder[os.path.normcase(d)]) > 1:
+            rel = stem_of(u)
+        elif os.path.normcase(d) == root:
+            rel = "."
+        else:
+            rel = os.path.relpath(d, source).replace("\\", "/")
+        parts.append((rel, u))
+    parts.sort()
+    layout = (mod_root_name(source), parts, [], [], {r for r, _u in parts})
+    return layout, costumes, None
+
+
+def costume_name(folder):
+    """Tifa's Costa Clothing -- a stock costume said the way a person would."""
+    return f"{slots.character_name(folder)}'s {slots.label(folder)}"
+
+
+def pick_costume(costumes, assume_yes):
+    """
+    Which stock costume a recolour goes on, chosen from a list rather than
+    typed -- only asked when the files fit more than one equally. The first
+    is the answer under --yes and for a bare Enter. None when the person
+    backs out.
+    """
+    global _INTERACTED
+    if len(costumes) == 1 or assume_yes:
+        return costumes[0]
+    print()
+    print(f"  These paks recolour one of "
+          f"{slots.character_name(costumes[0])}'s costumes. Which one?")
+    for i, folder in enumerate(costumes, 1):
+        print(f"    {i:2}  {slots.label(folder)}")
+    print()
+    while True:
+        try:
+            answer = input("  Pick a number, or Enter for 1: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            _INTERACTED = True
+            return None
+        _INTERACTED = True
+        if not answer:
+            return costumes[0]
+        if answer.isdigit() and 1 <= int(answer) <= len(costumes):
+            return costumes[int(answer) - 1]
+        print(f"    Not a choice. Give a number from 1 to {len(costumes)}.")
+
+
+def recolour_outfit(utoc, costume, out_dir, base):
+    """
+    An outfit container for a recolour pak: the game's own model of
+    `costume` beside the pak's textures. From there it converts like any
+    costume -- stockgraft carries in the stock materials between the two,
+    which is what makes the new textures show.
+    """
+    name = (f"{slots.ROOTS[slots.COSTUME]}{costume}/Model/"
+            f"{slots.stock(slots.COSTUME)[costume]}")
+    mesh = stockgraft.stock_package(name)
+    if mesh is None:
+        raise RuntimeError(f"the game's model for {costume_name(costume)} "
+                           "could not be read")
+    rec = dict(mesh, bulks=[loosepak.fresh(cid, data)
+                            for cid, data in mesh["bulks"]])
+    return merge_loose([utoc], out_dir, base,
+                       extra={cityhash.package_id(name): rec})
 
 
 def layout_problem(source, mods):
@@ -2348,6 +2494,15 @@ def loose_to_dresscode(source, mods, assume_yes=False):
     None when `source` is not a pak mod root this direction understands.
     """
     layout = loose_layout(source, mods)
+    costumes = None
+    if layout is None:
+        got = recolour_layout(source, mods)
+        if got:
+            layout, costumes, problem = got
+            if problem:
+                print()
+                print(f"  {os.path.basename(source)}: {problem}")
+                return 1
     if layout is None:
         problem = layout_problem(source, mods)
         if problem:
@@ -2384,7 +2539,14 @@ def loose_to_dresscode(source, mods, assume_yes=False):
             flagged.append((toggles.label_of(u),
                             stem_of(u), covers[u],
                             [stem_of(p) for p in grouped.get(u, [u])]))
-        path = write_template(source, mod_name, parts, extras=flagged)
+        costume = None
+        if costumes:
+            costume = pick_costume(costumes, assume_yes)
+            if not costume:
+                print("  Nothing converted.")
+                return 0
+        path = write_template(source, mod_name, parts, extras=flagged,
+                              costume=costume)
         n_combo = sum(1 for _l, _s, w, _p in flagged if not w)
         n_weap = len(flagged) - n_combo
         n_tiles = sum(len(menu_tiles_in(grouped.get(u, [u])))
@@ -2394,6 +2556,9 @@ def loose_to_dresscode(source, mods, assume_yes=False):
         made = (f"{len(parts)} outfit{'s' if len(parts) > 1 else ''}"
                 if parts else
                 f"{n_tiles} weapon{'s' if n_tiles != 1 else ''}, no costume")
+        if costume:
+            print(f"      recolour of {costume_name(costume)}")
+            made = f"{len(parts)} colour{'s' if len(parts) > 1 else ''}"
         print(f"      created  {os.path.basename(path)}  ({made})")
         if n_weap and parts:
             print()
@@ -2425,6 +2590,15 @@ def loose_to_dresscode(source, mods, assume_yes=False):
         return 0
 
     meta, outfits = read_template(source, parts)
+    costume = None
+    if costumes:
+        costume = meta["costume"]
+        # Missing, or edited to a costume these colours were not made for.
+        if costume not in costumes:
+            costume = pick_costume(costumes, assume_yes)
+            if not costume:
+                print("  Nothing converted.")
+                return 0
     variants, variants_edited = resolve_variants(meta, extras, outfits)
     rt = unpack_restore(meta.get("restore"))
     # A record with nothing to rebuild FROM cannot restore anything: a mod
@@ -2451,9 +2625,12 @@ def loose_to_dresscode(source, mods, assume_yes=False):
     guns = sum(gun_tiles)
     print()
     print(f"  {meta['name']}  (pak -> Dresscode"
-          + (f", {len(outfits)} outfits" if len(outfits) > 1 else "")
+          + (f", {len(outfits)} {'colours' if costume else 'outfits'}"
+             if len(outfits) > 1 else "")
           + (f", {guns} weapon{'s' if guns != 1 else ''}" if guns else "")
           + ")")
+    if costume:
+        print(f"      recolour of {costume_name(costume)}")
     if exact:
         print("      this folder came from a Dresscode mod -- restoring "
               "the original exactly")
@@ -2547,6 +2724,14 @@ def loose_to_dresscode(source, mods, assume_yes=False):
             roots.append(mkdc.restore(lib, parts_by_folder, out_root,
                                       optionals=opt))
     else:
+        if costume:
+            # A recolour carries no model; from here on the game's own,
+            # beside the pak's textures, IS the outfit.
+            merge_tmp = os.path.join(out_root, "_merge_tmp")
+            for k, o in enumerate(outfits):
+                o["utoc"] = recolour_outfit(o["utoc"], costume, merge_tmp,
+                                            f"Recolour{k + 1}_P")
+                o["recolour"] = True
         if companions:
             # The outfit cannot render without them, so from here on the
             # merged container IS the outfit.

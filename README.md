@@ -328,6 +328,7 @@ says so.
 | a pak the costume NEEDS (its textures or materials, shipped separately) | beside that costume | merged in automatically |
 | whole costumes you want as **separate mods** instead | any other subfolder | a Dresscode mod per costume |
 | a weapon mod, with no costume in it | the weapon paks, loose in the folder | one WEAPONS-menu tile each |
+| a recolour, with no model of its own | each colour in its own folder | a tile per colour, on the costume they were made for — needs the game installed |
 
 Pre-V1.005 mods are caught for you: `convert.py` says so before doing anything
 and offers to patch them right there, backups kept.
@@ -433,7 +434,7 @@ Everything below is reference — you don't need any of it for an ordinary mod.
 - **What gets refused**: several different costume paks loose in the top folder
   with nothing saying which is which — give each its own subfolder, or one
   shared `Main\`. Also a folder with no costume pak in it, unless what's in
-  there is weapon paks.
+  there is weapon paks or recolours.
 
 ---
 
