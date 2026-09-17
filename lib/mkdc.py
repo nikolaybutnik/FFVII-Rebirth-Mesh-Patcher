@@ -680,9 +680,9 @@ def build(meta, outfits, plugin, out_root, say=print, extras=(),
     Write the plugin folder. `meta` and `outfits` come from the dresscode.json
     template (read_template's output shapes); each outfit carries its utoc.
 
-    `extras` is [(label, [utoc, ...], only_on)] for the old modular
-    standard's optional paks: each becomes a toggle row per outfit it can
-    act on -- or only on the outfits `only_on` names (their folders), when
+    `extras` is [(label, [utoc, ...], only_on, description)] for the old
+    modular standard's optional paks: each becomes a toggle row per outfit it
+    can act on -- or only on the outfits `only_on` names (their folders), when
     it is not None. Weapon paks among them become weapons-menu tiles instead --
     but only when `weapon_tiles` is set: a multi-outfit mod builds one
     plugin per outfit from the SAME extras, and only the first may carry the
@@ -942,7 +942,7 @@ def build(meta, outfits, plugin, out_root, say=print, extras=(),
     entries_weapons = []
     part_pics = part_previews or {}
     opened = {}
-    for label, utocs, only_on in extras:
+    for label, utocs, only_on, desc in extras:
         tick(f"reading part: {label}")
         parts, parts_index = [], {}
         weapon_parts, weapon_pics = [], []
@@ -984,7 +984,7 @@ def build(meta, outfits, plugin, out_root, say=print, extras=(),
             for row_label, mesh_path, player, stock_name in rows:
                 entries_weapons.append(dict(
                     label=row_label, mesh=mesh_path, player=player,
-                    stock=stock_name, preview=pic))
+                    stock=stock_name, preview=pic, desc=desc))
         if not parts:
             continue
         for w in wearers:
@@ -1041,7 +1041,7 @@ def build(meta, outfits, plugin, out_root, say=print, extras=(),
                     exp=len(ZenPackage(item["data"]).exports), bun=1,
                     bulks=item["bulks"])
             entries_toggles.append((w, label, actor, len(slots),
-                                    last_pic(part_pics_here)))
+                                    last_pic(part_pics_here), desc))
             say(f"      toggle  {w['outfit']['name']}: {label}   "
                 f"({len(slots)} slot{'s' if len(slots) != 1 else ''})")
 
@@ -1066,7 +1066,7 @@ def build(meta, outfits, plugin, out_root, say=print, extras=(),
     # registered only previews and metadata, and its toggle actors never
     # loaded in game while a real mod's did.
     registry_assets = []
-    for w, label, actor, _n, _pic in entries_toggles:
+    for w, label, actor, _n, _pic, _desc in entries_toggles:
         bp_pkg, bp_obj = actor.rsplit(".", 1)
         folder = bp_pkg.rsplit("/", 1)[0]
         registry_assets.append(dict(
@@ -1128,7 +1128,7 @@ def build(meta, outfits, plugin, out_root, say=print, extras=(),
     # and shared rather than built again for each.
     n_pics = len(entries_outfits)
     tog_previews, shared = [], {}
-    for _w, _label, _actor, _slots, pic in entries_toggles:
+    for _w, _label, _actor, _slots, pic, _desc in entries_toggles:
         if pic and pic not in shared:
             shared[pic] = make_preview(pic, n_pics + 1 + len(shared))
         tog_previews.append(shared.get(pic))
@@ -1189,7 +1189,7 @@ def build(meta, outfits, plugin, out_root, say=print, extras=(),
         tags=data_asset_tags("PDA_ModMetaData_C", META_PKG,
                              "DA_ModMetaData")))
 
-    def toggle_body(w, label, actor, preview):
+    def toggle_body(w, label, actor, preview, desc):
         """A toggle row: no mesh of its own, just the actor that applies a
         material pack to the outfit already worn."""
         # Alone with its outfit (the split builds one mod per outfit), a
@@ -1199,9 +1199,9 @@ def build(meta, outfits, plugin, out_root, say=print, extras=(),
         return [
             (F["GeneralData"], ("struct", "UDS_ModData_General", GUID_GENERAL, [
                 (F["Name"], ("str", row_name)),
-                # The menu shows the DESCRIPTION under a tile, not the name
-                # -- real mods put their row labels there.
-                (F["OutfitDescription"], ("str", row_name)),
+                # The menu shows BOTH, so copying the label in here made
+                # every tile say its own name twice (field report).
+                (F["OutfitDescription"], ("str", desc)),
                 (F["PreviewImage"], ("softpath", preview or TEMPLATE_ICON)),
             ])),
             (F["SkeletalMeshData"],
@@ -1223,8 +1223,7 @@ def build(meta, outfits, plugin, out_root, say=print, extras=(),
         bodies.append([
             (F["GeneralData"], ("struct", "UDS_ModData_General", GUID_GENERAL, [
                 (F["Name"], ("str", outfit["name"])),
-                (F["OutfitDescription"],
-                 ("str", outfit["description"] or outfit["name"])),
+                (F["OutfitDescription"], ("str", outfit["description"])),
                 (F["PreviewImage"], ("softpath", previews[k])),
             ])),
             (F["SkeletalMeshData"],
@@ -1243,10 +1242,11 @@ def build(meta, outfits, plugin, out_root, say=print, extras=(),
         # Its own toggles follow it: every mod observed groups them that
         # way, and a toggle names no outfit, so its position is the only
         # thing tying it to one.
-        for ti, (w, label, actor, _n, _pic) in enumerate(entries_toggles):
+        for ti, (w, label, actor, _n, _pic,
+                 desc) in enumerate(entries_toggles):
             if w["outfit"] is outfit:
                 bodies.append(toggle_body(w, label, actor,
-                                          tog_previews[ti]))
+                                          tog_previews[ti], desc))
 
     # A weapon-only mod writes no costume list at all rather than an empty
     # one: no mod ships a list registering nothing, and the weapons list
@@ -1289,7 +1289,7 @@ def build(meta, outfits, plugin, out_root, say=print, extras=(),
                 (F["GeneralData"],
                  ("struct", "UDS_ModData_General", GUID_GENERAL, [
                      (F["Name"], ("str", e["label"])),
-                     (F["OutfitDescription"], ("str", e["label"])),
+                     (F["OutfitDescription"], ("str", e.get("desc") or "")),
                      (F["PreviewImage"], ("softpath", preview)),
                  ])),
                 (F["SkeletalMeshData"],

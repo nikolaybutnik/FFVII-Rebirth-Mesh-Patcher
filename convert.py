@@ -1170,7 +1170,8 @@ def write_template(source, mod_name, parts, prefill=None, restore=None,
             template["_how_this_works"] += [
                 "",
                 "'variants' below is this mod's menu: one entry = one tile,",
-                "and an entry's 'name' is the tile's label.",
+                "and an entry's 'name' is the tile's label. Add a",
+                "'description' line to one for a second line under it.",
                 "'_example_variant' shows the shape, using this mod's own",
                 "parts -- copy it into the 'variants' list and edit it.",
             ]
@@ -2333,8 +2334,8 @@ def match_outfit(want, outfits):
 
 def resolve_variants(meta, extras, outfits=()):
     """
-    [(row name, [utoc, ...], only_on)] from the template's "variants"
-    section -- or one row per extra when the section is absent.
+    [(row name, [utoc, ...], only_on, description)] from the template's
+    "variants" section -- or one row per extra when the section is absent.
 
     `only_on` is None when an entry goes on every outfit, else the folders
     of the ones its "outfit" field names -- a mod whose add-on suits only
@@ -2350,7 +2351,7 @@ def resolve_variants(meta, extras, outfits=()):
     check_part_names(extras)
     by_stem = {stem(u).lower(): u for u in extras}
     cfg = meta.get("variants")
-    default = [(toggles.label_of(u), [u], None) for u in extras]
+    default = [(toggles.label_of(u), [u], None, "") for u in extras]
     if cfg is None:
         return default, False
     if not isinstance(cfg, list):
@@ -2392,7 +2393,8 @@ def resolve_variants(meta, extras, outfits=()):
                 only_on.append(folder)
         name = str(entry.get("name") or "").strip() \
             or " + ".join(toggles.label_of(u) for u in utocs)
-        out.append((name, utocs, only_on))
+        out.append((name, utocs, only_on,
+                    str(entry.get("description") or "").strip()))
     # Structural comparison only, as SETS -- display names differ by which
     # conversion wrote the template, and the two writers list the same
     # entries in different orders; a restore reproduces the original's
@@ -2400,7 +2402,7 @@ def resolve_variants(meta, extras, outfits=()):
     # different mod: entries added, removed, made of different parts, or
     # aimed at different costumes.
     def shape(entry):
-        _name, us, only_on = entry
+        _name, us, only_on, _desc = entry
         return (tuple(sorted(u.lower() for u in us)),
                 tuple(sorted(only_on)) if only_on else ())
 
@@ -2626,7 +2628,8 @@ def loose_to_dresscode(source, mods, assume_yes=False):
     # so the lines below count weapons instead. One entry is not one tile:
     # a pak covering a character's whole set becomes a tile per weapon.
     gun_tiles = ([len(menu_tiles_in(us))
-                  for _n, us, _o in variants] if not outfits else [])
+                  for _n, us, _o, _d in variants]
+                 if not outfits else [])
     guns = sum(gun_tiles)
     print()
     print(f"  {meta['name']}  (pak -> Dresscode"
@@ -2657,7 +2660,7 @@ def loose_to_dresscode(source, mods, assume_yes=False):
         pic = (os.path.basename(o["preview"]) if o["preview"]
                else "no picture (optional)")
         print(f"      {k + 1}. {o['name']}   [{pic}]")
-    for k, (name, us, _only) in enumerate(variants if guns else ()):
+    for k, (name, us, _only, _d) in enumerate(variants if guns else ()):
         n_t = gun_tiles[k]
         pic = next((os.path.basename(p) for u in reversed(us)
                     for p in [pak_image(u)] if p), None)
@@ -2665,7 +2668,7 @@ def loose_to_dresscode(source, mods, assume_yes=False):
               + (f"[{n_t} weapons" if n_t != 1 else "[weapon")
               + (f", {pic}]" if pic else "]"))
     # Aiming a weapon entry at a costume reads as if it would work.
-    aimed = [n for n, us, only in variants
+    aimed = [n for n, us, only, _d in variants
              if only and all(weapon_tiles_in(u) for u in us)]
     if aimed:
         print(f'      note: "outfit" does nothing on a weapon entry '
@@ -2696,7 +2699,7 @@ def loose_to_dresscode(source, mods, assume_yes=False):
             print("        \"stackable\": true to keep them as drop-in files "
                   "for ~mods.")
         else:
-            combos = sum(1 for _n, us, _cs in variants if len(us) > 1)
+            combos = sum(1 for _n, us, _cs, _d in variants if len(us) > 1)
             print(f"      + {len(variants)} tile"
                   f"{'s' if len(variants) != 1 else ''} to build from "
                   f"{len(extras)} add-on pak{'s' if len(extras) != 1 else ''}"

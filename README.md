@@ -369,6 +369,8 @@ its own tile. Some notes:
 - Combine as many parts in one entry as you like. If two change the same
   thing, the one listed later wins.
 - The menu shows exactly this list — rename tiles, or delete ones you never use.
+- `"description"` on an entry adds a second line under that tile, the same as
+  an outfit's. Left out, the tile shows its name alone.
 - An entry goes on every outfit. Add `"outfit": "Standard"` (or a list of
   names) to limit it to some. Costume add-ons only; it does nothing on a weapon.
 - Made a mess? Delete `dresscode.json` and drop the folder again — unless it
