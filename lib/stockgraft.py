@@ -251,6 +251,16 @@ def stock_package(name):
     return _record(pl, ent) if ent is not None else None
 
 
+def readable(names):
+    """Whether the game's own copy of any of these packages can actually be
+    read. Tells "the game has nothing like this" apart from "the game's
+    files are here but unreadable", which otherwise look the same."""
+    by_pid = {cityhash.package_id(n): n for n in names}
+    place = _locate(set(by_pid))
+    return any(_entry(pid, place[pid]) is not None for pid in by_pid
+               if place.get(pid, {}).get("pkg"))
+
+
 def samplers(targets, meshes):
     """
     {mesh name: how many of `targets` it samples} for each of the stock

@@ -2185,6 +2185,11 @@ def recolour_layout(source, mods):
                     key=lambda mn: (-mn[1], order.index(meshes[mn[0]])))
     costumes = [meshes[m] for m, n in ranked if n == ranked[0][1]]
     if not costumes:
+        if not stockgraft.readable(meshes):
+            return None, [], (
+                "the game's own costume files are here but could not be "
+                "read, so there is no telling which costume these colours "
+                "are for.")
         return None, [], (
             "these paks recolour something none of the game's costumes "
             "wears -- there is nothing to put them on.")
