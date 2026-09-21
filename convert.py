@@ -387,6 +387,17 @@ def plan_variants(toc, plugin, extra_roots=()):
                           (o["name"] or "").strip()))
 
     roots = (plugin, *extra_roots)
+
+    # Cooked with the loader's plugin content inlined, a mod carries copies
+    # of FF7RML's own structs and enums. They sit under no root the loose
+    # layout can mount and nothing but the registration assets reads them,
+    # so they travel in the round-trip record and nowhere else. Without
+    # this the conversion stopped dead on the first one.
+    foreign = {pid for pid, p in packages.items()
+               if not p["name"].lower().startswith("/game/")
+               and not any(p["name"].lower().startswith(f"/{r.lower()}/")
+                           for r in roots)}
+
     base_union = set().union(*closures) if closures else set()
     toggles, blob_only, dead_repl = plan_toggles(
         toc, roots, packages, by_name, deps, closure, base_union,
@@ -458,7 +469,8 @@ def plan_variants(toc, plugin, extra_roots=()):
         renames, objects, drop = {}, {}, set()
         for pid, info in packages.items():
             name = info["name"]
-            if info["chunk"] in registration or pid in exclusive_elsewhere:
+            if (info["chunk"] in registration or pid in foreign
+                    or pid in exclusive_elsewhere):
                 drop.add(name)
             if name.lower() == mesh.lower():
                 renames[name.lower()] = target
@@ -2495,6 +2507,37 @@ def note_mixed_shapes(extras, variant_folders):
     print("      each add-on is offered on each costume.")
 
 
+def recorded_parts(source, parts, extras):
+    """
+    A Dresscode WEAPON mod converts to a pak that overrides a stock weapon
+    and carries no costume, so the layout reads it as a weapons-menu add-on
+    -- and the exact restore, which rebuilds from THAT pak's bytes, then had
+    nothing to rebuild from. Its own record names the folder it came from,
+    so promote the pak sitting there back to an outfit part.
+    """
+    if parts:
+        return parts, extras
+    try:
+        with open(os.path.join(source, TEMPLATE), encoding="utf-8") as f:
+            recorded = set(
+                (unpack_restore(json.load(f).get("restore")) or {})
+                .get("variants") or ())
+    except (OSError, ValueError):
+        return parts, extras
+    if not recorded:
+        return parts, extras
+    root = os.path.normcase(os.path.abspath(source))
+    promoted, rest = [], []
+    for utoc in extras:
+        d = os.path.dirname(os.path.abspath(utoc))
+        rel = ("." if os.path.normcase(d) == root
+               else os.path.relpath(d, source).replace("\\", "/"))
+        (promoted if rel in recorded else rest).append((rel, utoc))
+    if not promoted:
+        return parts, extras
+    return promoted, [u for _rel, u in rest]
+
+
 def loose_to_dresscode(source, mods, assume_yes=False):
     """
     The template flow for a dropped pak mod. Returns an exit code, or
@@ -2518,6 +2561,7 @@ def loose_to_dresscode(source, mods, assume_yes=False):
             return 1
         return None
     mod_name, parts, extras, companions, variant_folders = layout
+    parts, extras = recorded_parts(source, parts, extras)
     comp_map = {}
     if companions:
         # Folder names said "companion"; the packages have the last word.
