@@ -42,6 +42,7 @@ import shutil
 import struct
 import sys
 import tempfile
+import zipfile
 import zlib
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "lib"))
@@ -826,6 +827,11 @@ def loose_path(package_name):
 # ---------------------------------------------------------------------------
 
 TEMPLATE = "dresscode.json"
+# Where the verbatim package bytes a restore needs are kept. Inside the
+# template they were base64 within base64 -- a mod whose paks cannot
+# carry every package (costumes for slots no menu row wears, say) made a
+# dresscode.json of gigabytes that no editor would open.
+SIDECAR = "dresscode.bin"
 IMAGE_EXTS = (".png", ".jpg", ".jpeg")
 
 # Folder names that mean "each subfolder here is a whole costume", as opposed
@@ -1353,6 +1359,40 @@ def safe_plugin_id(name, used):
 # Deleting the key (or editing the visible fields) simply falls back to a
 # fresh build.
 # ---------------------------------------------------------------------------
+
+class BlobFile:
+    """The verbatim package bytes a restore needs, written beside
+    dresscode.json instead of into it. put() returns the entry number that
+    goes in the record; the file is only created once something is put in
+    it, so a mod whose paks carry everything gets no sidecar at all."""
+
+    def __init__(self, path):
+        self.path = path
+        self.zip = None
+        self.n = 0
+
+    def put(self, data):
+        if self.zip is None:
+            self.zip = zipfile.ZipFile(self.path, "w", zipfile.ZIP_STORED)
+        # Already zlib'd by the caller, so the zip only has to hold it.
+        self.zip.writestr(str(self.n), data)
+        self.n += 1
+        return self.n - 1
+
+    def close(self):
+        if self.zip is not None:
+            self.zip.close()
+
+
+def needs_sidecar(rt):
+    """Whether this record keeps its verbatim bytes in the sidecar. Older
+    records hold them inline as base64 and need no file."""
+    for rec in [rt] + list(rt.get("libraries") or []):
+        if any(not isinstance(v, str)
+               for v in (rec.get("stored_chunks") or {}).values()):
+            return True
+    return False
+
 
 def pack_restore(obj):
     return base64.b64encode(
@@ -3205,9 +3245,17 @@ def prepare_to_loose(toc, uplugin, out_base=None):
 
         runners.append(weapon_run)
 
-    if len(plans) > 1 or opt_layout:
+    if plans and (opt_layout or gun_layout):
         print("      install: one outfit folder's three files go in ~mods; "
               "extras from its Optional folder go in alongside")
+    elif opt_layout or gun_layout:
+        # A weapon mod writes nothing BUT Optional folders -- there is no
+        # outfit folder to send the reader to first.
+        print("      install: the three files from an Optional folder "
+              "go in ~mods")
+    elif len(plans) > 1:
+        print("      install: pick one Variants folder; its three files "
+              "go in ~mods")
 
     def warn_missing():
         """The last thing printed, because it decides whether the result
