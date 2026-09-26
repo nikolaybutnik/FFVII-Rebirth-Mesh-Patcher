@@ -579,5 +579,5 @@ if __name__ == "__main__":
         except KeyboardInterrupt:
             print("\n  stopped.")
             code = 1
-    patchtool._pause_before_exit(sys.argv[1:])
+    drops.pause_before_exit(sys.argv[1:], patchtool._INTERACTED)
     sys.exit(code)

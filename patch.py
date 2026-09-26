@@ -811,10 +811,6 @@ def show_list(mods, debug=False, sources=None):
     return bool(need)
 
 
-# Console-ownership detection lives in lib/drops.py, shared with convert.py.
-_owns_console = drops.owns_console
-
-
 def _finish(summary):
     """Print the closing summary."""
     print()
@@ -828,38 +824,11 @@ def _finish(summary):
 _INTERACTED = False
 
 
-def _pause_before_exit(argv):
-    """Hold the window open when we own it, so double-clickers can read the
-    output. Runs on EVERY exit -- listing, errors, "nothing selected" -- not
-    just after patching."""
-    if _INTERACTED or "--no-pause" in argv:
-        return
-    if "--pause" in argv or _owns_console():
-        try:
-            input("Press Enter to close this window...")
-        except (EOFError, KeyboardInterrupt):
-            pass
-
-
 def _wrapper_dir(source):
     """The "Patched Mods" (or "Unpatched Mods") folder placed beside a dropped
     folder (or zip) to hold its converted copies."""
     return os.path.join(os.path.dirname(os.path.abspath(source.rstrip("\\/"))),
                         MODE["wrapper"])
-
-
-# Archive handling -- detection, extraction, nested unpacking -- lives in
-# lib/drops.py, shared with convert.py. Aliased so call sites read the same.
-_ARCHIVE_EXTS = drops.ARCHIVE_EXTS
-_is_archive = drops.is_archive
-_archives_in = drops.archives_in
-_contains_archive = drops.contains_archive
-_show_archive = drops.show_archive
-_archive_summary = drops.archive_summary
-_extract_archive = drops.extract_archive
-_expand_archives = drops.expand_archives
-_peek_line = drops.progress
-_peek_done = drops.progress_done
 
 
 # Archives unpacked to be looked inside, keyed by absolute path. Unpacking
@@ -880,10 +849,10 @@ def _unpack_to_look(arc):
     import tempfile
     dst = tempfile.mkdtemp(prefix="modscan-")
     try:
-        _extract_archive(arc, dst)
-        if _contains_archive(dst):
-            _peek_done()        # nested unpacking prints lines of its own
-        _expand_archives(dst)
+        drops.extract_archive(arc, dst)
+        if drops.contains_archive(dst):
+            drops.progress_done()   # nested unpacking prints lines of its own
+        drops.expand_archives(dst)
     except Exception:
         shutil.rmtree(dst, ignore_errors=True)
         _UNPACKED[key] = None
@@ -923,7 +892,7 @@ def _archive_covered(arc, mod_names):
     """True when every mod inside `arc` already appears in the scan -- the
     archive was extracted and handled on an earlier run, so offering it again
     would only duplicate mods the user already has."""
-    names, inner = _archive_summary(arc)
+    names, inner = drops.archive_summary(arc)
     if inner or not names:
         return False
     have = [k.lower() for k in mod_names]
@@ -1009,7 +978,7 @@ def _patch_copy(source):
     src = os.path.abspath(source.rstrip("\\/"))
     wrapper = _wrapper_dir(source)
 
-    if _is_archive(src):
+    if drops.is_archive(src):
         dst = os.path.join(wrapper, os.path.splitext(os.path.basename(src))[0])
         ready = _UNPACKED.pop(os.path.normcase(src), None)
         if ready:
@@ -1026,12 +995,12 @@ def _patch_copy(source):
         else:
             print(f"  Extracting {os.path.basename(src)} to {dst} ...")
             try:
-                _extract_archive(src, dst)
+                drops.extract_archive(src, dst)
             except Exception as ex:
                 print(f"  Could not extract: {ex}")
                 _INTERACTED = True
                 return 0
-            _expand_archives(dst)
+            drops.expand_archives(dst)
         dst = _fix_loader_names(dst)
         return main(["--path", dst, "--all", "--no-backup"])
 
@@ -1046,7 +1015,7 @@ def _patch_copy(source):
         print(f"  Could not copy: {ex}")
         _INTERACTED = True
         return 0
-    _expand_archives(dst)
+    drops.expand_archives(dst)
     dst = _fix_loader_names(dst)
     return main(["--path", dst, "--all", "--no-backup"])
 
@@ -1102,7 +1071,8 @@ def _parse_args(argv):
                 out = val
         elif a.startswith("-"):
             flags.append(a)
-        elif os.path.isdir(a) or a.lower().endswith((".utoc",) + _ARCHIVE_EXTS):
+        elif os.path.isdir(a) or a.lower().endswith((".utoc",)
+                                                    + drops.ARCHIVE_EXTS):
             sources.append(a)
         else:
             names.append(a)
@@ -1173,13 +1143,13 @@ def main(argv):
 
     # Archives can't be scanned in place -- they are extracted and patched by
     # the drop menu -- so keep them out of find_mods but still count as work.
-    archives = [s for s in sources if _is_archive(s)]
+    archives = [s for s in sources if drops.is_archive(s)]
     # A dropped folder of archives has to be unpacked before its mods appear --
     # but never the installed library, where a leftover download is just
     # clutter and unpacking it would copy the whole library needlessly.
     packed = [s for s in sources
-              if not _under_game_mods(s) and _contains_archive(s)]
-    scan_sources = [s for s in sources if not _is_archive(s)]
+              if not _under_game_mods(s) and drops.contains_archive(s)]
+    scan_sources = [s for s in sources if not drops.is_archive(s)]
 
     # Scan the library only with no sources at all -- an archive-only drop scans
     # nothing here (its mods appear once extracted), never the whole install.
@@ -1219,7 +1189,8 @@ def main(argv):
         # unpacked copies are sitting right there -- so that is settled
         # first. Only when the scan itself is clean: with work pending the
         # menu processes the whole drop, archives included.
-        every = archives + [arc for p in packed for arc in _archives_in(p)]
+        every = archives + [arc for p in packed
+                            for arc in drops.archives_in(p)]
         dupe = set()
         if not needs_work:
             dupe = {os.path.normcase(os.path.abspath(a)) for a in every
@@ -1228,10 +1199,10 @@ def main(argv):
         for n, a in enumerate(every, 1):
             if os.path.normcase(os.path.abspath(a)) in dupe:
                 continue
-            _peek_line("looking inside", n, len(every), a)
+            drops.progress("looking inside", n, len(every), a)
             if _archive_needs(a) is False:
                 settled.add(os.path.normcase(os.path.abspath(a)))
-        _peek_done()
+        drops.progress_done()
 
         def _handled(a):
             return os.path.normcase(os.path.abspath(a)) in (settled | dupe)
@@ -1241,22 +1212,22 @@ def main(argv):
 
         live_archives = [a for a in archives if not _handled(a)]
         live_packed = [p for p in packed
-                       if not all(_handled(a) for a in _archives_in(p))]
+                       if not all(_handled(a) for a in drops.archives_in(p))]
         if live_archives or live_packed:
             print()
             print("  Archives to unpack and patch:")
             for a in live_archives + [p for p in live_packed
                                       if p not in live_archives]:
                 print(f"    {os.path.abspath(a)}")
-                if _is_archive(a):
-                    _show_archive(a, " " * 8)
+                if drops.is_archive(a):
+                    drops.show_archive(a, " " * 8)
                 else:
-                    for arc in _archives_in(a):
+                    for arc in drops.archives_in(a):
                         print(f"        {os.path.basename(arc)}")
-                        _show_archive(arc, " " * 12)
+                        drops.show_archive(arc, " " * 12)
         skipped = ([a for a in archives if a not in live_archives]
                    + [arc for p in packed if p not in live_packed
-                      for arc in _archives_in(p)])
+                      for arc in drops.archives_in(p)])
         done = [a for a in skipped if _settled(a)]
         dupes = [a for a in skipped if not _settled(a)]
         if done:
@@ -1276,7 +1247,8 @@ def main(argv):
         # pause -- offer the follow-up: in-place confirm for installed mods, the
         # copy flow for anything else (an archive is always the copy flow).
         # With nothing to do and nothing to unpack, there is nothing to offer.
-        if sources and not (want_all or do_restore or named) and _owns_console():
+        if (sources and not (want_all or do_restore or named)
+                and drops.owns_console()):
             if not (live_archives or live_packed) and not needs_work:
                 return 0
             if (scan_sources and not live_archives and not live_packed
@@ -1429,7 +1401,7 @@ def run(argv):
             code = main(argv)
     finally:
         _discard_unpacked()     # whatever the scan opened and nothing claimed
-    _pause_before_exit(argv)
+    drops.pause_before_exit(argv, _INTERACTED)
     return code
 
 
