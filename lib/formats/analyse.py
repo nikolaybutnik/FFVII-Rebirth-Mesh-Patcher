@@ -11,11 +11,12 @@ import os
 import cityhash
 import conheader
 import matpack
-import mkdc
-import moddata
 import rename
-import weapons
 import zen
+
+from formats import mkdc
+from formats import moddata
+from formats import weapons
 
 # The CONTAINER mounts at the player-character folder, exactly like every
 # pak mod confirmed working in game -- root mounts exist in the wild but

@@ -22,7 +22,7 @@ import struct
 import cityhash
 import pkgedit
 import tagged
-from mkpkg import BUNDLE_BLOCK, OBJECT_FLAGS
+from formats.mkpkg import BUNDLE_BLOCK, OBJECT_FLAGS
 from zen import ZenPackage
 
 SCRIPT = cityhash.TYPE_SCRIPT_IMPORT

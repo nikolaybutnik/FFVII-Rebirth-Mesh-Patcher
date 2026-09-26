@@ -30,23 +30,24 @@ import sys
 import zipfile
 import zlib
 
-import assetreg
 import cityhash
 import conheader
 import dirindex
 import iostore
-import mkpkg
-import moddata
 import pakfile
 import pkgedit
-import pngfile
 import rename
 import stockgraft
-import toggles
 import tagged
-import weapons
 import writer
 from zen import ZenPackage
+
+from formats import assetreg
+from formats import mkpkg
+from formats import moddata
+from formats import pngfile
+from formats import toggles
+from formats import weapons
 
 # Every row of every real mod names a picture -- none is ever left empty, and
 # the loader ships this one for rows an author gave no icon of their own.

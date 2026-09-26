@@ -52,18 +52,18 @@ import drops                                                    # noqa: E402
 import iostore                                                  # noqa: E402
 import loosepak                                                 # noqa: E402
 import matpack                                                  # noqa: E402
-import mkdc                                                     # noqa: E402
-import moddata                                                  # noqa: E402
 import pakfile                                                  # noqa: E402
-import pngfile                                                  # noqa: E402
 import rename                                                   # noqa: E402
 import slots                                                    # noqa: E402
 import stockgraft                                               # noqa: E402
-import texread                                                  # noqa: E402
-import toggles                                                  # noqa: E402
-import weapons                                                  # noqa: E402
 import zen                                                      # noqa: E402
 from formats import analyse                                     # noqa: E402
+from formats import mkdc                                        # noqa: E402
+from formats import moddata                                     # noqa: E402
+from formats import pngfile                                     # noqa: E402
+from formats import texread                                     # noqa: E402
+from formats import toggles                                     # noqa: E402
+from formats import weapons                                     # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Pak -> Dresscode: the template.

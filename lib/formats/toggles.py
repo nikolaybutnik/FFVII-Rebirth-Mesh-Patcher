@@ -25,9 +25,10 @@ import cityhash
 import conheader
 import pkgedit
 import matpack
-import mkbp
 import rename
 from zen import ZenPackage
+
+from formats import mkbp
 
 ENDGAME = "/Script/EndGame"
 

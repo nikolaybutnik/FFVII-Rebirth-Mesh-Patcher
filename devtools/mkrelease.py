@@ -3,13 +3,25 @@ mkrelease.py -- build the two release zips, then prove they work.
 
     python devtools/mkrelease.py 1.7.3
     python devtools/mkrelease.py 1.7.3 --force        replace existing zips
-    python devtools/mkrelease.py 1.7.3 --out=D:	mp   build somewhere else
+    python devtools/mkrelease.py 1.7.3 --out=D:/tmp   build somewhere else
 
-Writes releases/FFVII-Rebirth-Mesh-Patcher-v<version>.zip (Nexus) and a
--github.zip beside it that also carries the repo files. Each is then unpacked
-to a temp folder and checked there, away from the repo: every module under
-lib/ is in it, everything compiles, and every script imports. A zip that
-fails is deleted, so it cannot be uploaded by mistake.
+Writes two zips into releases/, each under one FFVII-Rebirth-Mesh-Patcher/
+folder:
+
+    -v<version>.zip          what it takes to RUN, nothing else. No run.bat:
+                             a .bat draws download warnings on mod sites,
+                             and this is the one people get from there.
+    -v<version>-github.zip   the source snapshot: adds run.bat, LICENSE (the
+                             README links to it), .gitignore, requirements.txt.
+
+Nothing else, ever -- no tests/, no backups/, no devtools/roundtrip.py, and
+above all no oo2core DLL, which is proprietary and must not be
+redistributed. The lists below are exact, so nothing strays in.
+
+Each zip is then unpacked to a temp folder and checked there, away from the
+repo: every module under lib/ is in it, everything compiles, and every
+script imports. A zip that fails is deleted, so it cannot be uploaded by
+mistake.
 
 lib/ is walked, not listed: it has feature subfolders (lib/formats/), and a
 flat copy of lib/*.py builds a release that breaks on its first conversion.

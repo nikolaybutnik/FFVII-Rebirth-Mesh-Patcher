@@ -36,12 +36,13 @@ import cityhash
 import conheader
 import config
 import iostore
-import moddata
 import pkgedit
 import rename
 import stockgraft
 import stockslots
 from zen import ZenPackage
+
+from formats import moddata
 
 WEAPON_ROOT = "/game/character/weapon/"
 # The same root as the game spells it -- for building names, not matching.
