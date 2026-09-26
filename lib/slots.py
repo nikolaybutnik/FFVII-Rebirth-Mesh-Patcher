@@ -182,6 +182,11 @@ def character_name(folder):
     return _spaced(bits[2]) if len(bits) > 2 else ""
 
 
+def costume_name(folder):
+    """Tifa's Costa Clothing -- a stock costume said the way a person would."""
+    return f"{character_name(folder)}'s {label(folder)}"
+
+
 def choices_for(kind, folder):
     """
     The stock slots a pak on `folder` can be moved to: the same character's,

@@ -26,6 +26,17 @@ def progress_done():
         print("\r" + " " * 70 + "\r", end="", flush=True)
 
 
+def scanning(label, done, total):
+    """One updating console line -- enough to show life during a scan that
+    reads hundreds of megabytes. Piped output gets none of it."""
+    if not sys.stdout.isatty():
+        return
+    if done >= total:
+        print("\r" + " " * 70 + "\r", end="", flush=True)
+    else:
+        print(f"\r      {label} ... {done + 1}/{total}", end="", flush=True)
+
+
 # ---------------------------------------------------------------------------
 # Console ownership and the end-of-run pause
 # ---------------------------------------------------------------------------
