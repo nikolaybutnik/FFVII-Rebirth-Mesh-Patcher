@@ -38,8 +38,8 @@ sys.path.insert(0, os.path.join(_REPO, "lib"))
 import config                                                    # noqa: E402
 import drops                                                     # noqa: E402
 import iostore                                                   # noqa: E402
-import meshparts                                                 # noqa: E402
 import repack                                                    # noqa: E402
+from meshedit import meshparts                                   # noqa: E402
 
 # patch.py owns finding mods on disk, the Oodle check and the drop-window
 # pause. Borrowing them keeps one copy of each, and keeps this tool's answers

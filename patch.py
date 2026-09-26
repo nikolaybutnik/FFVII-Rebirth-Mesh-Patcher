@@ -87,10 +87,11 @@ import config
 import deps
 import drops
 import iostore
-import meshfix
 import repack
-import skm
 import zen
+
+from meshedit import meshfix
+from meshedit import skm
 
 BACKUP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "backups")
 

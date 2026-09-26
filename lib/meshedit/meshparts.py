@@ -24,10 +24,11 @@ camera pulls back, which looks like the tool being broken.
 import struct
 
 import matpack
-import meshfix
 import pkgedit
-import skm
 import zen
+
+from meshedit import meshfix
+from meshedit import skm
 
 
 class Unreadable(Exception):

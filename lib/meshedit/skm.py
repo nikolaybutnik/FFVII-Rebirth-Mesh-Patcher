@@ -31,7 +31,8 @@ not depend on decoding every property Unreal might emit.
 import math
 import struct
 
-import globals_meta
+from meshedit import globals_meta
+
 
 SKELETAL_MESH = globals_meta.SKELETAL_MESH
 

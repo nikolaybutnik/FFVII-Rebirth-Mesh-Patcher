@@ -71,7 +71,8 @@ loudly rather than guessing if it meets a multi-LOD mesh.
 
 import struct
 
-import skm
+from meshedit import skm
+
 
 CLASS_STRIP_DUPLICATED_VERTICES = 1
 
@@ -156,7 +157,7 @@ def convert_tangents_16_to_4(buf):
     than a crash, because nothing overruns; the data is simply read wrong.
     """
     import numpy as np
-    import shader_decode as _sd
+    from meshedit import shader_decode as _sd
 
     n = len(buf) // 16
     if n == 0:
@@ -201,7 +202,7 @@ def convert_tangents_8_to_4(buf):
     TangentZ (the normal), whose fourth byte also carries the handedness sign.
     """
     import numpy as np
-    import shader_decode as _sd
+    from meshedit import shader_decode as _sd
 
     n = len(buf) // 8
     if n == 0:
@@ -240,7 +241,7 @@ def convert_tangents_4_to_8(buf):
     one (the same mapping convert_tangents_8_to_4 reads back).
     """
     import numpy as np
-    import shader_decode as _sd
+    from meshedit import shader_decode as _sd
 
     words = np.frombuffer(bytes(buf), dtype="<u4")
     if len(words) == 0:
