@@ -64,15 +64,6 @@ def default_costume_package(player_type):
     return f"/Game/Character/Player/{folder}/Model/{prefix}_00"
 
 
-def player_type_for_package(package_name):
-    """The inverse: which character a stock costume package belongs to."""
-    low = package_name.lower()
-    for key, (_prefix, folder) in PLAYER_TYPES.items():
-        if f"/player/{folder.lower()}/" in low:
-            return f"EPlayerType::{key}"
-    return None
-
-
 def _properties(data):
     pkg = ZenPackage(data)
     r = tagged.Reader(data, pkg.export_data_start(), pkg)

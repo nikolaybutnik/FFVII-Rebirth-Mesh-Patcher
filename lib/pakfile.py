@@ -187,20 +187,6 @@ def read_entries(data, decompressor=None):
     return mount, seed, files
 
 
-def mount_of(data):
-    """The mount point recorded in an existing pak, or None if unreadable."""
-    pos = data.rfind(struct.pack("<I", MAGIC))
-    if pos < 0:
-        return None
-    offset, size = struct.unpack_from("<qq", data, pos + 8)
-    if offset + size > len(data):
-        return None
-    length = struct.unpack_from("<i", data, offset)[0]
-    if length <= 0:
-        return None
-    return data[offset + 4:offset + 4 + length - 1].decode("utf-8", "replace")
-
-
 # THE .pak MOUNT IS NOT THE .utoc MOUNT.
 #
 # The container's mount is a path prefix for the packages inside it, and is
@@ -210,10 +196,6 @@ def mount_of(data):
 # root-mounted one. Setting it to the container's deep path instead registers a
 # bogus content root and the game dies on startup.
 LOOSE_MOUNT = "/"
-
-
-def plugin_mount(plugin):
-    return f"../../../End/Mods/{plugin}/"
 
 
 def _fnv64(data, seed):
