@@ -728,39 +728,103 @@ def build(meta, outfits, plugin, out_root, say=print, extras=(),
     """
     fields_from_ff7rml()
     F = FIELDS
-
-    # A big mod is minutes of silent decompressing and recompressing; keep a
-    # counter on screen so it reads as working, not hung. The counter line is
-    # overwritten in place and cleared before any real message.
-    progress = sys.stdout.isatty()
-
-    def tick(msg):
-        if progress:
-            print(f"\r      {msg[:58]:<58}", end="", flush=True)
-
-    def tick_done():
-        if progress:
-            print("\r" + " " * 66 + "\r", end="", flush=True)
-
-    raw_say = say
-
-    def say(msg):
-        tick_done()
-        raw_say(msg)
-
+    b = _Build(plugin, say)
     cid = cityhash.package_id(f"{plugin}End")
     mount = f"../../../End/Mods/{plugin}/Content/"
 
-    merged = {}                 # pid -> dict(name, data, deps, exp, bun, bulks)
-    template_toc = None
-    used_names = set()
-    entries_outfits = []        # per outfit: (mesh soft path, player key)
+    entries_outfits, wearers = _merge_outfits(b, outfits, external)
+    entries_toggles, entries_weapons = _merge_extras(
+        b, extras, wearers, part_previews, weapon_tiles)
 
-    # Variant folders share most packages and they dedupe by name -- but
-    # authors recook each variant separately, and a "shared" file whose
-    # bytes came out different (the _Condition model, typically) cannot
-    # live under one name. Find those up front; every outfit after the
-    # first gets its own private copy of them.
+    # A mod with no costume and no weapon tile has nothing for the menu to
+    # show. It still builds -- a valid, empty plugin -- and the person
+    # installs it and finds nothing there, so refuse instead.
+    if not entries_outfits and not entries_weapons:
+        raise RuntimeError(
+            "nothing here can go in the menu -- see the note above. "
+            "Nothing was written; keep the mod as paks in ~mods.")
+
+    _register_contents(b, entries_toggles, entries_outfits, entries_weapons)
+    previews, tog_previews, gun_previews = _previews(
+        b, entries_outfits, entries_toggles, entries_weapons)
+    _add_metadata(b, F, meta)
+    _add_character_data(b, F, entries_outfits, entries_toggles, previews,
+                        tog_previews)
+    _add_weapon_data(b, F, entries_weapons, gun_previews)
+
+    merged = b.merged
+    # Now that the whole container is known, every reference leaving it has
+    # to say so -- see mark_external_arcs.
+    shipped = set(merged)
+    for rec in merged.values():
+        patched = mark_external_arcs(rec["data"], shipped)
+        if patched is not None:
+            rec["data"] = patched
+
+    hdr, order = _container_header(cid, merged)
+    pak_dir, base, n_chunks, ucas_size = _write_container(
+        b, cid, mount, hdr, order, out_root)
+    root = _write_plugin_files(b, meta, out_root, pak_dir, base)
+
+    for toc in b.tocs:
+        toc.close()                     # Windows holds temp folders hostage
+    b.say(f"    written  {plugin}{os.sep}  "
+          f"({n_chunks} chunks, {ucas_size / (1024 * 1024):,.1f} MB)")
+    return root
+
+
+class _Build:
+    """What one build carries from phase to phase: the packages merged so
+    far, the containers it opened, the names it has handed out, the registry
+    rows it owes -- and its console."""
+
+    def __init__(self, plugin, say):
+        self.plugin = plugin
+        self.merged = {}        # pid -> dict(name, data, deps, exp, bun, bulks)
+        self.tocs = []
+        self.template_toc = None
+        self.used_names = set()
+        self.registry_assets = []
+        self._raw_say = say
+        self._said = set()
+        # A big mod is minutes of silent decompressing and recompressing; keep
+        # a counter on screen so it reads as working, not hung. The counter
+        # line is overwritten in place and cleared before any real message.
+        self._progress = sys.stdout.isatty()
+
+    def tick(self, msg):
+        if self._progress:
+            print(f"\r      {msg[:58]:<58}", end="", flush=True)
+
+    def tick_done(self):
+        if self._progress:
+            print("\r" + " " * 66 + "\r", end="", flush=True)
+
+    def say(self, msg):
+        self.tick_done()
+        self._raw_say(msg)
+
+    def say_once(self, msg):
+        # Variant paks trigger the same graft notes; say each once, not per
+        # outfit.
+        if msg not in self._said:
+            self._said.add(msg)
+            self.say(msg)
+
+    def add(self, name, data, deps):
+        pid = cityhash.package_id(name)
+        self.merged[pid] = dict(name=name, data=data, deps=deps,
+                                exp=len(ZenPackage(data).exports), bun=1,
+                                bulks=[])
+        return pid
+
+
+def _merge_outfits(b, outfits, external):
+    """Every outfit's packages, renamed under the plugin and merged into
+    b.merged. Returns (entries, wearers): per outfit its menu entry --
+    (outfit, mesh soft path, player key) -- and what a toggle needs to act
+    on it."""
+    tick = b.tick
     pre = []
     for outfit in outfits:
         tick(f"reading outfit {len(pre) + 1}/{len(outfits)}")
@@ -773,6 +837,31 @@ def build(meta, outfits, plugin, out_root, say=print, extras=(),
     for _ptoc, ppkgs in pre:
         for pid, p in ppkgs.items():
             carried.setdefault(pid, p)
+    diff_owner = _private_copies(b, pre)
+
+    entries, wearers = [], []
+    for k, outfit in enumerate(outfits):
+        tick(f"merging outfit {k + 1}/{len(outfits)}: {outfit['name']}")
+        toc, packages = pre[k]
+        b.tocs.append(toc)
+        if b.template_toc is None:
+            b.template_toc = toc
+        entry, wearer = _merge_outfit(b, k, outfit, toc, packages, carried,
+                                      diff_owner, external)
+        entries.append(entry)
+        wearers.append(wearer)
+    return entries, wearers
+
+
+def _private_copies(b, pre):
+    """{lowercase name: the outfit that keeps the shared name} for each
+    shared file that needs a private copy in every other outfit."""
+    # Variant folders share most packages and they dedupe by name -- but
+    # authors recook each variant separately, and a "shared" file whose
+    # bytes came out different (the _Condition model, typically) cannot
+    # live under one name. Find those up front; every outfit after the
+    # first gets its own private copy of them.
+    tick = b.tick
     shared = {}
     for k, (_ptoc, ppkgs) in enumerate(pre):
         for p in ppkgs.values():
@@ -812,156 +901,156 @@ def build(meta, outfits, plugin, out_root, say=print, extras=(),
                 diff_owner[low] = shared[low][0][0]
                 divergent.add(low)
                 changed = True
+    return diff_owner
 
-    # Variant paks trigger the same graft notes; say each once, not per outfit.
-    said = set()
 
-    def say_once(msg):
-        if msg not in said:
-            said.add(msg)
-            say(msg)
+def _merge_outfit(b, k, outfit, toc, packages, carried, diff_owner,
+                  external):
+    """One outfit into b.merged. Returns its menu entry and its wearer."""
+    plugin, merged, used_names = b.plugin, b.merged, b.used_names
+    say_once = b.say_once
+    mesh_name, player = find_stock_mesh(packages)
+    if not mesh_name:
+        raise RuntimeError(
+            f"{os.path.basename(outfit['utoc'])} does not replace any "
+            "character's standard costume or weapon")
+    old_mesh_pid = cityhash.package_id(mesh_name)
 
-    tocs, wearers = [], []
-    for k, outfit in enumerate(outfits):
-        tick(f"merging outfit {k + 1}/{len(outfits)}: {outfit['name']}")
-        toc, packages = pre[k]
-        tocs.append(toc)
-        if template_toc is None:
-            template_toc = toc
-        mesh_name, player = find_stock_mesh(packages)
-        if not mesh_name:
-            raise RuntimeError(
-                f"{os.path.basename(outfit['utoc'])} does not replace any "
-                "character's standard costume or weapon")
-        old_mesh_pid = cityhash.package_id(mesh_name)
+    raw_meta = conheader.store_meta(toc, packages)
+    # A recolour IS retouched game files; saying so per colour is noise.
+    grafts = stockgraft.plan(packages, raw_meta, {old_mesh_pid},
+                             (lambda _m: None) if outfit.get("recolour")
+                             else say_once)
+    borrowed, orphaned = _needs_elsewhere(packages, raw_meta, carried)
+    if orphaned:
+        _say_missing(toc, packages, orphaned, say_once)
 
-        raw_meta = conheader.store_meta(toc, packages)
-        # A recolour IS retouched game files; saying so per colour is noise.
-        grafts = stockgraft.plan(packages, raw_meta, {old_mesh_pid},
-                                 (lambda _m: None) if outfit.get("recolour")
-                                 else say_once)
-        borrowed, orphaned = _needs_elsewhere(packages, raw_meta, carried)
-        if orphaned:
-            _say_missing(toc, packages, orphaned, say_once)
-
-        safe = safe_id(outfit["name"], used_names, f"Outfit{k + 1}")
-        mesh_new = f"/{plugin}/Outfits/{safe}"
-        renames = {mesh_name.lower(): mesh_new}
-        for pkg in packages.values():
-            low = pkg["name"].lower()
-            if low in renames or low in external \
-                    or low.startswith(f"/{plugin.lower()}/"):
-                continue
-            tail = pkg["name"][6:] if low.startswith("/game/") \
-                else pkg["name"].lstrip("/")
-            if low in diff_owner and diff_owner[low] != k:
-                renames[low] = f"/{plugin}/{safe}/{tail}"
-            else:
-                renames[low] = f"/{plugin}/{tail}"
-        extra_imports = {}
-        # A graft sampling this outfit's private textures differs per outfit;
-        # under one shared name the first outfit's won on every tile.
-        private = {pid for pid, pkg in packages.items()
-                   if renames.get(pkg["name"].lower(), "").lower().startswith(
-                       f"/{plugin.lower()}/{safe.lower()}/")}
-        changed = True
-        while changed:
-            changed = False
-            for gpid, g in grafts.items():
-                if gpid not in private and private & set(g["deps"]):
-                    private.add(gpid)
-                    changed = True
-        for gpid, g in grafts.items():
-            where = f"/{plugin}/{safe}/" if gpid in private else f"/{plugin}/"
-            renames[g["name"].lower()] = where + g["name"][6:]
-        for g in grafts.values():
-            new_name = renames[g["name"].lower()]
-            gp = ZenPackage(g["data"])
-            for e in gp.exports:
-                if e["gimp"] == cityhash.NULL_INDEX:
-                    continue
-                extra_imports[e["gimp"]] = cityhash.object_id(
-                    new_name, pkgedit.export_object_path(gp, e))
-        for bpid, bp in borrowed.items():
-            low = bp["name"].lower()
-            if low in renames or low in external:
-                continue
-            tail = bp["name"][6:] if low.startswith("/game/") \
-                else bp["name"].lstrip("/")
+    safe = safe_id(outfit["name"], used_names, f"Outfit{k + 1}")
+    mesh_new = f"/{plugin}/Outfits/{safe}"
+    renames = {mesh_name.lower(): mesh_new}
+    for pkg in packages.values():
+        low = pkg["name"].lower()
+        if low in renames or low in external \
+                or low.startswith(f"/{plugin.lower()}/"):
+            continue
+        tail = pkg["name"][6:] if low.startswith("/game/") \
+            else pkg["name"].lstrip("/")
+        if low in diff_owner and diff_owner[low] != k:
+            renames[low] = f"/{plugin}/{safe}/{tail}"
+        else:
             renames[low] = f"/{plugin}/{tail}"
-            for path in bp["exports"]:
-                extra_imports[cityhash.object_id(bp["name"], path)] = \
-                    cityhash.object_id(renames[low], path)
-        new_data, new_ids = rename.rewrite_chunks(
-            toc, packages, renames, fix_arcs=True,
-            extra_imports=extra_imports)
-
-        pid_map = {pid: cityhash.package_id(renames[pkg["name"].lower()])
-                   for pid, pkg in packages.items()
-                   if pkg["name"].lower() in renames}
+    extra_imports = {}
+    # A graft sampling this outfit's private textures differs per outfit;
+    # under one shared name the first outfit's won on every tile.
+    private = {pid for pid, pkg in packages.items()
+               if renames.get(pkg["name"].lower(), "").lower().startswith(
+                   f"/{plugin.lower()}/{safe.lower()}/")}
+    changed = True
+    while changed:
+        changed = False
         for gpid, g in grafts.items():
-            pid_map[gpid] = cityhash.package_id(renames[g["name"].lower()])
-        for bpid, bp in borrowed.items():
-            new_name = renames.get(bp["name"].lower())
-            if new_name:
-                pid_map[bpid] = cityhash.package_id(new_name)
-        entry_meta = {pid: (exp, bun, [pid_map.get(p, p) for p in deps])
-                      for pid, (exp, bun, deps) in raw_meta.items()}
-
-        bulks = {}
-        for i in range(toc.n):
-            if toc.chunk_ids[i][11] in (3, 4):
-                cid12 = new_ids.get(i, toc.chunk_ids[i])
-                d = new_data.get(i)
-                # Unchanged bulk data rides as a (id, toc, index) reference so
-                # its compressed blocks can be copied across untouched.
-                bulks.setdefault(
-                    int.from_bytes(cid12[:8], "little"), []).append(
-                        (cid12, d) if d is not None else (cid12, toc, i))
-
-        for pid, pkg in packages.items():
-            if pkg["name"].lower() in external:
-                continue                # a ~mods pak serves it, not us
-            i = pkg["chunk"]
-            new_pid = pid_map.get(pid, pid)
-            data = new_data.get(i) or toc.read(i)
-            name = renames.get(pkg["name"].lower(), pkg["name"])
-            exp, bun, pdeps = entry_meta.get(pid, (1, 1, []))
-            have = merged.get(new_pid)
-            if have is not None:
-                if len(have["data"]) != len(data) or have["data"] != data:
-                    raise RuntimeError(
-                        f"outfits disagree about {name} -- the variant "
-                        "folders were built from different mods")
+            if gpid not in private and private & set(g["deps"]):
+                private.add(gpid)
+                changed = True
+    for gpid, g in grafts.items():
+        where = f"/{plugin}/{safe}/" if gpid in private else f"/{plugin}/"
+        renames[g["name"].lower()] = where + g["name"][6:]
+    for g in grafts.values():
+        new_name = renames[g["name"].lower()]
+        gp = ZenPackage(g["data"])
+        for e in gp.exports:
+            if e["gimp"] == cityhash.NULL_INDEX:
                 continue
-            merged[new_pid] = dict(name=name, data=data, deps=pdeps,
-                                   exp=exp, bun=bun,
-                                   bulks=bulks.get(new_pid, []))
+            extra_imports[e["gimp"]] = cityhash.object_id(
+                new_name, pkgedit.export_object_path(gp, e))
+    for bpid, bp in borrowed.items():
+        low = bp["name"].lower()
+        if low in renames or low in external:
+            continue
+        tail = bp["name"][6:] if low.startswith("/game/") \
+            else bp["name"].lstrip("/")
+        renames[low] = f"/{plugin}/{tail}"
+        for path in bp["exports"]:
+            extra_imports[cityhash.object_id(bp["name"], path)] = \
+                cityhash.object_id(renames[low], path)
+    new_data, new_ids = rename.rewrite_chunks(
+        toc, packages, renames, fix_arcs=True,
+        extra_imports=extra_imports)
 
-        if grafts:
-            graft_data = stockgraft.rewrite(grafts, packages, renames,
-                                            extra_imports)
-            for gpid, g in grafts.items():
-                new_pid = pid_map[gpid]
-                if new_pid in merged:
-                    continue            # another outfit already carried it
-                merged[new_pid] = dict(
-                    name=renames[g["name"].lower()], data=graft_data[gpid],
-                    deps=[pid_map.get(p, p) for p in g["deps"]],
-                    exp=g["exp"], bun=g["bun"],
-                    bulks=[(new_pid.to_bytes(8, "little") + bytes(bid[8:]),
-                            bdata) for bid, bdata in g["bulks"]])
+    pid_map = {pid: cityhash.package_id(renames[pkg["name"].lower()])
+               for pid, pkg in packages.items()
+               if pkg["name"].lower() in renames}
+    for gpid, g in grafts.items():
+        pid_map[gpid] = cityhash.package_id(renames[g["name"].lower()])
+    for bpid, bp in borrowed.items():
+        new_name = renames.get(bp["name"].lower())
+        if new_name:
+            pid_map[bpid] = cityhash.package_id(new_name)
+    entry_meta = {pid: (exp, bun, [pid_map.get(p, p) for p in deps])
+                  for pid, (exp, bun, deps) in raw_meta.items()}
 
-        obj = mesh_object_name(toc, packages[old_mesh_pid]["chunk"])
-        entries_outfits.append((outfit, f"{mesh_new}.{obj}", player))
-        wearers.append(dict(toc=toc, packages=packages, renames=renames,
-                            mesh_chunk=packages[old_mesh_pid]["chunk"],
-                            mesh_package=mesh_new, mesh_object=obj,
-                            safe=safe, player=player, outfit=outfit))
+    bulks = {}
+    for i in range(toc.n):
+        if toc.chunk_ids[i][11] in (3, 4):
+            cid12 = new_ids.get(i, toc.chunk_ids[i])
+            d = new_data.get(i)
+            # Unchanged bulk data rides as a (id, toc, index) reference so
+            # its compressed blocks can be copied across untouched.
+            bulks.setdefault(
+                int.from_bytes(cid12[:8], "little"), []).append(
+                    (cid12, d) if d is not None else (cid12, toc, i))
 
-    # ---- variants from the modular standard's optional paks --------------
+    for pid, pkg in packages.items():
+        if pkg["name"].lower() in external:
+            continue                # a ~mods pak serves it, not us
+        i = pkg["chunk"]
+        new_pid = pid_map.get(pid, pid)
+        data = new_data.get(i) or toc.read(i)
+        name = renames.get(pkg["name"].lower(), pkg["name"])
+        exp, bun, pdeps = entry_meta.get(pid, (1, 1, []))
+        have = merged.get(new_pid)
+        if have is not None:
+            if len(have["data"]) != len(data) or have["data"] != data:
+                raise RuntimeError(
+                    f"outfits disagree about {name} -- the variant "
+                    "folders were built from different mods")
+            continue
+        merged[new_pid] = dict(name=name, data=data, deps=pdeps,
+                               exp=exp, bun=bun,
+                               bulks=bulks.get(new_pid, []))
+
+    if grafts:
+        graft_data = stockgraft.rewrite(grafts, packages, renames,
+                                        extra_imports)
+        for gpid, g in grafts.items():
+            new_pid = pid_map[gpid]
+            if new_pid in merged:
+                continue            # another outfit already carried it
+            merged[new_pid] = dict(
+                name=renames[g["name"].lower()], data=graft_data[gpid],
+                deps=[pid_map.get(p, p) for p in g["deps"]],
+                exp=g["exp"], bun=g["bun"],
+                bulks=[(new_pid.to_bytes(8, "little") + bytes(bid[8:]),
+                        bdata) for bid, bdata in g["bulks"]])
+
+    obj = mesh_object_name(toc, packages[old_mesh_pid]["chunk"])
+    entry = (outfit, f"{mesh_new}.{obj}", player)
+    wearer = dict(toc=toc, packages=packages, renames=renames,
+                  mesh_chunk=packages[old_mesh_pid]["chunk"],
+                  mesh_package=mesh_new, mesh_object=obj,
+                  safe=safe, player=player, outfit=outfit)
+    return entry, wearer
+
+
+def _merge_extras(b, extras, wearers, part_previews, weapon_tiles):
+    """The old modular standard's optional paks: a toggle row per outfit
+    each can act on, or a weapons-menu tile for a weapon pak. Returns
+    (toggle entries, weapon entries)."""
     # An entry is (label, [utoc, ...]): one pak is a plain toggle, several
     # are a user-composed combination applied as one row.
+    plugin, merged, tocs = b.plugin, b.merged, b.tocs
+    used_names = b.used_names
+    tick, say, say_once = b.tick, b.say, b.say_once
     entries_toggles = []
     entries_weapons = []
     part_pics = part_previews or {}
@@ -982,8 +1071,8 @@ def build(meta, outfits, plugin, out_root, say=print, extras=(),
                 opened[key] = (etoc, epkgs,
                                toggles.export_index(etoc, epkgs))
             etoc, epkgs, eindex = opened[key]
-            if template_toc is None:
-                template_toc = etoc      # a weapon mod brings no outfit pak
+            if b.template_toc is None:
+                b.template_toc = etoc    # a weapon mod brings no outfit pak
             if weapons.is_weapon_pak(epkgs):
                 # A weapon recolour cannot ride an outfit tile -- the outfit
                 # never references the weapon -- but it CAN become a tile in
@@ -1068,28 +1157,18 @@ def build(meta, outfits, plugin, out_root, say=print, extras=(),
                                     last_pic(part_pics_here), desc))
             say(f"      toggle  {w['outfit']['name']}: {label}   "
                 f"({len(slots)} slot{'s' if len(slots) != 1 else ''})")
+    return entries_toggles, entries_weapons
 
-    # A mod with no costume and no weapon tile has nothing for the menu to
-    # show. It still builds -- a valid, empty plugin -- and the person
-    # installs it and finds nothing there, so refuse instead.
-    if not entries_outfits and not entries_weapons:
-        raise RuntimeError(
-            "nothing here can go in the menu -- see the note above. "
-            "Nothing was written; keep the mod as paks in ~mods.")
 
-    # ---- synthesized packages ------------------------------------------
-    def add(name, data, deps):
-        pid = cityhash.package_id(name)
-        merged[pid] = dict(name=name, data=data, deps=deps,
-                           exp=len(ZenPackage(data).exports), bun=1, bulks=[])
-        return pid
-
+def _register_contents(b, entries_toggles, entries_outfits, entries_weapons):
+    """AssetRegistry rows for the toggles, the outfit meshes and the weapon
+    meshes."""
     # Real mods register their content in AssetRegistry.bin -- toggle
     # blueprints with the full Blueprint tag set (and packages flagged
     # 0x40000), packs as EndMaterialPack, meshes as SkeletalMesh. Ours
     # registered only previews and metadata, and its toggle actors never
     # loaded in game while a real mod's did.
-    registry_assets = []
+    registry_assets = b.registry_assets
     for w, label, actor, _n, _pic, _desc in entries_toggles:
         bp_pkg, bp_obj = actor.rsplit(".", 1)
         folder = bp_pkg.rsplit("/", 1)[0]
@@ -1130,6 +1209,12 @@ def build(meta, outfits, plugin, out_root, say=print, extras=(),
             class_name="SkeletalMesh", package_name=mesh_pkg,
             asset_name=mesh_obj, tags=[]))
 
+
+def _previews(b, entries_outfits, entries_toggles, entries_weapons):
+    """Each tile's picture as a soft path -- (outfits, toggles, weapons) --
+    building a texture for every picture given."""
+    plugin, registry_assets, add = b.plugin, b.registry_assets, b.add
+
     def make_preview(png, k):
         w, h, bgra = pngfile.decode(png)
         name = f"/{plugin}/Previews/Preview{k}"
@@ -1160,7 +1245,12 @@ def build(meta, outfits, plugin, out_root, say=print, extras=(),
     gun_previews = [make_preview(e["preview"], n_pics + 1 + j)
                     if e.get("preview") else None
                     for j, e in enumerate(entries_weapons)]
+    return previews, tog_previews, gun_previews
 
+
+def _add_metadata(b, F, meta):
+    """The mod card, DA_ModMetaData, and the thumbnail it points at."""
+    plugin, registry_assets, add = b.plugin, b.registry_assets, b.add
     thumb_path = None
     if meta.get("icon"):
         w, h, bgra = pngfile.decode(meta["icon"])
@@ -1212,6 +1302,13 @@ def build(meta, outfits, plugin, out_root, say=print, extras=(),
         asset_name="DA_ModMetaData",
         tags=data_asset_tags("PDA_ModMetaData_C", META_PKG,
                              "DA_ModMetaData")))
+
+
+def _add_character_data(b, F, entries_outfits, entries_toggles, previews,
+                        tog_previews):
+    """The costume list: each outfit's row, its own toggles right after."""
+    plugin, registry_assets, add = b.plugin, b.registry_assets, b.add
+    NULL = cityhash.NULL_INDEX
 
     def toggle_body(w, label, actor, preview, desc):
         """A toggle row: no mesh of its own, just the actor that applies a
@@ -1301,6 +1398,11 @@ def build(meta, outfits, plugin, out_root, say=print, extras=(),
             tags=data_asset_tags("PDA_ModData_Character_C", CHAR_PKG,
                                  "CharacterData")))
 
+
+def _add_weapon_data(b, F, entries_weapons, gun_previews):
+    """The weapons list -- a second asset of the same class."""
+    plugin, registry_assets, add = b.plugin, b.registry_assets, b.add
+    NULL = cityhash.NULL_INDEX
     if entries_weapons:
         # A second data asset of the SAME class, told apart by "Mod Type" --
         # exactly how Dresscode's own container splits its stock costume and
@@ -1356,15 +1458,11 @@ def build(meta, outfits, plugin, out_root, say=print, extras=(),
             tags=data_asset_tags("PDA_ModData_Character_C", CHAR_PKG,
                                  "WeaponData")))
 
-    # Now that the whole container is known, every reference leaving it has
-    # to say so -- see mark_external_arcs.
-    shipped = set(merged)
-    for rec in merged.values():
-        patched = mark_external_arcs(rec["data"], shipped)
-        if patched is not None:
-            rec["data"] = patched
 
-    # ---- container header chunk ----------------------------------------
+def _container_header(cid, merged):
+    """The container header chunk: every package's size, export count, load
+    order and dependencies, padded to the block size. Returns (header,
+    package order)."""
     order = sorted(merged)
     hdr = struct.pack("<QIIIIQ", cid, len(order), 0, 0, 8, 0xC1640000)
     hdr += struct.pack("<I", len(order))
@@ -1387,8 +1485,14 @@ def build(meta, outfits, plugin, out_root, say=print, extras=(),
     hdr += struct.pack("<I", len(store)) + store
     if len(hdr) % 65536:                             # the block-size invariant
         hdr += b"\0" * (65536 - len(hdr) % 65536)
+    return hdr, order
 
-    # ---- chunk list and files --------------------------------------------
+
+def _write_container(b, cid, mount, hdr, order, out_root):
+    """Pack every chunk and write the .utoc and .ucas. Returns (pak folder,
+    file base name, chunk count, .ucas size)."""
+    plugin, merged, tick = b.plugin, b.merged, b.tick
+    template_toc = b.template_toc
     if template_toc is None:
         raise RuntimeError("nothing to build here -- no costume pak and no "
                            "weapon pak")
@@ -1495,7 +1599,14 @@ def build(meta, outfits, plugin, out_root, say=print, extras=(),
         f.write(bytes(head) + bytes(body) + directory + metas)
     with open(os.path.join(pak_dir, base + ".ucas"), "wb") as f:
         f.write(ucas)
+    return pak_dir, base, len(chunks), len(ucas)
 
+
+def _write_plugin_files(b, meta, out_root, pak_dir, base):
+    """The .pak beside the container (the registry and the plugin config),
+    the .uplugin, and the thumbnail as Resources/Icon128.png. Returns the
+    plugin folder."""
+    plugin, registry_assets = b.plugin, b.registry_assets
     registry = assetreg.build(registry_assets)
     pak = pakfile.build_plugin(
         f"../../../End/Mods/{plugin}/",
@@ -1525,9 +1636,4 @@ def build(meta, outfits, plugin, out_root, say=print, extras=(),
                 open(os.path.join(root, "Resources", "Icon128.png"),
                      "wb") as dst:
             dst.write(src.read())
-
-    for toc in tocs:
-        toc.close()                     # Windows holds temp folders hostage
-    say(f"    written  {plugin}{os.sep}  "
-        f"({len(chunks)} chunks, {len(ucas) / (1024 * 1024):,.1f} MB)")
     return root
