@@ -272,10 +272,10 @@ Originals are never touched; everything new is written beside them.
 
 Nothing to organize — point it at the mod folder (the one holding the
 `.uplugin`) and every outfit becomes its own pak, menu variants become
-`Optional` paks, and a `dresscode.json` is written beside them. Weapons-menu
-rows convert too, one pak each. That file remembers the original, so
-converting the folder back later rebuilds it exactly. **Leave
-`dresscode.json` where it is** if you ever want the round trip.
+`Optional` paks, and a `dresscode.json` and `dresscode.bin` are written
+beside them. Weapons-menu rows convert too, one pak each. Those two remember
+the original, so converting the folder back later rebuilds it exactly. **Leave
+both where they are** if you ever want the round trip.
 
 ### Paks → Dresscode: how to organize the folder
 
@@ -310,7 +310,8 @@ Habits that save trouble:
   straight into the menu. Keep them short; very long ones get shortened.
 - **Unpack down to the three files** (`.utoc`, `.ucas`, `.pak`). Downloads
   often arrive wrapped in `~mods\` or `Content\Paks\WindowsNoEditor\`.
-- **Nothing loose at the top** but `icon.png` and `dresscode.json`.
+- **Nothing loose at the top** but `icon.png`, `dresscode.json` and
+  `dresscode.bin`.
 - **None of it is required.** Paks are found however deep they sit, and those
   wrappers are ignored when naming tiles — an untouched download converts
   fine.
@@ -374,7 +375,8 @@ its own tile. Some notes:
 - An entry goes on every outfit. Add `"outfit": "Standard"` (or a list of
   names) to limit it to some. Costume add-ons only; it does nothing on a weapon.
 - Made a mess? Delete `dresscode.json` and drop the folder again — unless it
-  has a `"restore"` section, which is the mod's way back to its original form.
+  has a `"restore"` section, which is the mod's way back to its original form
+  (`dresscode.bin` holds the rest of it).
 
 ### Details
 

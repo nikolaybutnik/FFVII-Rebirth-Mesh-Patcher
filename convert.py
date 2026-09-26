@@ -1105,7 +1105,7 @@ def pak_image(utoc):
 
 
 def write_template(source, mod_name, parts, prefill=None, restore=None,
-                   extras=(), costume=None):
+                   extras=(), costume=None, sidecar=None):
     """Prefill dresscode.json with the little a build needs. Pictures are on
     purpose NOT in here -- they are picked up by where they sit.
 
@@ -1252,6 +1252,10 @@ def write_template(source, mod_name, parts, prefill=None, restore=None,
             "'restore' below is the original Dresscode mod, recorded so",
             "that converting back reproduces it exactly. Leave it alone.",
         ]
+        if sidecar:
+            template["_how_this_works"] += [
+                f"Keep {sidecar} here too -- the rest of the original.",
+            ]
         template["restore"] = restore
     path = os.path.join(source, TEMPLATE)
     with open(path, "w", encoding="utf-8") as f:
@@ -1464,7 +1468,7 @@ def restore_matches(rt, meta, outfits, extras=()):
 
 
 def library_record(root, lib_utoc, lib_uplugin, variants, optionals,
-                   carried):
+                   carried, sink):
     """
     A restore record for a library mod whose packages were inlined into a
     dependent's loose conversion -- the same shape as the dependent's own
@@ -1502,15 +1506,14 @@ def library_record(root, lib_utoc, lib_uplugin, variants, optionals,
             neg_arcs[p["name"]] = bad
         if p["name"].lower() in carried:
             continue
-        stored_chunks[p["name"]] = base64.b64encode(
-            zlib.compress(data, 9)).decode("ascii")
+        stored_chunks[p["name"]] = sink.put(zlib.compress(data, 9))
         blobs = []
         for i in range(toc.n):
             cid = toc.chunk_ids[i]
             if cid[11] in (3, 4) and \
                     int.from_bytes(cid[:8], "little") == pid:
-                blobs.append([bytes(cid).hex(), base64.b64encode(
-                    zlib.compress(toc.read(i), 9)).decode("ascii")])
+                blobs.append([bytes(cid).hex(),
+                              sink.put(zlib.compress(toc.read(i), 9))])
         if blobs:
             stored_bulks[p["name"]] = blobs
     with open(os.path.splitext(lib_utoc)[0] + ".pak", "rb") as f:
@@ -1685,6 +1688,10 @@ def record_roundtrip(toc, uplugin, plugin, plans, ctx, mod_out, layout,
     # pak may carry. So does any Optional-pak package whose name table
     # mentions an overridden base package: the override collapses two names
     # into one, and no inverse map can pull them apart again.
+    # The folder is normally made by the first preview written into it;
+    # a weapon mod has no preview, and the sidecar must land somewhere.
+    os.makedirs(mod_out, exist_ok=True)
+    sink = BlobFile(os.path.join(mod_out, SIDECAR))
     stored_pids = {int.from_bytes(toc.chunk_ids[c][:8], "little")
                    for c in ctx["assets"].values()}
     stored_pids |= ctx.get("blob_only", set())
@@ -1695,8 +1702,8 @@ def record_roundtrip(toc, uplugin, plugin, plans, ctx, mod_out, layout,
             if any(n.lower() in overridden for n in z.names):
                 stored_pids.add(pid)
     stored_chunks = {
-        name_of[pid]: base64.b64encode(
-            zlib.compress(toc.read(packages[pid]["chunk"]), 9)).decode("ascii")
+        name_of[pid]: sink.put(
+            zlib.compress(toc.read(packages[pid]["chunk"]), 9))
         for pid in stored_pids if pid in packages and pid in main_pids}
 
     # The completeness net: anything neither carried by a pak nor
@@ -1712,15 +1719,15 @@ def record_roundtrip(toc, uplugin, plugin, plans, ctx, mod_out, layout,
         if pid not in main_pids or p["name"].lower() in carried \
                 or name_of[pid] in stored_chunks:
             continue
-        stored_chunks[name_of[pid]] = base64.b64encode(
-            zlib.compress(toc.read(p["chunk"]), 9)).decode("ascii")
+        stored_chunks[name_of[pid]] = sink.put(
+            zlib.compress(toc.read(p["chunk"]), 9))
         blobs = []
         for i in range(toc.n):
             cid = toc.chunk_ids[i]
             if cid[11] in (3, 4) and \
                     int.from_bytes(cid[:8], "little") == pid:
-                blobs.append([bytes(cid).hex(), base64.b64encode(
-                    zlib.compress(toc.read(i), 9)).decode("ascii")])
+                blobs.append([bytes(cid).hex(),
+                              sink.put(zlib.compress(toc.read(i), 9))])
         if blobs:
             stored_bulks[name_of[pid]] = blobs
 
@@ -1822,8 +1829,9 @@ def record_roundtrip(toc, uplugin, plugin, plans, ctx, mod_out, layout,
     )
 
     lib_records = [library_record(root, lib_utoc, lib_up, variants,
-                                  optionals, carried)
+                                  optionals, carried, sink)
                    for root, lib_utoc, lib_up in libraries]
+    sink.close()
     record = dict(
         plugin=plugin,
         mount=shape_toc.mount,
@@ -1865,10 +1873,13 @@ def record_roundtrip(toc, uplugin, plugin, plans, ctx, mod_out, layout,
                                 outfits={rel: tuple(v) for rel, v in
                                          visible["outfits"].items()}),
                    restore=pack_restore(record),
+                   sidecar=SIDECAR if sink.n else None,
                    extras=[(rel.split("/")[-1], str(v.get("pak", "")))
                            for rel, v in optionals.items()])
-    print("    recorded  dresscode.json + pictures -- converting the folder "
-          "back restores this mod exactly")
+    print(f"    recorded  {TEMPLATE}"
+          + (f" + {SIDECAR}" if sink.n else "")
+          + " + pictures -- converting the folder back restores this "
+            "mod exactly")
     return 0
 
 
@@ -2696,6 +2707,11 @@ def loose_to_dresscode(source, mods, assume_yes=False):
     # whose every row was a weapon tile this tool built hands those back as
     # override paks, which the fresh build turns into the same tiles again.
     restorable = bool(rt and (rt.get("variants") or rt.get("optionals")))
+    if restorable and needs_sidecar(rt) \
+            and not os.path.exists(os.path.join(source, SIDECAR)):
+        print(f"      {SIDECAR} is not here -- building fresh instead of "
+              "restoring the original")
+        restorable = False
     exact = restorable and restore_matches(rt, meta, outfits, extras) \
         and not variants_edited
     plugin = rt["plugin"] if exact else plugin_id(meta["name"])
@@ -2809,12 +2825,14 @@ def loose_to_dresscode(source, mods, assume_yes=False):
         opt = {rel: by_pak.get(str(v.get("pak", "")).lower())
                for rel, v in (rt.get("optionals") or {}).items()}
         parts_by_folder = {o["folder"]: o["utoc"] for o in outfits}
-        roots = [mkdc.restore(rt, parts_by_folder, out_root, optionals=opt)]
+        bin_path = os.path.join(source, SIDECAR)
+        roots = [mkdc.restore(rt, parts_by_folder, out_root, optionals=opt,
+                              sidecar=bin_path)]
         # Library mods inlined on the way out come back as themselves --
         # every mod exactly as downloaded, from the same paks.
         for lib in rt.get("libraries") or []:
             roots.append(mkdc.restore(lib, parts_by_folder, out_root,
-                                      optionals=opt))
+                                      optionals=opt, sidecar=bin_path))
     else:
         if costume:
             # A recolour carries no model; from here on the game's own,

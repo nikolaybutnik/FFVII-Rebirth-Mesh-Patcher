@@ -27,6 +27,7 @@ import os
 import re
 import struct
 import sys
+import zipfile
 import zlib
 
 import assetreg
@@ -295,7 +296,8 @@ def original_blocks(toc, index):
     return out
 
 
-def restore(rt, parts, out_root, optionals=None, say=print):
+def restore(rt, parts, out_root, optionals=None, say=print,
+            sidecar=None):
     """
     Rebuild the ORIGINAL Dresscode mod these paks came from, from the
     record their dresscode.json carries. Every package returns to its
@@ -306,7 +308,9 @@ def restore(rt, parts, out_root, optionals=None, say=print):
     files -- same content, same checksums, different Oodle output.
 
     `parts`: {outfit folder ("." for the root): its .utoc path};
-    `optionals`: {folder: .utoc path} for the extras in the Optional folders.
+    `optionals`: {folder: .utoc path} for the extras in the Optional folders;
+    `sidecar`: the file holding the packages no pak carries, which the
+    record refers to by entry number (older records hold them inline).
     """
     plugin = rt["plugin"]
     cid = int(rt["cid"])
@@ -447,8 +451,25 @@ def restore(rt, parts, out_root, optionals=None, say=print):
     if stored is None:
         stored = {k: v["data"] for k, v in legacy.items()}
     stored_bulks = rt.get("stored_bulks") or {}
+    kept = [None]
+
+    def verbatim(ref):
+        """The bytes of one stored package: base64 in the record itself
+        (how older records hold them) or an entry in the sidecar."""
+        if isinstance(ref, str):
+            return zlib.decompress(base64.b64decode(ref))
+        if kept[0] is None:
+            if not sidecar or not os.path.exists(sidecar):
+                raise RuntimeError(
+                    f"{os.path.basename(sidecar or 'dresscode.bin')} is "
+                    "missing -- it holds the files the paks do not carry. "
+                    "Put it back beside dresscode.json, or delete "
+                    "dresscode.json to rebuild fresh.")
+            kept[0] = zipfile.ZipFile(sidecar)
+        return zlib.decompress(kept[0].read(str(ref)))
+
     for name, blob in stored.items():
-        data = zlib.decompress(base64.b64decode(blob))
+        data = verbatim(blob)
         rec = recorded(name)
         if rec is None and name in legacy:
             rec = (legacy[name]["exp"], legacy[name]["bun"],
@@ -456,8 +477,8 @@ def restore(rt, parts, out_root, optionals=None, say=print):
         exp, bun, pdeps = rec if rec else (1, 1, [])
         # A stored bulk rides as (cid12, type, None, payload) -- no source
         # container to reread it from.
-        bulks = [(bytes.fromhex(cid_hex), bytes.fromhex(cid_hex)[11], None,
-                  zlib.decompress(base64.b64decode(b)))
+        bulks = [(bytes.fromhex(cid_hex), bytes.fromhex(cid_hex)[11],
+                  None, verbatim(b))
                  for cid_hex, b in stored_bulks.get(name, [])]
         merged[cityhash.package_id(name)] = dict(
             name=name, payload=data, src=None,
@@ -606,6 +627,8 @@ def restore(rt, parts, out_root, optionals=None, say=print):
 
     for toc in tocs:
         toc.close()
+    if kept[0] is not None:
+        kept[0].close()
     say(f"    restored  {plugin}{os.sep}  "
         f"({len(chunks)} chunks, {len(ucas) / (1024 * 1024):,.1f} MB, "
         "original layout)")
