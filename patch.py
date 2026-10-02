@@ -87,6 +87,7 @@ import config
 import deps
 import drops
 import iostore
+import pkgedit
 import repack
 import zen
 
@@ -300,6 +301,22 @@ def mod_source(utoc_path):
     return "mods"
 
 
+def _package_chunks(toc):
+    """The chunks holding packages. Found by chunk type, not by file name:
+    some authors blank every name in a mod's file list -- the game never
+    reads them -- and going by name made such a mod look mesh-free."""
+    return [i for i in range(toc.n) if toc.chunk_type(i) == 2
+            and (not toc.paths.get(i) or toc.paths[i].endswith(".uasset"))]
+
+
+def _shown_as(toc, i, pkg=None):
+    """A package chunk's name for the console: its file name, or with that
+    blanked out, the package's own."""
+    if toc.paths.get(i):
+        return toc.paths[i]
+    return pkgedit.package_name_of(pkg) if pkg else f"chunk {i}"
+
+
 def scan(utoc_path):
     """
     Report which packages in this container hold skeletal meshes, and whether
@@ -316,9 +333,7 @@ def scan(utoc_path):
     found = []
     read_ok = 0     # .uasset chunks that decompressed without error
     parsed = 0      # ...of those, how many parsed as a Zen package
-    for i in sorted(toc.paths):
-        if not toc.paths[i].endswith(".uasset"):
-            continue
+    for i in _package_chunks(toc):
         try:
             data = toc.read(i)
         except Exception as ex:
@@ -326,7 +341,7 @@ def scan(utoc_path):
             # the Oodle DLL is too old to decode this game, every chunk fails --
             # swallowing that would make a mod that NEEDS patching look
             # unaffected. Surface it as an error so mod_status reports [??].
-            found.append(dict(chunk=i, path=toc.paths[i], export="",
+            found.append(dict(chunk=i, path=_shown_as(toc, i), export="",
                               size=0, error=f"could not read: {ex}"))
             continue
         read_ok += 1
@@ -351,12 +366,14 @@ def scan(utoc_path):
                     lod = skm.parse_lod_header(payload, after)
                     needs = MODE["needs"](
                         payload, lod["sections_at"], lod["n_sections"])
-                    found.append(dict(chunk=i, path=toc.paths[i], export=e["name"],
+                    found.append(dict(chunk=i, path=_shown_as(toc, i, pkg),
+                                      export=e["name"],
                                       size=e["size"], n_lods=lod["n_lods"],
                                       n_sections=lod["n_sections"],
                                       needs_fix=needs))
                 except Exception as ex:
-                    found.append(dict(chunk=i, path=toc.paths[i], export=e["name"],
+                    found.append(dict(chunk=i, path=_shown_as(toc, i, pkg),
+                                      export=e["name"],
                                       size=e["size"], error=str(ex)))
                 break
             offset += e["size"]
@@ -493,8 +510,7 @@ def patch_mod(name, utoc_path, out_dir=None, backup_dir=None, no_backup=False):
     in_place = _same_path(dst_dir, src_dir)
 
     # --- Convert every package that needs it.
-    pkg_indices = [i for i in sorted(toc.paths)
-                   if toc.paths[i].endswith(".uasset")]
+    pkg_indices = _package_chunks(toc)
     print(f"    scanning {len(pkg_indices)} files")
     live = sys.stdout.isatty()
 
@@ -524,7 +540,7 @@ def patch_mod(name, utoc_path, out_dir=None, backup_dir=None, no_backup=False):
                 if rep.get("changed"):
                     delta = rep["bytes_removed"]
                     clear()
-                    print(f"    fixed  {toc.paths[i]}  "
+                    print(f"    fixed  {_shown_as(toc, i, pkg)}  "
                           f"({'removed' if delta >= 0 else 'added'} "
                           f"{abs(delta):,} bytes)")
     clear()

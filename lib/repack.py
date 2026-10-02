@@ -130,7 +130,12 @@ def write(toc, new_data, dst_dir, base, src_dir, copy_pak=True, say=print,
     if progress:
         print("\r" + " " * 40 + "\r", end="", flush=True)
 
-    directory = dirindex.build_dir_index(toc.mount, new_paths)
+    # A list whose names were blanked out cannot be rebuilt from them, and
+    # nothing in it changes: chunks keep their places. It goes back as it was.
+    if any(not p for p in toc.paths.values()):
+        directory = toc.dir_raw
+    else:
+        directory = dirindex.build_dir_index(toc.mount, new_paths)
     body, ucas, _offlen, block_table = writer.build_container(
         toc, chunks, toc.block_size)
     head = writer.build_toc_header(toc, len(chunks), len(block_table),
