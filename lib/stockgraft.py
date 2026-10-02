@@ -115,8 +115,8 @@ def _header(u):
 
 
 def _entry(pid, place):
-    """(exports, bundles, imported pids) for a game package, from the store
-    entry of the container that serves it."""
+    """(exports, bundles, imported pids, size flags) for a game package, from
+    the store entry of the container that serves it."""
     got = _header(place["pkg"][0])
     if not got:
         return None
@@ -126,7 +126,8 @@ def _entry(pid, place):
         return None
     _sz, exp, bun = struct.unpack_from(
         "<Qii", raw, info["store_off"] + j * 32)[:3]
-    return exp, bun, conheader.imported_packages(raw, info, j)
+    return (exp, bun, conheader.imported_packages(raw, info, j),
+            conheader.entry_flags(raw, info, j))
 
 
 def _survey(packages, raw_meta, mesh_pids, say=None):
@@ -228,8 +229,8 @@ def _survey(packages, raw_meta, mesh_pids, say=None):
 
 def _record(place, entry):
     """A stock package as a carried record: dict(name, data, exp, bun, deps,
-    bulks), `bulks` entries being (12-byte chunk id, payload)."""
-    exp, bun, deps = entry
+    bulks, flags), `bulks` entries being (12-byte chunk id, payload)."""
+    exp, bun, deps, flags = entry
     u, k = place["pkg"]
     data = _toc(u).read(k)
     bulks = []
@@ -237,7 +238,7 @@ def _record(place, entry):
         bt = _toc(bu)
         bulks.append((bytes(bt.chunk_ids[bk]), bt.read(bk)))
     return dict(name=pkgedit.package_name_of(ZenPackage(data)), data=data,
-                exp=exp, bun=bun, deps=list(deps), bulks=bulks)
+                exp=exp, bun=bun, deps=list(deps), bulks=bulks, flags=flags)
 
 
 def stock_package(name):

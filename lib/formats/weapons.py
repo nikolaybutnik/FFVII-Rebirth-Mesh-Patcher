@@ -388,9 +388,10 @@ def build_tile(plugin, safe, parts, say=print, label=None):
     outright already carries everything, and builds with no game installed:
     that case is never made to depend on one.
     """
-    overrides, metas = {}, {}
+    overrides, metas, oflags = {}, {}, {}
     for toc, pkgs in parts:
         pm = _part_meta(toc, pkgs)
+        pf = conheader.store_flags(toc)
         for pid, p in pkgs.items():
             n = p["name"].lower()
             if not (n.startswith(WEAPON_ROOT) and n.count("/") >= 5):
@@ -399,6 +400,7 @@ def build_tile(plugin, safe, parts, say=print, label=None):
                 continue
             overrides[pid] = (p, toc)
             metas[pid] = pm.get(pid, (1, 1, []))
+            oflags[pid] = pf.get(pid, 0)
     o_pids = set(overrides)
     if not o_pids:
         return {}, []
@@ -525,27 +527,29 @@ def build_tile(plugin, safe, parts, say=print, label=None):
                 p, ptoc = overrides[pid]
                 exp, bun, deps = metas[pid]
                 return (p["name"], ptoc.read(p["chunk"]), exp, bun,
-                        list(deps), _part_bulks(ptoc, pid))
-            dpl, (exp, bun, deps) = entries[pid]
+                        list(deps), _part_bulks(ptoc, pid), oflags[pid])
+            dpl, (exp, bun, deps, flags) = entries[pid]
             u, k = dpl["pkg"]
             t = stockgraft._toc(u)
             bulks = [(bytes(stockgraft._toc(bu).chunk_ids[bk]),
                       stockgraft._toc(bu).read(bk))
                      for bu, bk in dpl["bulks"]]
             return (pkgedit.package_name_of(ZenPackage(t.read(k))),
-                    t.read(k), exp, bun, list(deps), bulks)
+                    t.read(k), exp, bun, list(deps), bulks, flags)
 
         if mod_mesh:
             p, ptoc = overrides[mesh_pid]
             mesh_data = ptoc.read(p["chunk"])
             mesh_bulks = _part_bulks(ptoc, mesh_pid)
+            mesh_flags = oflags[mesh_pid]
         else:
             mesh_data = stockgraft._toc(pl["pkg"][0]).read(pl["pkg"][1])
             mesh_bulks = [(bytes(stockgraft._toc(bu).chunk_ids[bk]),
                            stockgraft._toc(bu).read(bk))
                           for bu, bk in pl["bulks"]]
+            mesh_flags = ment[3]
         pool = {mesh_pid: (mesh_name, mesh_data, ment[0], ment[1],
-                           list(ment[2]), mesh_bulks)}
+                           list(ment[2]), mesh_bulks, mesh_flags)}
         for pid in sorted((chain | needed) - {mesh_pid}):
             pool[pid] = fetch(pid)
 
@@ -568,7 +572,7 @@ def build_tile(plugin, safe, parts, say=print, label=None):
         pkgid_map, import_map, string_map = rename.build_maps(
             pseudo, renames, object_renames)
 
-        for pid, (name, data, exp, bun, deps, bulks) in pool.items():
+        for pid, (name, data, exp, bun, deps, bulks, flags) in pool.items():
             pkg = ZenPackage(data)
             names = [rename.map_path(n, renames, string_map)
                      for n in pkg.names]
@@ -594,7 +598,7 @@ def build_tile(plugin, safe, parts, say=print, label=None):
                     new_source_name=renames.get(source.lower(), source),
                     export_names=exports),
                 deps=[pkgid_map.get(d, d) for d in deps],
-                exp=exp, bun=bun,
+                exp=exp, bun=bun, flags=flags,
                 bulks=[(new_pid.to_bytes(8, "little") + bytes(bid[8:]), bd)
                        for bid, bd in bulks])
 

@@ -325,6 +325,11 @@ def restore(rt, parts, out_root, optionals=None, say=print,
             return e[2], e[3], [int(d) for d in e[4]]
         return None
 
+    def recorded_flags(name):
+        """The size flags the record keeps -- only ever written when set."""
+        e = ent.get(name)
+        return e[5] if e and len(e) >= 6 else 0
+
     sources = []
     for rel, vinfo in rt["variants"].items():
         utoc = parts.get(rel)
@@ -394,13 +399,14 @@ def restore(rt, parts, out_root, optionals=None, say=print,
         hdr = next(toc.read(i) for i in range(toc.n)
                    if toc.chunk_ids[i][11] == 10)
         info = conheader.parse(hdr)
-        entry_meta = {}
+        entry_meta, loose_flags = {}, {}
         for j, pid in enumerate(conheader.package_ids(hdr, info)):
             _sz, exp, bun = struct.unpack_from(
                 "<Qii", hdr, info["store_off"] + j * 32)[:3]
             entry_meta[pid] = (exp, bun, [
                 pid_map.get(p, p)
                 for p in conheader.imported_packages(hdr, info, j)])
+            loose_flags[pid] = conheader.entry_flags(hdr, info, j)
 
         bulks = {}
         for i in range(toc.n):
@@ -445,7 +451,8 @@ def restore(rt, parts, out_root, optionals=None, say=print,
             merged[new_pid] = dict(
                 name=name, payload=payload,
                 src=None if changed else (toc, i),
-                deps=pdeps, exp=exp, bun=bun, bulks=bulks.get(new_pid, []))
+                deps=pdeps, exp=exp, bun=bun, bulks=bulks.get(new_pid, []),
+                flags=recorded_flags(name) or loose_flags.get(pid, 0))
 
     stored = rt.get("stored_chunks")
     legacy = rt.get("reg_chunks", {})
@@ -483,7 +490,8 @@ def restore(rt, parts, out_root, optionals=None, say=print,
                  for cid_hex, b in stored_bulks.get(name, [])]
         merged[cityhash.package_id(name)] = dict(
             name=name, payload=data, src=None,
-            deps=pdeps, exp=exp, bun=bun, bulks=bulks)
+            deps=pdeps, exp=exp, bun=bun, bulks=bulks,
+            flags=recorded_flags(name))
 
     # ---- header chunk in the original's exact shape ----
     id_order = rt["id_order"]
@@ -504,7 +512,8 @@ def restore(rt, parts, out_root, optionals=None, say=print,
     for j, n in enumerate(id_order):
         rec = merged[cityhash.package_id(n)]
         e = ent.get(n) or [j, -1]
-        store += struct.pack("<QiiiI", len(rec["payload"]), rec["exp"],
+        size = len(rec["payload"]) | rec.get("flags", 0)
+        store += struct.pack("<QiiiI", size, rec["exp"],
                              rec["bun"], e[0], e[1] & 0xFFFFFFFF)
         store += struct.pack("<II", 0, 0)
     for j, n in enumerate(id_order):
@@ -917,6 +926,7 @@ def _merge_outfit(b, k, outfit, toc, packages, carried, diff_owner,
     old_mesh_pid = cityhash.package_id(mesh_name)
 
     raw_meta = conheader.store_meta(toc, packages)
+    flags = conheader.store_flags(toc)
     # A recolour IS retouched game files; saying so per colour is noise.
     grafts = stockgraft.plan(packages, raw_meta, {old_mesh_pid},
                              (lambda _m: None) if outfit.get("recolour")
@@ -1016,7 +1026,7 @@ def _merge_outfit(b, k, outfit, toc, packages, carried, diff_owner,
                     "folders were built from different mods")
             continue
         merged[new_pid] = dict(name=name, data=data, deps=pdeps,
-                               exp=exp, bun=bun,
+                               exp=exp, bun=bun, flags=flags.get(pid, 0),
                                bulks=bulks.get(new_pid, []))
 
     if grafts:
@@ -1029,7 +1039,7 @@ def _merge_outfit(b, k, outfit, toc, packages, carried, diff_owner,
             merged[new_pid] = dict(
                 name=renames[g["name"].lower()], data=graft_data[gpid],
                 deps=[pid_map.get(p, p) for p in g["deps"]],
-                exp=g["exp"], bun=g["bun"],
+                exp=g["exp"], bun=g["bun"], flags=g.get("flags", 0),
                 bulks=[(new_pid.to_bytes(8, "little") + bytes(bid[8:]),
                         bdata) for bid, bdata in g["bulks"]])
 
@@ -1472,7 +1482,8 @@ def _container_header(cid, merged):
         rec = merged[pid]
         # LoadOrder is any dense permutation; the field after it is 0xFFFFFFFF
         # in every donor mod AND every CE-cooked pak -- never 0.
-        store += struct.pack("<QiiII", len(rec["data"]), rec["exp"],
+        size = len(rec["data"]) | rec.get("flags", 0)
+        store += struct.pack("<QiiII", size, rec["exp"],
                              rec["bun"], j, 0xFFFFFFFF)
         store += struct.pack("<II", 0, 0)            # views filled below
     for j, pid in enumerate(order):

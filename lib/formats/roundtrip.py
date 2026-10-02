@@ -146,6 +146,13 @@ def restore_matches(rt, meta, outfits, extras=()):
     return md5_of(meta.get("icon")) == rt.get("icon_md5")
 
 
+def _entry_row(e):
+    """A header entry as the record keeps it. The size flags go last and
+    only when set, so a mod without any is recorded exactly as before."""
+    row = [e["lo"], e["pad"], e["exp"], e["bun"], e["deps"]]
+    return row + [e["flags"]] if e["flags"] else row
+
+
 def library_record(root, lib_utoc, lib_uplugin, variants, optionals,
                    carried, sink):
     """
@@ -169,7 +176,8 @@ def library_record(root, lib_utoc, lib_uplugin, variants, optionals,
         entry_of[pid] = dict(
             exp=exp, bun=bun, lo=lo, pad=pad, order=j,
             deps=[str(d) for d in
-                  conheader.imported_packages(hdr, info, j)])
+                  conheader.imported_packages(hdr, info, j)],
+            flags=conheader.entry_flags(hdr, info, j))
     chunk_order, dir_paths = [], []
     for i in range(toc.n):
         t = toc.chunk_ids[i][11]
@@ -218,8 +226,7 @@ def library_record(root, lib_utoc, lib_uplugin, variants, optionals,
         icon_md5=None,
         icon_b64=icon_b64,
         id_order=[name_of.get(pid, "") for pid in ids],
-        entries={name_of[pid]: [e["lo"], e["pad"], e["exp"], e["bun"],
-                                e["deps"]]
+        entries={name_of[pid]: _entry_row(e)
                  for pid, e in entry_of.items() if pid in name_of},
         chunk_order=chunk_order,
         dir_paths=dir_paths,
@@ -335,7 +342,8 @@ def record_roundtrip(toc, uplugin, plugin, plans, ctx, mod_out, layout,
         entry_of[pid] = dict(
             exp=exp, bun=bun, lo=lo, pad=pad, order=j,
             deps=[str(d) for d in
-                  conheader.imported_packages(hdr, info, j)])
+                  conheader.imported_packages(hdr, info, j)],
+            flags=conheader.entry_flags(hdr, info, j))
 
     name_of = {pid: p["name"] for pid, p in packages.items()}
     chunk_order = []
@@ -519,8 +527,7 @@ def record_roundtrip(toc, uplugin, plugin, plans, ctx, mod_out, layout,
         uplugin=base64.b64encode(uplugin_raw).decode("ascii"),
         icon_md5=icon_md5,
         id_order=[name_of.get(pid, "") for pid in ids],
-        entries={name_of[pid]: [e["lo"], e["pad"], e["exp"], e["bun"],
-                                e["deps"]]
+        entries={name_of[pid]: _entry_row(e)
                  for pid, e in entry_of.items() if pid in name_of},
         chunk_order=chunk_order,
         dir_paths=dir_paths,

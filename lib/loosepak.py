@@ -50,7 +50,10 @@ def build_header(container_id, order, records):
         # ExportBundlesSize is how many bytes the loader reads for this
         # package and must equal the chunk exactly; stale by even 8 it
         # dereferences null on startup.
+        # Its top bits are flags the game's loader relies on (animations
+        # and sounds set bit 62; dropped, loading one crashes the game).
         size = len(rec["data"]) if "data" in rec else rec["size"]
+        size |= rec.get("flags", 0)
         store += struct.pack("<QiiII", size, rec["exp"],
                              rec["bun"], j, 0xFFFFFFFF)
         store += struct.pack("<II", 0, 0)       # ImportedPackages view
@@ -109,7 +112,8 @@ def write(order, records, out_dir, base, template, container_name=None):
         records     {package ID: dict(name, data, exp, bun, deps, bulks)},
                     `bulks` being chunk specs from `copied` or `fresh`. A
                     record may carry `blocks`/`size`/`meta` of its own in
-                    place of `data`, for a package that came back unchanged.
+                    place of `data`, for a package that came back unchanged,
+                    and `flags`, the stock ExportBundlesSize's top bits.
         template    an open Toc whose compression settings are copied
 
     `container_name` sets the container ID; without it the base name does.

@@ -155,8 +155,29 @@ def imported_packages(data, info, index):
 
 
 # ExportBundlesSize keeps flags in its top bits -- localized packages in the
-# game's own containers set one. Only the low bits are the length.
+# game's own containers set one, and so do animations and sounds. Only the
+# low bits are the length; anything that rewrites an entry keeps the rest.
 SIZE_MASK = (1 << 62) - 1
+
+
+def entry_flags(data, info, index):
+    """The flag bits of one store entry's ExportBundlesSize -- 0 for most."""
+    size = struct.unpack_from("<Q", data, info["store_off"] + index * 32)[0]
+    return size & ~SIZE_MASK
+
+
+def store_flags(toc):
+    """{pid: flag bits} for the packages of a container that carry any."""
+    hdr = read(toc)
+    info = parse(hdr) if hdr else None
+    if info is None:
+        return {}
+    out = {}
+    for j, pid in enumerate(package_ids(hdr, info)):
+        flags = entry_flags(hdr, info, j)
+        if flags:
+            out[pid] = flags
+    return out
 
 
 def remap(data, pkgid_map, sizes=None):

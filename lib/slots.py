@@ -358,6 +358,7 @@ def repoint(toc, packages, kind, choices, out_dir, base, say=print,
     the rest get a copy of its per-slot files. Returns the .utoc path.
     """
     meta = conheader.store_meta(toc, packages)
+    flags = conheader.store_flags(toc)
 
     # Only packages the PAK carries are renamed. A mesh also refers to stock
     # files in its old slot's folder -- its skeleton, its petrify variant --
@@ -383,13 +384,13 @@ def repoint(toc, packages, kind, choices, out_dir, base, say=print,
 
     order, records = [], {}
 
-    def keep(new_pid, name, chunk, exp, bun, deps, bulks):
+    def keep(new_pid, name, chunk, exp, bun, deps, bulks, flags):
         if new_pid in records:
             say(f"      note: two of your choices both want {name} -- "
                 "keeping the first")
             return
         records[new_pid] = dict(chunk, name=name, exp=exp, bun=bun,
-                                deps=deps, bulks=bulks)
+                                deps=deps, bulks=bulks, flags=flags)
         order.append(new_pid)
 
     def rewritten(pid, name, chunk_renames, chunk_maps, chunk_objects,
@@ -411,7 +412,7 @@ def repoint(toc, packages, kind, choices, out_dir, base, say=print,
              rewritten(pid, p["name"], renames, maps,
                        objects.get(p["name"].lower()), new_pid),
              exp, bun, [pkgid_map.get(d, d) for d in deps],
-             _bulks(toc, pid, new_pid))
+             _bulks(toc, pid, new_pid), flags.get(pid, 0))
 
     # Extra slots: the same per-slot files again, under the other slot's
     # name. Their own rename map differs from the shared one in exactly
@@ -448,7 +449,7 @@ def repoint(toc, packages, kind, choices, out_dir, base, say=print,
                      rewritten(pid, name, dup_renames, dup_maps,
                                dup_objects.get(name.lower()), new_pid),
                      exp, bun, [dup_pkgids.get(d, d) for d in deps],
-                     _bulks(toc, pid, new_pid))
+                     _bulks(toc, pid, new_pid), flags.get(pid, 0))
 
     lost = lost_overrides(moved)
     if lost:

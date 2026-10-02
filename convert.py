@@ -289,6 +289,7 @@ def merge_loose(utocs, out_dir, base, extra=None):
         if not packages:
             continue        # a mips-only pak: its chunks are in bulks_all
         entry_meta = conheader.store_meta(toc, packages)
+        flags = conheader.store_flags(toc)
         for pid, pkg in packages.items():
             if pid in merged:
                 continue
@@ -298,7 +299,7 @@ def merge_loose(utocs, out_dir, base, extra=None):
             # INPUT only, so its index paths just have to be self-consistent.
             merged[pid] = dict(
                 name=pkg["name"], data=toc.read(pkg["chunk"]),
-                exp=exp, bun=bun, deps=list(deps),
+                exp=exp, bun=bun, deps=list(deps), flags=flags.get(pid, 0),
                 bulks=[loosepak.copied(bt, i, template=template)
                        for bt, i in bulks_all.get(pid, [])])
             order.append(pid)
